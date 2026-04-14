@@ -1,0 +1,18 @@
+[
+  {
+    "label": "Dashboard",
+    "path": "/",
+    "icon": "dashboard"
+  },
+  {
+    "label": "Workspace",
+    "icon": "workspace",
+    "children": [
+      {
+        "label": "Settings",
+        "path": "/settings",
+        "icon": "settings"
+      }
+    ]
+  }
+]

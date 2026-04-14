@@ -36,6 +36,9 @@
 - 在开始写应用源码之前，先读取当前工作目录里已经存在的 starter 脚手架文件，以及 `.deepagents/references/generated-app-architecture.md`。
 - 模板的 `starter` 脚手架已经预先复制到项目根目录。你必须优先读取和编辑这些现有 scaffold 文件，而不是把项目当成空目录从零开始生成。
 - starter 中的 `app/layout.tsx`、`app/(admin)`、`app/(full-width-pages)`、`context/`、`layout/`、`components/common/ThemeToggleButton.tsx` 和 TailAdmin 风格的 `app/globals.css` 构成了默认 UI 框架。后续生成必须沿用这些结构扩展页面。
+- 侧边栏菜单的唯一事实来源是 `config/sidebar-menu.json`。如果需要新增、删除或重排菜单，优先修改这个 JSON，而不是把菜单项硬编码回 `layout/AppSidebar.tsx`。
+- `config/sidebar-menu.json` 最多支持二级菜单：顶级菜单以及其子菜单。不要生成三级或更深层级的导航结构。
+- 侧边栏图标也通过 `config/sidebar-menu.json` 的 `icon` 字段配置。优先复用 starter 里已有的图标 key；如果写入新的 icon key，sidebar 会自动回退到通用图标，因此不要为了菜单调整去改 `layout/AppSidebar.tsx`。
 - 生成新的管理页时，优先复用 TailAdmin 的页面节奏、侧边栏、粘性头部、卡片、表格和表单样式，不要写成脱离现有 shell 的独立页面。
 - 对于 starter 中已存在的文件，默认执行策略是“先读再改”；只有 spec 需要的新文件或实体 CRUD 文件，才新增创建。
 - 你必须先梳理 starter 中已经存在的基础结构，再按此结构逐步补充和扩展项目文件；不要脱离 starter 另起一套结构。

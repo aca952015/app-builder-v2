@@ -24,4 +24,6 @@ The default local database is SQLite at `prisma/dev.db`.
 - Prisma schema and seed data
 - Dashboard content and entity navigation
 - Entity CRUD pages under `app/<entity>/`
+- Sidebar navigation in `config/sidebar-menu.json`
+- Sidebar supports at most two levels; unknown `icon` keys fall back to a generic item icon
 - Final `app-builder-report.md`
