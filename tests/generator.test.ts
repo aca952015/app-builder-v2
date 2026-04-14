@@ -88,6 +88,7 @@ test("generateApplication stages starter scaffold and artifacts", async () => {
 
     assert.match(packageJson, /"next"/);
     assert.match(packageJson, /"db:init"/);
+    assert.match(packageJson, /"@tailwindcss\/postcss"/);
     assert.match(npmrc, /workspaces=false/);
     assert.match(gitignore, /node_modules/);
     assert.match(envExample, /file:\.\/dev\.db/);
@@ -97,6 +98,7 @@ test("generateApplication stages starter scaffold and artifacts", async () => {
     assert.match(stagedTemplateManifest, /"projectRenderer": "full-stack"/);
     assert.match(stagedSystemPrompt, /write_todos/);
     assert.match(stagedSystemPrompt, /starter/);
+    assert.match(stagedSystemPrompt, /TailAdmin/);
     assert.match(sourcePrdSnapshot, /# Field Ops Planner/);
     assert.match(normalizedSpecSnapshot, /"appName": "Field Ops Planner"/);
     assert.match(analysisSnapshot, /PRD 分析稿|产品目标/);
@@ -132,6 +134,7 @@ test("full-stack template starter copies scaffold files into the output root", a
 
     assert.match(starterPackage, /"next"/);
     assert.match(starterPackage, /"db:init"/);
+    assert.match(starterPackage, /"@tailwindcss\/postcss"/);
     assert.match(starterLayout, /Generated App/);
     assert.match(starterEnv, /file:\.\/dev\.db/);
     assert.match(starterSchema, /provider = "sqlite"/);

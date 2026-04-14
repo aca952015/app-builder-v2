@@ -1,16 +1,22 @@
-import Link from "next/link";
-
 export default function NotFoundPage() {
   return (
-    <section className="grid min-h-[50vh] place-items-center">
-      <div className="grid max-w-md gap-4 rounded-[2rem] border border-slate-200 bg-white p-8 text-center shadow-sm">
-        <p className="text-sm font-semibold uppercase tracking-[0.3em] text-amber-700">404</p>
-        <h1 className="text-3xl font-semibold text-slate-950">Record not found</h1>
-        <p className="text-sm text-slate-600">The generated route could not find the requested resource.</p>
-        <Link href="/" className="rounded-full bg-slate-950 px-5 py-3 text-sm font-semibold text-white">
-          Back to dashboard
-        </Link>
+    <div className="min-h-screen grid place-items-center bg-gray-50 px-6 dark:bg-gray-900">
+      <div className="max-w-xl rounded-2xl border border-gray-200 bg-white p-8 text-center shadow-theme-lg dark:border-gray-800 dark:bg-white/[0.03]">
+        <span className="inline-flex rounded-full bg-error-50 px-3 py-1 text-theme-xs font-medium text-error-600 dark:bg-error-500/15 dark:text-error-400">
+          404
+        </span>
+        <h1 className="mt-5 text-3xl font-semibold text-gray-900 dark:text-white">Page not found</h1>
+        <p className="mt-3 text-theme-sm text-gray-500 dark:text-gray-400">
+          The TailAdmin starter could not find the requested route. Generated pages should keep the existing
+          admin or full-width route grouping.
+        </p>
+        <a
+          href="/"
+          className="mt-6 inline-flex items-center justify-center rounded-lg bg-brand-500 px-5 py-3 text-sm font-medium text-white hover:bg-brand-600"
+        >
+          Return to dashboard
+        </a>
       </div>
-    </section>
+    </div>
   );
 }

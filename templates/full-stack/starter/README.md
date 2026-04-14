@@ -12,6 +12,12 @@ fills in product-specific content.
 
 The default local database is SQLite at `prisma/dev.db`.
 
+## UI framework
+
+- Next.js App Router
+- TailAdmin Next.js admin dashboard structure
+- Tailwind CSS v4 tokens and utilities from the official TailAdmin example
+
 ## What the agent should customize
 
 - Application name, summary, and metadata
