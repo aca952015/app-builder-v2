@@ -18,7 +18,7 @@ async function pathExists(candidatePath: string): Promise<boolean> {
   }
 }
 
-async function resolveTemplateRoot(): Promise<string> {
+async function resolveTemplateRoot(templateId?: string): Promise<string> {
   const candidates = [process.cwd(), moduleDirectory()];
 
   for (const candidate of candidates) {
@@ -27,7 +27,26 @@ async function resolveTemplateRoot(): Promise<string> {
     while (true) {
       const templateRoot = path.join(current, "templates");
       if (await pathExists(templateRoot)) {
-        return templateRoot;
+        if (!templateId) {
+          return templateRoot;
+        }
+
+        const manifestPath = path.join(templateRoot, templateId, "template.json");
+        if (await pathExists(manifestPath)) {
+          return templateRoot;
+        }
+      }
+
+      const distTemplateRoot = path.join(current, "dist", "templates");
+      if (await pathExists(distTemplateRoot)) {
+        if (!templateId) {
+          return distTemplateRoot;
+        }
+
+        const manifestPath = path.join(distTemplateRoot, templateId, "template.json");
+        if (await pathExists(manifestPath)) {
+          return distTemplateRoot;
+        }
       }
 
       const parent = path.dirname(current);
@@ -153,7 +172,7 @@ async function ensureFileExists(filePath: string, fieldName: string): Promise<vo
 }
 
 export async function loadTemplatePack(templateId = "full-stack"): Promise<TemplatePack> {
-  const templateRoot = await resolveTemplateRoot();
+  const templateRoot = await resolveTemplateRoot(templateId);
   const directory = path.join(templateRoot, templateId);
   const manifestPath = path.join(directory, "template.json");
 
@@ -180,7 +199,7 @@ export async function loadTemplatePack(templateId = "full-stack"): Promise<Templ
 }
 
 export async function resolveTemplateFilePath(templateId: string, relativePath: string): Promise<string> {
-  const templateRoot = await resolveTemplateRoot();
+  const templateRoot = await resolveTemplateRoot(templateId);
   return path.join(templateRoot, templateId, relativePath);
 }
 
@@ -188,11 +207,28 @@ export async function stageTemplatePack(
   template: TemplatePack,
   workspace: OutputWorkspace,
 ): Promise<TemplateLock> {
-  const entries = await fs.readdir(template.directory);
-  for (const entry of entries) {
+  await fs.copyFile(
+    template.systemPromptPath,
+    workspace.deepagentsPromptSnapshotPath,
+  );
+
+  await fs.copyFile(
+    template.manifestPath,
+    path.join(workspace.deepagentsTemplateDirectory, path.basename(template.manifestPath)),
+  );
+
+  if (template.referencesDirectory && await pathExists(template.referencesDirectory)) {
     await fs.cp(
-      path.join(template.directory, entry),
-      path.join(workspace.deepagentsTemplateDirectory, entry),
+      template.referencesDirectory,
+      path.join(workspace.deepagentsTemplateDirectory, "references"),
+      { recursive: true },
+    );
+  }
+
+  if (template.skillsDirectory && await pathExists(template.skillsDirectory)) {
+    await fs.cp(
+      template.skillsDirectory,
+      path.join(workspace.deepagentsTemplateDirectory, "skills"),
       { recursive: true },
     );
   }

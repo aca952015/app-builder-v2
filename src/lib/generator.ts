@@ -140,7 +140,7 @@ async function collectGeneratedFiles(outputDirectory: string): Promise<string[]>
       const relativePath = path.relative(outputDirectory, absolutePath).split(path.sep).join("/");
 
       if (entry.isDirectory()) {
-        if (relativePath === ".deepagents") {
+        if (relativePath === ".deepagents" || relativePath === ".git") {
           continue;
         }
         await visit(absolutePath);
@@ -238,7 +238,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
     templateName: template.name,
     templateVersion: template.version,
     templateDirectory: workspace.deepagentsTemplateDirectory,
-    templateSystemPromptPath: path.join(workspace.deepagentsTemplateDirectory, template.systemPromptRelativePath),
+    templateSystemPromptPath: template.systemPromptPath,
     sourcePrdSnapshotPath: workspace.sourcePrdSnapshotPath,
     normalizedSpecSnapshotPath: workspace.normalizedSpecSnapshotPath,
     deepagentsAnalysisPath: workspace.deepagentsAnalysisPath,

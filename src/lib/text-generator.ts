@@ -18,7 +18,7 @@ const generatedProjectSchema = z.object({
 
 const SANDBOX_ALPHA_WARNING =
   "langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.";
-const DEEPAGENTS_TIMEOUT_MS = 600_000;
+const DEEPAGENTS_IDLE_TIMEOUT_MS = 600_000;
 const DEFAULT_DEEPAGENTS_STREAM_MODES = ["updates", "messages", "tools", "values"] as const;
 const VALID_DEEPAGENTS_STREAM_MODES = new Set<string>(DEFAULT_DEEPAGENTS_STREAM_MODES);
 
@@ -122,6 +122,14 @@ type DeepAgentsTraceState = {
   lastNonTtyTodoSignature: string;
   lastNonTtyNarrative: string;
   logFilePath?: string;
+};
+
+type ToolCallDetail = {
+  id: string | undefined;
+  name: string | undefined;
+  args: unknown;
+  status: unknown;
+  result: unknown;
 };
 
 function getObjectKeys(value: unknown): string[] {
@@ -284,14 +292,6 @@ function renderTodoBoard(trace: DeepAgentsTraceState): void {
   }
 }
 
-function writeTraceLog(logFilePath: string | undefined, lines: string[]): void {
-  if (!logFilePath) {
-    return;
-  }
-
-  appendFileSync(logFilePath, `[${new Date().toISOString()}]\n${lines.join("\n")}\n\n`, "utf8");
-}
-
 function formatUnknownError(error: unknown, depth = 0): string {
   const indent = "  ".repeat(depth);
 
@@ -330,6 +330,145 @@ async function writeErrorLog(logFilePath: string | undefined, error: unknown): P
   await fs.appendFile(logFilePath, content, "utf8");
 }
 
+function formatTracePayload(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return inspect(value, {
+    depth: 10,
+    breakLength: 100,
+    compact: false,
+    sorted: true,
+  });
+}
+
+function indentMultiline(text: string, prefix = "  "): string {
+  return text
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
+}
+
+function formatTraceSection(title: string, content: string): string {
+  return `${title}\n${indentMultiline(content)}`;
+}
+
+function extractToolCallDetails(value: unknown): ToolCallDetail[] {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+  const candidates = ["tool_calls", "toolCalls", "calls"]
+    .map((key) => record[key])
+    .find((candidate) => Array.isArray(candidate));
+
+  if (!Array.isArray(candidates)) {
+    return [];
+  }
+
+  return candidates
+    .filter((candidate) => candidate && typeof candidate === "object")
+    .map((candidate) => {
+      const detail = candidate as Record<string, unknown>;
+      return {
+        id: typeof detail.id === "string" ? detail.id : undefined,
+        name:
+          typeof detail.name === "string"
+            ? detail.name
+            : typeof detail.tool === "string"
+              ? detail.tool
+              : typeof detail.tool_name === "string"
+                ? detail.tool_name
+                : typeof detail.toolName === "string"
+                  ? detail.toolName
+                  : undefined,
+        args:
+          detail.args ??
+          detail.arguments ??
+          detail.input ??
+          detail.payload,
+        status: typeof detail.status === "string" ? detail.status : undefined,
+        result: detail.result ?? detail.output,
+      };
+    });
+}
+
+export function formatDeepAgentsTraceEntry(mode: string, payload: unknown, summary: string): string {
+  const timestamp = new Date().toISOString();
+  const sections = [`=== ${timestamp} | ${mode.toUpperCase()} ===`, formatTraceSection("Summary", summary)];
+
+  if (mode === "messages") {
+    const messageText =
+      Array.isArray(payload) && payload.length > 0 ? extractMessageText(payload[0]) : extractMessageText(payload);
+    if (messageText && messageText.trim()) {
+      sections.push(formatTraceSection("Message", messageText.trim()));
+    }
+  }
+
+  if (mode === "tools") {
+    const toolCalls = extractToolCallDetails(payload);
+    if (toolCalls.length > 0) {
+      sections.push(
+        formatTraceSection(
+          "Tool Calls",
+          toolCalls
+            .map((call, index) => {
+              const lines = [`${index + 1}. ${call.name ?? "unknown"}`];
+              if (call.id) {
+                lines.push(`id: ${call.id}`);
+              }
+              if (call.status) {
+                lines.push(`status: ${call.status}`);
+              }
+              if (call.args !== undefined) {
+                lines.push("args:");
+                lines.push(indentMultiline(formatTracePayload(call.args), "  "));
+              }
+              if (call.result !== undefined) {
+                lines.push("result:");
+                lines.push(indentMultiline(formatTracePayload(call.result), "  "));
+              }
+              return lines.join("\n");
+            })
+            .join("\n\n"),
+        ),
+      );
+    }
+  }
+
+  if (mode === "updates") {
+    const keys = getObjectKeys(payload);
+    if (keys.length > 0) {
+      sections.push(formatTraceSection("Updated Keys", keys.join(", ")));
+    }
+  }
+
+  if (mode === "values") {
+    const valueSummary = summarizeValuePayload(payload);
+    if (valueSummary) {
+      sections.push(formatTraceSection("Value Summary", valueSummary));
+    }
+  }
+
+  sections.push(formatTraceSection("Payload", formatTracePayload(payload)));
+  return `${sections.join("\n\n")}\n\n`;
+}
+
+function writeSystemTraceEvent(
+  logFilePath: string | undefined,
+  mode: string,
+  payload: unknown,
+  summary: string,
+): void {
+  if (!logFilePath) {
+    return;
+  }
+
+  appendFileSync(logFilePath, formatDeepAgentsTraceEntry(mode, payload, summary), "utf8");
+}
+
 function updateTodoBoard(
   trace: DeepAgentsTraceState,
   payload: unknown,
@@ -340,7 +479,6 @@ function updateTodoBoard(
     trace.todos = todos;
   }
   trace.lastNarrative = narrative;
-  writeTraceLog(trace.logFilePath, buildTodoBoardLines(trace));
   renderTodoBoard(trace);
 }
 
@@ -415,8 +553,12 @@ function logDeepAgentsChunk(mode: string, payload: unknown, trace: DeepAgentsTra
       const [message] = payload;
       const text = extractMessageText(message);
       if (text && text.trim()) {
-        updateTodoBoard(trace, payload, `模型正在生成内容，最近一段输出约 ${text.trim().length} 个字符。`);
+        const summary = `模型正在生成内容，最近一段输出约 ${text.trim().length} 个字符。`;
+        updateTodoBoard(trace, payload, summary);
+        writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
       }
+    } else {
+      writeSystemTraceEvent(trace.logFilePath, mode, payload, "收到一条消息事件。");
     }
     return;
   }
@@ -433,9 +575,13 @@ function logDeepAgentsChunk(mode: string, payload: unknown, trace: DeepAgentsTra
           trace.seenToolCalls.add(toolName);
         }
       }
-      updateTodoBoard(trace, payload, `正在调用工具：${toolNames.join("、")}。`);
+      const summary = `正在调用工具：${toolNames.join("、")}。`;
+      updateTodoBoard(trace, payload, summary);
+      writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
     } else {
-      updateTodoBoard(trace, payload, "正在执行一次工具调用。");
+      const summary = "正在执行一次工具调用。";
+      updateTodoBoard(trace, payload, summary);
+      writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
     }
     return;
   }
@@ -447,9 +593,13 @@ function logDeepAgentsChunk(mode: string, payload: unknown, trace: DeepAgentsTra
 
     const keys = getObjectKeys(payload);
     if (keys.length > 0) {
-      updateTodoBoard(trace, payload, `Agent 状态已更新，节点包括：${keys.join("、")}。`);
+      const summary = `Agent 状态已更新，节点包括：${keys.join("、")}。`;
+      updateTodoBoard(trace, payload, summary);
+      writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
     } else {
-      updateTodoBoard(trace, payload, "Agent 状态已更新。");
+      const summary = "Agent 状态已更新。";
+      updateTodoBoard(trace, payload, summary);
+      writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
     }
     return;
   }
@@ -458,13 +608,18 @@ function logDeepAgentsChunk(mode: string, payload: unknown, trace: DeepAgentsTra
     const summary = summarizeValuePayload(payload);
     if (summary) {
       updateTodoBoard(trace, payload, summary);
+      writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
     } else {
-      updateTodoBoard(trace, payload, "已收到一份结果快照。");
+      const fallbackSummary = "已收到一份结果快照。";
+      updateTodoBoard(trace, payload, fallbackSummary);
+      writeSystemTraceEvent(trace.logFilePath, mode, payload, fallbackSummary);
     }
     return;
   }
 
-  updateTodoBoard(trace, payload, `收到 ${mode} 事件。`);
+  const summary = `收到 ${mode} 事件。`;
+  updateTodoBoard(trace, payload, summary);
+  writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
 }
 
 async function resolveModel(model: string) {
@@ -490,21 +645,44 @@ async function resolveModel(model: string) {
   return new ChatOpenAI(options);
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+export async function withActivityTimeout<T>(
+  operation: (signalActivity: () => void) => Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${ms}ms.`));
-    }, ms);
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
 
-    promise.then(
-      (value) => {
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
         clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
+      }
+      callback();
+    };
+
+    const scheduleTimeout = () => {
+      if (timer) {
         clearTimeout(timer);
-        reject(error);
-      },
+      }
+      timer = setTimeout(() => {
+        finish(() => reject(new Error(`${label} timed out after ${ms}ms without activity.`)));
+      }, ms);
+    };
+
+    scheduleTimeout();
+
+    operation(() => {
+      if (!settled) {
+        scheduleTimeout();
+      }
+    }).then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
     );
   });
 }
@@ -513,6 +691,7 @@ async function streamDeepAgentWithLogs(
   agent: { stream: (...args: any[]) => Promise<AsyncIterable<unknown>> },
   state: { messages: Array<{ role: string; content: string }> },
   runtime?: TextGeneratorRuntime,
+  signalActivity?: () => void,
 ): Promise<unknown> {
   const stream = await agent.stream(state, {
     streamMode: resolveDeepagentsStreamModes(),
@@ -535,10 +714,12 @@ async function streamDeepAgentWithLogs(
     trace.logFilePath = runtime.deepagentsLogPath;
   }
 
-  writeTraceLog(trace.logFilePath, buildTodoBoardLines(trace));
+  writeSystemTraceEvent(trace.logFilePath, "lifecycle", { state }, "准备启动生成流程。");
   renderTodoBoard(trace);
 
   for await (const chunk of stream) {
+    signalActivity?.();
+
     if (Array.isArray(chunk) && chunk.length === 2 && typeof chunk[0] === "string") {
       const [mode, payload] = chunk as [string, unknown];
       logDeepAgentsChunk(mode, payload, trace);
@@ -548,12 +729,14 @@ async function streamDeepAgentWithLogs(
       continue;
     }
 
-    updateTodoBoard(trace, chunk, "收到一条未分类事件。");
+    const summary = "收到一条未分类事件。";
+    updateTodoBoard(trace, chunk, summary);
+    writeSystemTraceEvent(trace.logFilePath, "unclassified", chunk, summary);
     lastValuesChunk = chunk;
   }
 
   trace.lastNarrative = "生成流程结束。";
-  writeTraceLog(trace.logFilePath, buildTodoBoardLines(trace));
+  writeSystemTraceEvent(trace.logFilePath, "lifecycle", { result: lastValuesChunk }, "生成流程结束。");
   renderTodoBoard(trace);
   return lastValuesChunk;
 }
@@ -634,9 +817,9 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         ],
       };
 
-      const result = await withTimeout(
-        streamDeepAgentWithLogs(agent as any, state, runtime),
-        DEEPAGENTS_TIMEOUT_MS,
+      const result = await withActivityTimeout(
+        (signalActivity) => streamDeepAgentWithLogs(agent as any, state, runtime, signalActivity),
+        DEEPAGENTS_IDLE_TIMEOUT_MS,
         "deepagents generation",
       );
 

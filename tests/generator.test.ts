@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -47,18 +47,22 @@ test("generateApplication stages starter scaffold and artifacts", async () => {
     assert.ok(result.files.includes("generated/marker.txt"));
 
     const packageJson = await readFile(path.join(result.outputDirectory, "package.json"), "utf8");
+    const gitHead = await readFile(path.join(result.outputDirectory, ".git/HEAD"), "utf8");
     const npmrc = await readFile(path.join(result.outputDirectory, ".npmrc"), "utf8");
     const gitignore = await readFile(path.join(result.outputDirectory, ".gitignore"), "utf8");
     const envExample = await readFile(path.join(result.outputDirectory, ".env.example"), "utf8");
     const schema = await readFile(path.join(result.outputDirectory, "prisma/schema.prisma"), "utf8");
     const seed = await readFile(path.join(result.outputDirectory, "prisma/seed.ts"), "utf8");
+    const sidebarMenu = JSON.parse(
+      await readFile(path.join(result.outputDirectory, "config/sidebar-menu.json"), "utf8"),
+    ) as Array<Record<string, unknown>>;
     const templateLock = await readFile(path.join(result.outputDirectory, "template-lock.json"), "utf8");
     const stagedTemplateManifest = await readFile(
       path.join(result.outputDirectory, ".deepagents/template.json"),
       "utf8",
     );
-    const stagedSystemPrompt = await readFile(
-      path.join(result.outputDirectory, ".deepagents/prompts/system-prompt.md"),
+    const promptSnapshot = await readFile(
+      path.join(result.outputDirectory, ".deepagents/system-prompt.md"),
       "utf8",
     );
     const sourcePrdSnapshot = await readFile(
@@ -87,6 +91,7 @@ test("generateApplication stages starter scaffold and artifacts", async () => {
     );
 
     assert.match(packageJson, /"next"/);
+    assert.match(gitHead, /ref: refs\/heads\/main/);
     assert.match(packageJson, /"db:init"/);
     assert.match(packageJson, /"@tailwindcss\/postcss"/);
     assert.match(npmrc, /workspaces=false/);
@@ -94,11 +99,14 @@ test("generateApplication stages starter scaffold and artifacts", async () => {
     assert.match(envExample, /file:\.\/dev\.db/);
     assert.match(schema, /provider = "sqlite"/);
     assert.match(seed, /demo@example\.com/);
+    assert.equal(sidebarMenu.length > 0, true);
+    assert.equal(sidebarMenu.some((item) => item.label === "Workspace"), true);
     assert.match(templateLock, /"id": "full-stack"/);
     assert.match(stagedTemplateManifest, /"projectRenderer": "full-stack"/);
-    assert.match(stagedSystemPrompt, /write_todos/);
-    assert.match(stagedSystemPrompt, /starter/);
-    assert.match(stagedSystemPrompt, /TailAdmin/);
+    assert.match(promptSnapshot, /write_todos/);
+    assert.match(promptSnapshot, /starter/);
+    assert.match(promptSnapshot, /TailAdmin/);
+    assert.match(promptSnapshot, /config\/sidebar-menu\.json/);
     assert.match(sourcePrdSnapshot, /# Field Ops Planner/);
     assert.match(normalizedSpecSnapshot, /"appName": "Field Ops Planner"/);
     assert.match(analysisSnapshot, /PRD 分析稿|产品目标/);
@@ -109,6 +117,9 @@ test("generateApplication stages starter scaffold and artifacts", async () => {
     assert.match(generatedSpecSnapshot, /## 数据模型/);
     assert.doesNotMatch(deepagentsConfig, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.doesNotMatch(stagedReference, /\/Users\/aca\/dev\/app-builder-v2/);
+    assert.equal(result.files.some((file) => file.startsWith(".git/")), false);
+    await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/prompts")));
+    await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/starter")));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -126,11 +137,15 @@ test("full-stack template starter copies scaffold files into the output root", a
     assert.ok(copied.includes("lib/session.ts"));
     assert.ok(copied.includes("prisma/schema.prisma"));
     assert.ok(copied.includes("prisma/seed.ts"));
+    assert.ok(copied.includes("config/sidebar-menu.json"));
 
     const starterPackage = await readFile(path.join(tempRoot, "package.json"), "utf8");
     const starterLayout = await readFile(path.join(tempRoot, "app/layout.tsx"), "utf8");
     const starterEnv = await readFile(path.join(tempRoot, ".env.example"), "utf8");
     const starterSchema = await readFile(path.join(tempRoot, "prisma/schema.prisma"), "utf8");
+    const starterMenu = JSON.parse(
+      await readFile(path.join(tempRoot, "config/sidebar-menu.json"), "utf8"),
+    ) as Array<Record<string, unknown>>;
 
     assert.match(starterPackage, /"next"/);
     assert.match(starterPackage, /"db:init"/);
@@ -138,6 +153,8 @@ test("full-stack template starter copies scaffold files into the output root", a
     assert.match(starterLayout, /Generated App/);
     assert.match(starterEnv, /file:\.\/dev\.db/);
     assert.match(starterSchema, /provider = "sqlite"/);
+    assert.equal(Array.isArray(starterMenu), true);
+    assert.equal(starterMenu.some((item) => item.label === "Dashboard"), true);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -163,10 +180,22 @@ test("generateApplication creates a session workspace under .out by default", as
       path.join(result.outputDirectory, ".deepagents/config.json"),
       "utf8",
     );
+    const outputEntries = await readdir(result.outputDirectory);
 
     assert.match(deepagentsConfig, new RegExp(result.sessionId));
+    assert.equal(outputEntries.includes(".git"), true);
   } finally {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("starter sidebar source explicitly guards against third-level navigation", async () => {
+  const sidebarSource = await readFile(
+    path.resolve(process.cwd(), "templates/full-stack/starter/config/sidebar-menu.ts"),
+    "utf8",
+  );
+
+  assert.match(sidebarSource, /supports at most two menu levels/);
+  assert.match(sidebarSource, /import sidebarMenu from "\.\/sidebar-menu\.json"/);
 });

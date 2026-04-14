@@ -1,12 +1,27 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { ensureEmptyOutputDirectory } from "./project-writer.js";
 import { OutputWorkspace } from "./types.js";
 
+const execFileAsync = promisify(execFile);
+
 function createSessionId(): string {
   return randomUUID();
+}
+
+async function initializeGitRepository(outputDirectory: string): Promise<void> {
+  try {
+    await execFileAsync("git", ["init", "--quiet", "--initial-branch=main"], {
+      cwd: outputDirectory,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to initialize git repository in ${outputDirectory}: ${message}`);
+  }
 }
 
 export async function prepareOutputWorkspace(options: {
@@ -20,6 +35,7 @@ export async function prepareOutputWorkspace(options: {
       : path.resolve(process.cwd(), ".out", sessionId);
 
   await ensureEmptyOutputDirectory(outputDirectory, options.force ?? false);
+  await initializeGitRepository(outputDirectory);
 
   const deepagentsDirectory = path.join(outputDirectory, ".deepagents");
   await fs.mkdir(deepagentsDirectory, { recursive: true });

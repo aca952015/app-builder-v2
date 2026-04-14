@@ -2,14 +2,30 @@ import { EntityDraft, ParsedPrd, ParsedSection } from "./types.js";
 
 const HEADING_PATTERN = /^(#{1,6})\s+(.+?)\s*$/;
 const BULLET_PATTERN = /^\s*[-*+]\s+(.*)$/;
-const NUMBERED_PATTERN = /^\s*\d+\.\s+(.*)$/;
+const NUMBERED_PATTERN =
+  /^\s*(?:\d+(?:\.\d+)*[.)]?|[（(]?\d+[）)]|[一二三四五六七八九十]+[、.)]|[①②③④⑤⑥⑦⑧⑨⑩]|(?:\$?\\diamond\$?)|[◇◆▪•])\s*(.*)$/u;
+
+function compactCjkSpacing(input: string): string {
+  return input
+    .replace(/([\p{Script=Han}])\s+(?=[\p{Script=Han}])/gu, "$1")
+    .replace(/\s+(?=[，。！？、；：])/gu, "")
+    .trim();
+}
 
 function normalizeLine(line: string): string {
-  return line.replace(/\s+/g, " ").trim();
+  return compactCjkSpacing(line.replace(/\s+/g, " ").trim());
 }
 
 function sluglessTitle(raw: string): string {
-  return raw.replace(/^["'`]+|["'`]+$/g, "").trim();
+  return compactCjkSpacing(raw.replace(/^["'`]+|["'`]+$/g, "").trim());
+}
+
+function cleanHeadingLabel(raw: string): string {
+  return sluglessTitle(raw)
+    .replace(/^[（(]?\d+[）)]\s*/u, "")
+    .replace(/^\d+(?:\.\d+)*[.)]?\s*/u, "")
+    .replace(/^[一二三四五六七八九十]+[、.)]\s*/u, "")
+    .trim();
 }
 
 function parseSections(markdown: string): ParsedSection[] {
@@ -119,15 +135,15 @@ function extractEntityDrafts(sections: ParsedSection[]): EntityDraft[] {
   const seen = new Set<string>();
 
   for (const section of sections) {
-    const headingKey = section.heading.toLowerCase();
-    const withinEntityArea = includesKeyword(section, /(entity|entities|data model|models|schema)/);
+    const headingKey = cleanHeadingLabel(section.heading).toLowerCase();
+    const withinEntityArea = includesKeyword(section, /(entity|entities|data model|models|schema|实体|数据模型|模型|台账|设备|计量点|测点)/i);
 
     if (withinEntityArea && section.depth >= 3) {
       const lines = extractListItems(section.content);
       const key = headingKey;
       if (!seen.has(key)) {
         const draft: EntityDraft = {
-          name: section.heading,
+          name: cleanHeadingLabel(section.heading),
           fields: lines,
         };
         const maybeDescription = firstNarrativeLine(section.content);
@@ -168,36 +184,84 @@ function firstParagraph(content: string): string {
     .find(Boolean) ?? "";
 }
 
+function firstMatchingParagraph(sections: ParsedSection[], keywords: RegExp): string {
+  for (const section of sections) {
+    if (!keywords.test(cleanHeadingLabel(section.heading))) {
+      continue;
+    }
+    const paragraph = firstParagraph(section.content);
+    if (paragraph) {
+      return paragraph;
+    }
+  }
+
+  return "";
+}
+
+function extractFeatureHeadings(sections: ParsedSection[]): string[] {
+  const seen = new Set<string>();
+  const screens: string[] = [];
+
+  for (const section of sections) {
+    const cleanedHeading = cleanHeadingLabel(section.heading);
+    if (!cleanedHeading) {
+      continue;
+    }
+
+    const featureKeywords =
+      /(screen|screens|page|pages|ui|interface|navigation|功能|模块|系统功能|信息架构|页面|监控|分析|计划|报警|告警|报表|设备|计量|管控)/i;
+    const withinFeatureArea = featureKeywords.test(cleanedHeading) || includesKeyword(section, featureKeywords);
+    const looksLikeConcreteFeature =
+      section.depth >= 1 &&
+      !/^(能源管理系统|项目概述|项目背景|建设理念|建设目标|系统架构|系统功能|overview|summary)$/i.test(cleanedHeading);
+
+    if (!withinFeatureArea || !looksLikeConcreteFeature) {
+      continue;
+    }
+
+    if (seen.has(cleanedHeading)) {
+      continue;
+    }
+    seen.add(cleanedHeading);
+    screens.push(cleanedHeading);
+  }
+
+  return screens;
+}
+
 export function parsePrd(markdown: string): ParsedPrd {
   const sections = parseSections(markdown);
   const title =
-    sections.find((section) => section.depth === 1)?.heading ??
-    sections.find((section) => section.heading !== "Overview")?.heading ??
+    cleanHeadingLabel(sections.find((section) => section.depth === 1)?.heading ?? "") ||
+    cleanHeadingLabel(sections.find((section) => section.heading !== "Overview")?.heading ?? "") ||
     "Generated App";
 
   const summary =
     firstParagraph(sections.find((section) => section.path[0] === "Overview")?.content ?? "") ||
-    firstParagraph(sections.find((section) => section.heading.toLowerCase().includes("summary"))?.content ?? "") ||
+    firstMatchingParagraph(sections, /(summary|overview|introduction|项目概述|项目背景|建设理念|建设目标|背景)/i) ||
     `${title} generated from product requirements.`;
 
   const roles = sections
-    .filter((section) => /^(user|users|role|roles|actor|actors)$/i.test(section.heading))
+    .filter((section) => /^(user|users|role|roles|actor|actors|用户|角色|人员)$/i.test(cleanHeadingLabel(section.heading)))
     .flatMap((section) => extractListItems(section.content));
 
-  const screens = sections
-    .filter((section) => includesKeyword(section, /(screen|screens|page|pages|ui|interface|navigation)/))
-    .flatMap((section) => extractListItems(section.content));
+  const screens = [
+    ...sections
+      .filter((section) => includesKeyword(section, /(screen|screens|page|pages|ui|interface|navigation|页面|界面|导航)/i))
+      .flatMap((section) => extractListItems(section.content)),
+    ...extractFeatureHeadings(sections),
+  ];
 
   const flows = sections
-    .filter((section) => includesKeyword(section, /(flow|flows|journey|journeys|workflow|workflows)/))
+    .filter((section) => includesKeyword(section, /(flow|flows|journey|journeys|workflow|workflows|流程|业务流程|操作流程)/i))
     .flatMap((section) => extractListItems(section.content));
 
   const businessRules = sections
-    .filter((section) => includesKeyword(section, /(rule|rules|constraint|constraints|acceptance|requirements)/))
+    .filter((section) => includesKeyword(section, /(rule|rules|constraint|constraints|acceptance|requirements|规则|约束|要求|规范)/i))
     .flatMap((section) => extractListItems(section.content));
 
   const openQuestions = sections
-    .filter((section) => includesKeyword(section, /(question|questions|unknown|unknowns|open issue|open issues)/))
+    .filter((section) => includesKeyword(section, /(question|questions|unknown|unknowns|open issue|open issues|待确认|待定|问题)/i))
     .flatMap((section) => extractListItems(section.content));
 
   return {
