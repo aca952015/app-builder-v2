@@ -110,77 +110,32 @@ function getVisibleLogs(logs: string[], limit = 8): string[] {
   return logs.slice(-limit);
 }
 
-function translateActionToEnglish(narrative: string): string {
-  const exactMap = new Map<string, string>([
-    ["等待模型开始处理。", "Waiting for the model to start."],
-    ["生成流程结束。", "Generation flow finished."],
-    ["正在整理分析稿。", "Preparing the analysis draft."],
-    ["正在验证计划阶段产出物。", "Validating planning artifacts."],
-    ["计划阶段产出物已验证，通过生成门禁。", "Planning artifacts verified. Gate passed."],
-    ["正在复核修复后的计划产出物。", "Re-checking repaired planning artifacts."],
-    ["正在验证生成阶段交付物。", "Validating generated deliverables."],
-    ["生成阶段交付物已验证，全部通过。", "Generated deliverables verified. All checks passed."],
-    ["正在复核修复后的生成交付物。", "Re-checking repaired generated deliverables."],
-  ]);
-
-  const exact = exactMap.get(narrative);
-  if (exact) {
-    return exact;
-  }
-
-  const replacements: Array<[RegExp, string]> = [
-    [/^读取文件：(.+)$/, "Reading file: $1"],
-    [/^写入文件：(.+)$/, "Writing file: $1"],
-    [/^写入文件完成：(.+)$/, "Finished writing file: $1"],
-    [/^编辑文件：(.+)$/, "Editing file: $1"],
-    [/^编辑文件完成：(.+)$/, "Finished editing file: $1"],
-    [/^列出目录：(.+)$/, "Listing directory: $1"],
-    [/^列出目录完成：(.+)$/, "Finished listing directory: $1"],
-    [/^搜索文件：(.+)$/, "Searching files: $1"],
-    [/^搜索文件完成：(.+)$/, "Finished searching files: $1"],
-    [/^更新 todo。$/, "Updating todos."],
-    [/^更新 todo 完成。$/, "Finished updating todos."],
-    [/^调用工具 (.+)。$/, "Calling tool: $1."],
-    [/^调用工具 (.+) 完成。$/, "Finished calling tool: $1."],
-    [/^工具 (.+) 执行中$/, "Tool in progress: $1"],
-    [/^工具 (.+) completed$/, "Tool completed: $1"],
-  ];
-
-  for (const [pattern, replacement] of replacements) {
-    if (pattern.test(narrative)) {
-      return narrative.replace(pattern, replacement);
-    }
-  }
-
-  return narrative;
-}
-
 function detectWorkflowLogPrefix(content: string): { prefix: string; color: WorkflowLogPrefixColor } {
   if (/读取文件|列出目录|搜索文件/.test(content)) {
-    return { prefix: "[读]", color: "cyan" };
+    return { prefix: "[READ]", color: "cyan" };
   }
 
   if (/写入文件|编辑文件/.test(content)) {
-    return { prefix: "[写]", color: "yellow" };
+    return { prefix: "[WRITE]", color: "yellow" };
   }
 
   if (/更新 todo|更新|补齐|实现/.test(content)) {
-    return { prefix: "[更]", color: "magenta" };
+    return { prefix: "[UPDATE]", color: "magenta" };
   }
 
   if (/修复|轮次/.test(content)) {
-    return { prefix: "[修]", color: "magenta" };
+    return { prefix: "[FIX]", color: "magenta" };
   }
 
   if (/校验|验证|复核/.test(content)) {
-    return { prefix: "[验]", color: "blue" };
+    return { prefix: "[CHECK]", color: "blue" };
   }
 
   if (/通过|完成|结束|汇总/.test(content)) {
-    return { prefix: "[完]", color: "green" };
+    return { prefix: "[DONE]", color: "green" };
   }
 
-  return { prefix: "[流]", color: "gray" };
+  return { prefix: "[FLOW]", color: "gray" };
 }
 
 function parseWorkflowLogLine(logLine: string): {
@@ -213,7 +168,7 @@ function parseWorkflowLogLine(logLine: string): {
 }
 
 function buildActionLine(state: TodoBoardState): string {
-  return `Current action: ${translateActionToEnglish(state.narrative)}`;
+  return `当前动作：${state.narrative}`;
 }
 
 function buildTodoHeader(state: TodoBoardState): string {

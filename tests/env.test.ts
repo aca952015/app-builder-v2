@@ -118,9 +118,9 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
     artifacts: createArtifactItemsForStage("计划阶段", "validating"),
     narrative: "正在整理分析稿。",
     logs: [
-      "[12:34:56] [流] 进入计划阶段，开始流式生成。",
-      "[12:34:57] [读] 读取文件：.deepagents/source-prd.md",
-      "[12:34:58] [验] 正在校验计划阶段产出物。",
+      "[12:34:56] [FLOW] 进入计划阶段，开始流式生成。",
+      "[12:34:57] [READ] 读取文件：.deepagents/source-prd.md",
+      "[12:34:58] [CHECK] 正在校验计划阶段产出物。",
     ],
   }, 120));
 
@@ -133,11 +133,11 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /关键产出物：/);
   assert.match(output, /prd-analysis\.md/);
   assert.match(output, /\[验证中\]/);
-  assert.match(output, /Current action: Preparing the analysis draft\./);
+  assert.match(output, /当前动作：正在整理分析稿。/);
   assert.match(output, /详细日志：/);
-  assert.match(output, /\[12:34:56\] \[流\] 进入计划阶段/);
-  assert.match(output, /\[12:34:57\] \[读\] 读取文件：\.deepagents\/source-prd\.md/);
-  assert.match(output, /\[12:34:58\] \[验\] 正在校验计划阶段产出物/);
+  assert.match(output, /\[12:34:56\] \[FLOW\] 进入计划阶段/);
+  assert.match(output, /\[12:34:57\] \[READ\] 读取文件：\.deepagents\/source-prd\.md/);
+  assert.match(output, /\[12:34:58\] \[CHECK\] 正在校验计划阶段产出物/);
 });
 
 test("formatDeepAgentsTraceEntry renders readable tool call details without console board text", () => {
