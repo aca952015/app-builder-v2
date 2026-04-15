@@ -1,0 +1,3 @@
+display_name: Host Phase Creator
+short_description: Add a new host-side workflow phase
+default_prompt: Add a new host-side phase to app-builder-v2, wire its artifacts and validation, expose it in the terminal workflow UI, and keep tests aligned.

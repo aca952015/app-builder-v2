@@ -6,3 +6,5 @@ generated
 .*/
 .omx/
 .env
+!.codex/
+!.codex/skills/
