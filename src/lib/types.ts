@@ -1,3 +1,5 @@
+import type { PlanSpec } from "./plan-spec.js";
+
 export type ParsedSection = {
   heading: string;
   depth: number;
@@ -71,6 +73,16 @@ export type NormalizedSpec = {
 export type GeneratedProject = {
   summary: string;
   filesWritten: string[];
+  implementedResources: string[];
+  implementedPages: string[];
+  implementedApis: string[];
+  notes: string[];
+};
+
+export type PlanResult = {
+  summary: string;
+  artifactsWritten: string[];
+  planSpecVersion: number;
   notes: string[];
 };
 
@@ -101,8 +113,14 @@ export type TemplatePack = {
   directory: string;
   manifestPath: string;
   projectRenderer: string;
-  systemPromptPath: string;
-  systemPromptRelativePath: string;
+  planPromptPath: string;
+  planPromptRelativePath: string;
+  planRepairPromptPath: string;
+  planRepairPromptRelativePath: string;
+  generatePromptPath: string;
+  generatePromptRelativePath: string;
+  generateRepairPromptPath: string;
+  generateRepairPromptRelativePath: string;
   referencesDirectory?: string;
   skillsDirectory?: string;
   starterDirectory?: string;
@@ -118,7 +136,12 @@ export type TemplateLock = {
   hash: string;
   stagedAt: string;
   workspaceTemplateDirectory: string;
-  systemPromptPath: string;
+  prompts: {
+    plan: string;
+    planRepair: string;
+    generate: string;
+    generateRepair: string;
+  };
 };
 
 export type OutputWorkspace = {
@@ -128,12 +151,18 @@ export type OutputWorkspace = {
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
   deepagentsConfigPath: string;
-  deepagentsPromptSnapshotPath: string;
+  deepagentsPlanPromptSnapshotPath: string;
+  deepagentsPlanRepairPromptSnapshotPath: string;
+  deepagentsGeneratePromptSnapshotPath: string;
+  deepagentsGenerateRepairPromptSnapshotPath: string;
   deepagentsTemplateDirectory: string;
   templateLockPath: string;
   sourcePrdSnapshotPath: string;
   deepagentsAnalysisPath: string;
   deepagentsDetailedSpecPath: string;
+  deepagentsPlanSpecPath: string;
+  deepagentsPlanValidationPath: string;
+  deepagentsGenerationValidationPath: string;
 };
 
 export type TextGeneratorRuntime = {
@@ -143,23 +172,36 @@ export type TextGeneratorRuntime = {
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
   deepagentsConfigPath: string;
-  deepagentsPromptSnapshotPath: string;
+  deepagentsPlanPromptSnapshotPath: string;
+  deepagentsPlanRepairPromptSnapshotPath: string;
+  deepagentsGeneratePromptSnapshotPath: string;
+  deepagentsGenerateRepairPromptSnapshotPath: string;
   templateId: string;
   templateName: string;
   templateVersion: string;
   templateDirectory: string;
-  templateSystemPromptPath: string;
+  templatePlanPromptPath: string;
+  templatePlanRepairPromptPath: string;
+  templateGeneratePromptPath: string;
+  templateGenerateRepairPromptPath: string;
   sourcePrdSnapshotPath: string;
   deepagentsAnalysisPath: string;
   deepagentsDetailedSpecPath: string;
-  analysisAttempt?: number;
-  maxAnalysisRetries?: number;
+  deepagentsPlanSpecPath: string;
+  deepagentsPlanValidationPath: string;
+  deepagentsGenerationValidationPath: string;
+  planAttempt?: number;
+  maxPlanRetries?: number;
+  generateAttempt?: number;
+  maxGenerateRetries?: number;
   retryReasons?: string[];
-  retryStage?: "计划阶段" | "生成阶段";
 };
 
 export type TextGenerator = {
-  generateProject(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject>;
+  planProject(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult>;
+  planRepairProject(runtime: TextGeneratorRuntime): Promise<PlanResult>;
+  generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject>;
+  generateRepairProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject>;
 };
 
 export type GenerateAppOptions = {

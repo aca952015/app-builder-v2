@@ -2,7 +2,7 @@
 
 `app-builder-v2` is a TypeScript CLI that reads a Markdown product spec and generates a runnable application scaffold. The model orchestration layer is powered by `deepagents`, and the generation context is selected from template packs under `templates/`.
 
-Each template pack can provide its own prompt set, references, optional skills, and starter assets. The selected template is copied into the output project's `.deepagents/` directory so the generated app keeps the exact context that produced it. The default generation path now expects `deepagents` to write the application source files directly into the output project root.
+Each template pack can provide its own phase-specific prompts, references, optional skills, and starter assets. The selected template is copied into the output project's `.deepagents/` directory so the generated app keeps the exact context that produced it. The default generation path now uses a host-controlled workflow with dedicated repair lanes: plan, optional plan-repair, generate, and optional generate-repair.
 
 ## Usage
 
@@ -29,7 +29,7 @@ APP_BUILDER_MODEL=openai:gpt-4.1-mini
 APP_BUILDER_STREAM_MODES=updates,messages,tools,values
 ```
 
-Each run creates a session directory under `.out/<sessionId>/`. `deepagents` writes the application files into that session directory, while `.deepagents/` stores the template context, run config, PRD/spec artifacts, and generation logs.
+Each run creates a session directory under `.out/<sessionId>/`. `deepagents` writes the application files into that session directory, while `.deepagents/` stores the template context, phase prompts, plan artifacts, and generation logs. The generator will not enter code generation until `.deepagents/plan-spec.json` passes host validation.
 
 ## What it generates
 
@@ -39,7 +39,7 @@ Each run creates a session directory under `.out/<sessionId>/`. `deepagents` wri
 - Seed data and `.env.example`
 - Generation report with defaults and warnings
 - A copied `.deepagents/` template context plus `template-lock.json`
-- Visible generation artifacts such as `.deepagents/source-prd.md`, `.deepagents/prd-analysis.md`, `.deepagents/generated-spec.md`, and `.deepagents/error.log`
+- Visible generation artifacts such as `.deepagents/source-prd.md`, `.deepagents/prd-analysis.md`, `.deepagents/generated-spec.md`, `.deepagents/plan-spec.json`, `.deepagents/plan-validation.json`, and `.deepagents/error.log`
 
 ## Template packs
 

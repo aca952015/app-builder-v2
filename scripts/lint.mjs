@@ -3,7 +3,7 @@ import path from "node:path";
 
 const ROOT = process.cwd();
 const EXTS = new Set([".ts", ".md", ".json", ".mjs"]);
-const IGNORE = new Set(["dist", "node_modules", ".tmp", "generated", ".omx", ".bg-shell", ".gsd"]);
+const IGNORE = new Set(["dist", "node_modules", ".tmp", ".out", "generated", ".omx", ".bg-shell", ".gsd"]);
 
 async function collectFiles(dir) {
   const entries = await fs.readdir(dir, { withFileTypes: true });

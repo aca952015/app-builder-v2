@@ -6,11 +6,17 @@ import path from "node:path";
 
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
+  createArtifactItemsForStage,
   estimateRenderedRows,
   formatDeepAgentsTraceEntry,
   formatTodoHeader,
+  formatWorkflowStageLine,
+  renderArtifactStatus,
   resolveDeepagentsStreamModes,
+  renderTodoBoardToString,
   renderTodoStatus,
+  stripAnsi,
+  summarizeDeepAgentsAction,
   withActivityTimeout,
 } from "../src/lib/text-generator.js";
 
@@ -63,7 +69,75 @@ test("renderTodoStatus uses static todo markers", () => {
 });
 
 test("formatTodoHeader uses completed and total counts", () => {
-  assert.equal(formatTodoHeader(1, 3), "当前计划（1/3）：");
+  assert.equal(formatTodoHeader(1, 3), "执行步骤（1/3）：");
+});
+
+test("formatWorkflowStageLine highlights the active stage in the pipeline", () => {
+  assert.equal(
+    formatWorkflowStageLine("生成阶段"),
+    "计划阶段 -> [生成阶段] -> 完成阶段",
+  );
+});
+
+test("renderArtifactStatus shows workflow output states", () => {
+  assert.equal(renderArtifactStatus("generating"), "[生成中]");
+  assert.equal(renderArtifactStatus("validating"), "[验证中]");
+  assert.equal(renderArtifactStatus("verified"), "[已验证]");
+});
+
+test("createArtifactItemsForStage returns key artifacts for each workflow stage", () => {
+  assert.deepEqual(
+    createArtifactItemsForStage("计划阶段", "generating").map((item) => item.label),
+    [
+      ".deepagents/prd-analysis.md",
+      ".deepagents/generated-spec.md",
+      ".deepagents/plan-spec.json",
+      ".deepagents/plan-validation.json",
+    ],
+  );
+
+  assert.deepEqual(
+    createArtifactItemsForStage("生成阶段", "verified").map((item) => item.label),
+    [
+      "app/api/**",
+      "app/** 页面与布局",
+      "app-builder-report.md",
+      ".deepagents/generation-validation.json",
+    ],
+  );
+});
+
+test("renderTodoBoardToString preserves todo progress and current action in Ink mode", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "计划阶段",
+    todos: [
+      { content: "读取 PRD 与模板上下文", status: "completed" },
+      { content: "整理分析稿与详细 spec", status: "in_progress" },
+      { content: "写入结构化 plan-spec.json", status: "pending" },
+    ],
+    artifacts: createArtifactItemsForStage("计划阶段", "validating"),
+    narrative: "正在整理分析稿。",
+    logs: [
+      "[12:34:56] [流] 进入计划阶段，开始流式生成。",
+      "[12:34:57] [读] 读取文件：.deepagents/source-prd.md",
+      "[12:34:58] [验] 正在校验计划阶段产出物。",
+    ],
+  }, 120));
+
+  assert.match(output, /计划阶段/);
+  assert.match(output, /计划阶段 -> 生成阶段 -> 完成阶段/);
+  assert.match(output, /1\/3/);
+  assert.match(output, /执行步骤（1\/3）：/);
+  assert.match(output, /读取 PRD 与模板上下文/);
+  assert.match(output, /整理分析稿与详细 spec/);
+  assert.match(output, /关键产出物：/);
+  assert.match(output, /prd-analysis\.md/);
+  assert.match(output, /\[验证中\]/);
+  assert.match(output, /Current action: Preparing the analysis draft\./);
+  assert.match(output, /详细日志：/);
+  assert.match(output, /\[12:34:56\] \[流\] 进入计划阶段/);
+  assert.match(output, /\[12:34:57\] \[读\] 读取文件：\.deepagents\/source-prd\.md/);
+  assert.match(output, /\[12:34:58\] \[验\] 正在校验计划阶段产出物/);
 });
 
 test("formatDeepAgentsTraceEntry renders readable tool call details without console board text", () => {
@@ -101,6 +175,44 @@ test("formatDeepAgentsTraceEntry renders readable tool call details without cons
   assert.match(entry, /Payload/);
   assert.doesNotMatch(entry, /当前计划（/);
   assert.doesNotMatch(entry, /当前动作：/);
+});
+
+test("summarizeDeepAgentsAction exposes concrete tool events", () => {
+  assert.equal(
+    summarizeDeepAgentsAction("tools", {
+      event: "on_tool_start",
+      name: "read_file",
+      input: "{\"file_path\":\".deepagents/source-prd.md\"}",
+    }),
+    "读取文件：.deepagents/source-prd.md",
+  );
+
+  assert.equal(
+    summarizeDeepAgentsAction("tools", {
+      event: "on_tool_end",
+      name: "write_todos",
+      output: {},
+    }),
+    "更新 todo 完成。",
+  );
+});
+
+test("summarizeDeepAgentsAction exposes message tool-call intent", () => {
+  assert.equal(
+    summarizeDeepAgentsAction("messages", [
+      {
+        tool_calls: [
+          {
+            name: "write_file",
+            args: {
+              path: "app/page.tsx",
+            },
+          },
+        ],
+      },
+    ]),
+    "准备写入文件：app/page.tsx",
+  );
 });
 
 test("withActivityTimeout keeps extending while activity continues", async () => {

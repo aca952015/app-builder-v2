@@ -67,7 +67,10 @@ type TemplateManifest = {
   description?: string;
   projectRenderer: string;
   prompts: {
-    system: string;
+    plan: string;
+    planRepair: string;
+    generate: string;
+    generateRepair: string;
   };
   referencesDir?: string;
   skillsDir?: string;
@@ -96,7 +99,10 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
   }
 
   const prompts = manifest.prompts as Record<string, unknown>;
-  assertNonEmptyString(prompts.system, "prompts.system");
+  assertNonEmptyString(prompts.plan, "prompts.plan");
+  assertNonEmptyString(prompts.planRepair, "prompts.planRepair");
+  assertNonEmptyString(prompts.generate, "prompts.generate");
+  assertNonEmptyString(prompts.generateRepair, "prompts.generateRepair");
 
   const parsed: TemplateManifest = {
     id: manifest.id,
@@ -104,7 +110,10 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
     version: manifest.version,
     projectRenderer: manifest.projectRenderer,
     prompts: {
-      system: prompts.system,
+      plan: prompts.plan,
+      planRepair: prompts.planRepair,
+      generate: prompts.generate,
+      generateRepair: prompts.generateRepair,
     },
   };
 
@@ -178,8 +187,14 @@ export async function loadTemplatePack(templateId = "full-stack"): Promise<Templ
 
   const manifestContents = await fs.readFile(manifestPath, "utf8");
   const manifest = parseTemplateManifest(JSON.parse(manifestContents));
-  const systemPromptPath = path.join(directory, manifest.prompts.system);
-  await ensureFileExists(systemPromptPath, "prompts.system");
+  const planPromptPath = path.join(directory, manifest.prompts.plan);
+  const planRepairPromptPath = path.join(directory, manifest.prompts.planRepair);
+  const generatePromptPath = path.join(directory, manifest.prompts.generate);
+  const generateRepairPromptPath = path.join(directory, manifest.prompts.generateRepair);
+  await ensureFileExists(planPromptPath, "prompts.plan");
+  await ensureFileExists(planRepairPromptPath, "prompts.planRepair");
+  await ensureFileExists(generatePromptPath, "prompts.generate");
+  await ensureFileExists(generateRepairPromptPath, "prompts.generateRepair");
 
   return {
     id: manifest.id,
@@ -188,8 +203,14 @@ export async function loadTemplatePack(templateId = "full-stack"): Promise<Templ
     directory,
     manifestPath,
     projectRenderer: manifest.projectRenderer,
-    systemPromptPath,
-    systemPromptRelativePath: manifest.prompts.system,
+    planPromptPath,
+    planPromptRelativePath: manifest.prompts.plan,
+    planRepairPromptPath,
+    planRepairPromptRelativePath: manifest.prompts.planRepair,
+    generatePromptPath,
+    generatePromptRelativePath: manifest.prompts.generate,
+    generateRepairPromptPath,
+    generateRepairPromptRelativePath: manifest.prompts.generateRepair,
     ...(manifest.description ? { description: manifest.description } : {}),
     ...(manifest.referencesDir ? { referencesDirectory: path.join(directory, manifest.referencesDir) } : {}),
     ...(manifest.skillsDir ? { skillsDirectory: path.join(directory, manifest.skillsDir) } : {}),
@@ -208,8 +229,23 @@ export async function stageTemplatePack(
   workspace: OutputWorkspace,
 ): Promise<TemplateLock> {
   await fs.copyFile(
-    template.systemPromptPath,
-    workspace.deepagentsPromptSnapshotPath,
+    template.planPromptPath,
+    workspace.deepagentsPlanPromptSnapshotPath,
+  );
+
+  await fs.copyFile(
+    template.planRepairPromptPath,
+    workspace.deepagentsPlanRepairPromptSnapshotPath,
+  );
+
+  await fs.copyFile(
+    template.generatePromptPath,
+    workspace.deepagentsGeneratePromptSnapshotPath,
+  );
+
+  await fs.copyFile(
+    template.generateRepairPromptPath,
+    workspace.deepagentsGenerateRepairPromptSnapshotPath,
   );
 
   await fs.copyFile(
@@ -241,7 +277,12 @@ export async function stageTemplatePack(
     hash: template.hash,
     stagedAt: new Date().toISOString(),
     workspaceTemplateDirectory: path.relative(workspace.outputDirectory, workspace.deepagentsDirectory).split(path.sep).join("/"),
-    systemPromptPath: template.systemPromptRelativePath,
+    prompts: {
+      plan: template.planPromptRelativePath,
+      planRepair: template.planRepairPromptRelativePath,
+      generate: template.generatePromptRelativePath,
+      generateRepair: template.generateRepairPromptRelativePath,
+    },
     ...(template.description ? { description: template.description } : {}),
   };
 

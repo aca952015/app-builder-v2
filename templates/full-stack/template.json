@@ -5,7 +5,10 @@
   "description": "A deepagents template pack for generating a Next.js + Prisma + PostgreSQL full-stack application.",
   "projectRenderer": "full-stack",
   "prompts": {
-    "system": "prompts/system-prompt.md"
+    "plan": "prompts/plan-system-prompt.md",
+    "planRepair": "prompts/plan-repair-system-prompt.md",
+    "generate": "prompts/generate-system-prompt.md",
+    "generateRepair": "prompts/generate-repair-system-prompt.md"
   },
   "referencesDir": "references",
   "skillsDir": "skills",

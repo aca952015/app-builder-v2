@@ -47,12 +47,18 @@ export async function prepareOutputWorkspace(options: {
     deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
     deepagentsConfigPath: path.join(deepagentsDirectory, "config.json"),
-    deepagentsPromptSnapshotPath: path.join(deepagentsDirectory, "system-prompt.md"),
+    deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
+    deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
+    deepagentsGeneratePromptSnapshotPath: path.join(deepagentsDirectory, "generate-system-prompt.md"),
+    deepagentsGenerateRepairPromptSnapshotPath: path.join(deepagentsDirectory, "generate-repair-system-prompt.md"),
     deepagentsTemplateDirectory: deepagentsDirectory,
     templateLockPath: path.join(outputDirectory, "template-lock.json"),
     sourcePrdSnapshotPath: path.join(deepagentsDirectory, "source-prd.md"),
     deepagentsAnalysisPath: path.join(deepagentsDirectory, "prd-analysis.md"),
     deepagentsDetailedSpecPath: path.join(deepagentsDirectory, "generated-spec.md"),
+    deepagentsPlanSpecPath: path.join(deepagentsDirectory, "plan-spec.json"),
+    deepagentsPlanValidationPath: path.join(deepagentsDirectory, "plan-validation.json"),
+    deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
   };
 }
 

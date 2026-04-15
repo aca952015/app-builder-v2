@@ -6,16 +6,25 @@
 
 当前默认执行模型是：
 
-- `deepagents` 先使用模板里的技能把原始 PRD 扩展为详细 spec
-- 再由 `deepagents` 直接把应用源码写到输出项目根目录
+- 宿主先加载 `prompts/plan-system-prompt.md`，产出结构化 `plan-spec.json` 与配套 Markdown 分析稿
+- 如果计划校验失败，宿主切换到 `prompts/plan-repair-system-prompt.md` 做定点修补
+- 宿主验证 `plan-spec.json` 后，再加载 `prompts/generate-system-prompt.md`
+- 如果生成校验失败，宿主切换到 `prompts/generate-repair-system-prompt.md` 做定点修补
+- 生成阶段只读取已验证的 `planSpec`，把应用源码写到输出项目根目录
 - `.deepagents/` 只保留模板上下文、分析过程和运行工件
 
 ## 当前内容
 
 - `template.json`
   模板元数据与入口配置。
-- `prompts/system-prompt.md`
-  当前模板的 deepagents system prompt。
+- `prompts/plan-system-prompt.md`
+  计划阶段 prompt，负责结构化 spec 定义与计划工件落盘。
+- `prompts/plan-repair-system-prompt.md`
+  计划修复阶段 prompt，负责按校验失败项修补现有计划产物。
+- `prompts/generate-system-prompt.md`
+  生成阶段 prompt，负责基于已验证 `planSpec` 产出代码。
+- `prompts/generate-repair-system-prompt.md`
+  生成修复阶段 prompt，负责按校验失败项修补现有代码。
 - `references/generated-app-architecture.md`
   当前 full-stack 模板生成结果的架构说明。
 
