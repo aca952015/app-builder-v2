@@ -7,8 +7,8 @@ Each template pack can provide its own phase-specific prompts, references, optio
 ## Usage
 
 ```bash
-npm install
-npm run build
+pnpm install
+pnpm build
 node dist/src/index.js generate ./spec.md --template full-stack
 ```
 
@@ -54,5 +54,5 @@ Template packs live under `templates/<templateId>/` and currently include:
 ## Validation
 
 ```bash
-npm run check
+pnpm check
 ```

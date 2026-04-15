@@ -32,5 +32,5 @@ When changing plan/generate/repair behavior:
 
 ## Validation
 
-- Run `npm run check` after host workflow changes.
+- Run `pnpm check` after host workflow changes.
 - If terminal UI behavior changes, keep `tests/env.test.ts` aligned.

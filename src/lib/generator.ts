@@ -39,6 +39,41 @@ async function readIfExists(filePath: string): Promise<string | null> {
   }
 }
 
+function resolveAppPrefixedPath(outputDirectory: string, filePath: string): string {
+  const relativePath = path.relative(outputDirectory, filePath);
+  return path.join(outputDirectory, "app", relativePath);
+}
+
+async function relocateIfWrittenUnderApp(outputDirectory: string, filePath: string): Promise<string | null> {
+  const currentContents = await readIfExists(filePath);
+  if (currentContents && currentContents.trim().length > 0) {
+    return null;
+  }
+
+  const misplacedPath = resolveAppPrefixedPath(outputDirectory, filePath);
+  const misplacedContents = await readIfExists(misplacedPath);
+  if (!misplacedContents || misplacedContents.trim().length === 0) {
+    return null;
+  }
+
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, misplacedContents, "utf8");
+  await fs.rm(misplacedPath, { force: true });
+  return path.relative(outputDirectory, misplacedPath).split(path.sep).join("/");
+}
+
+async function reconcileHostManagedArtifacts(runtime: TextGeneratorRuntime, targets: string[]): Promise<void> {
+  for (const target of targets) {
+    const relocatedFrom = await relocateIfWrittenUnderApp(runtime.outputDirectory, target);
+    if (!relocatedFrom) {
+      continue;
+    }
+
+    const relocatedTo = path.relative(runtime.outputDirectory, target).split(path.sep).join("/");
+    await appendWorkflowLog(`[host] 检测到误写路径 ${relocatedFrom}，已归位到 ${relocatedTo}。`);
+  }
+}
+
 function collectPlanSpecConsistencyIssues(planSpec: PlanSpec): string[] {
   const issues: string[] = [];
   const resourceNames = new Set(planSpec.resources.map((resource) => resource.name));
@@ -141,6 +176,12 @@ async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: Plan
   reasons: string[];
   planSpec: PlanSpec | null;
 }> {
+  await reconcileHostManagedArtifacts(runtime, [
+    runtime.deepagentsAnalysisPath,
+    runtime.deepagentsDetailedSpecPath,
+    runtime.deepagentsPlanSpecPath,
+  ]);
+
   const reasons: string[] = [];
 
   const analysisContents = await readIfExists(runtime.deepagentsAnalysisPath);
@@ -201,6 +242,8 @@ async function validateGeneratedArtifacts(
   planSpec: PlanSpec,
   result: GeneratedProject,
 ): Promise<{ reasons: string[] }> {
+  await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
+
   const reasons: string[] = [];
   const nonPlanningFiles = result.filesWritten.filter((file) => !file.startsWith(".deepagents/"));
 
@@ -399,6 +442,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         todos: createStepItemsForLifecycle("计划阶段", "validating"),
         artifacts: createArtifactItemsForStage("计划阶段", "validating"),
         narrative: "正在验证计划阶段产出物。",
+        outputDirectory: workspace.outputDirectory,
       });
       const validation = await validatePlanArtifacts(initialRuntime, planResult);
       if (validation.reasons.length === 0) {
@@ -409,6 +453,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           todos: createStepItemsForLifecycle("计划阶段", "verified"),
           artifacts: createArtifactItemsForStage("计划阶段", "verified"),
           narrative: "计划阶段产出物已验证，通过生成门禁。",
+          outputDirectory: workspace.outputDirectory,
         });
       } else {
         planRetryReasons = validation.reasons;
@@ -432,6 +477,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         todos: createStepItemsForLifecycle("计划阶段", "validating"),
         artifacts: createArtifactItemsForStage("计划阶段", "validating"),
         narrative: "正在复核修复后的计划产出物。",
+        outputDirectory: workspace.outputDirectory,
       });
       const validation = await validatePlanArtifacts(repairRuntime, repairResult);
       if (validation.reasons.length === 0) {
@@ -442,6 +488,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           todos: createStepItemsForLifecycle("计划阶段", "verified"),
           artifacts: createArtifactItemsForStage("计划阶段", "verified"),
           narrative: "计划阶段产出物已验证，通过生成门禁。",
+          outputDirectory: workspace.outputDirectory,
         });
         break;
       }
@@ -470,6 +517,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         todos: createStepItemsForLifecycle("生成阶段", "validating"),
         artifacts: createArtifactItemsForStage("生成阶段", "validating"),
         narrative: "正在验证生成阶段交付物。",
+        outputDirectory: workspace.outputDirectory,
       });
       const validation = await validateGeneratedArtifacts(workspace.outputDirectory, initialRuntime, approvedPlan, generatedProject);
       if (validation.reasons.length === 0) {
@@ -480,6 +528,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           todos: createStepItemsForLifecycle("生成阶段", "verified"),
           artifacts: createArtifactItemsForStage("生成阶段", "verified"),
           narrative: "生成阶段交付物已验证，全部通过。",
+          outputDirectory: workspace.outputDirectory,
         });
       } else {
         generationRetryReasons = validation.reasons;
@@ -503,6 +552,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         todos: createStepItemsForLifecycle("生成阶段", "validating"),
         artifacts: createArtifactItemsForStage("生成阶段", "validating"),
         narrative: "正在复核修复后的生成交付物。",
+        outputDirectory: workspace.outputDirectory,
       });
       const validation = await validateGeneratedArtifacts(workspace.outputDirectory, repairRuntime, approvedPlan, repairedProject);
       if (validation.reasons.length === 0) {
@@ -513,6 +563,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           todos: createStepItemsForLifecycle("生成阶段", "verified"),
           artifacts: createArtifactItemsForStage("生成阶段", "verified"),
           narrative: "生成阶段交付物已验证，全部通过。",
+          outputDirectory: workspace.outputDirectory,
         });
         break;
       }

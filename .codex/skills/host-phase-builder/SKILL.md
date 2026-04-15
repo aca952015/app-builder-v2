@@ -56,7 +56,7 @@ For a quick map, read `references/host-phase-map.md`.
    - terminal UI stage flow and logs
    - tests
 4. Add the phase contract first, then wire execution, then wire validation, then wire UI, then tests.
-5. Run `npm run check`.
+5. Run `pnpm check`.
 
 ## Guardrails
 
@@ -147,4 +147,4 @@ Before finishing, confirm:
 - prompts/artifacts/types are aligned
 - UI stage flow matches real sequencing
 - tests cover the new phase
-- `npm run check` passes
+- `pnpm check` passes

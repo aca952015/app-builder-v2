@@ -6,9 +6,9 @@ fills in product-specific content.
 ## Local development
 
 1. Copy `.env.example` to `.env`
-2. Run `npm install`
-3. Run `npm run db:init`
-4. Run `npm run dev`
+2. Run `pnpm install`
+3. Run `pnpm db:init`
+4. Run `pnpm dev`
 
 The default local database is SQLite at `prisma/dev.db`.
 

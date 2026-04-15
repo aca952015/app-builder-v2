@@ -6,12 +6,13 @@
   "bin": {
     "app-builder": "./dist/src/index.js"
   },
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build --silent && node dist/tests/env.test.js && node dist/tests/parser.test.js && node dist/tests/generator.test.js",
+    "test": "pnpm run build && node dist/tests/env.test.js && node dist/tests/parser.test.js && node dist/tests/generator.test.js",
     "lint": "node ./scripts/lint.mjs",
-    "check": "npm run lint && npm run typecheck && npm run test"
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test"
   },
   "engines": {
     "node": ">=22.0.0"

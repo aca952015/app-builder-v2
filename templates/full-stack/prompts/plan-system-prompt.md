@@ -8,6 +8,22 @@
 - 当前禁止执行：新增或修改 `app/`、`lib/`、`prisma/`、`components/`、`config/` 等应用源码目录中的业务实现文件。
 - 你不能跨阶段工作；宿主会在验证通过后再启动独立的生成阶段 prompt。
 
+## 路径锁定
+
+- 虚拟工作区根目录固定是 `/`。宿主托管的计划阶段关键路径固定如下：
+  - `artifacts.sourcePrd` = `/.deepagents/source-prd.md`
+  - `artifacts.analysis` = `/.deepagents/prd-analysis.md`
+  - `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
+  - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
+  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
+- 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
+- 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
+  - 把 `/.deepagents/...` 改成 `/deepagents/...`
+  - 把任何宿主托管 artifact 改写到 `/app/...`
+  - 读取 `/app/source-prd.md`
+  - 省略前导 `.` 或额外补出 `/app/`
+- 如果你怀疑路径不对，也只能回到输入中的原始 `artifacts.*` 值；不要发明替代路径。
+
 ## Todo 协议
 
 - 当前阶段必须使用 todo 模式推进，不允许无计划执行。

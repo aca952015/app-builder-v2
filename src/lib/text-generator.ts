@@ -23,6 +23,7 @@ export {
   createArtifactItemsForStage,
   createStepItemsForLifecycle,
   estimateRenderedRows,
+  formatElapsedTime,
   formatWorkflowStageLine,
   formatTodoHeader,
   renderArtifactStatus,
@@ -80,6 +81,14 @@ async function pathExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export function toVirtualWorkspacePath(outputDirectory: string, targetPath: string): string {
+  const relativePath = path.relative(outputDirectory, targetPath).split(path.sep).join("/");
+  if (!relativePath || relativePath === ".") {
+    return "/";
+  }
+  return relativePath.startsWith("/") ? relativePath : `/${relativePath}`;
 }
 
 export function resolveDeepagentsStreamModes(
@@ -448,6 +457,7 @@ async function updateTodoBoard(
   trace: DeepAgentsTraceState,
   payload: unknown,
   fallbackSummary: string,
+  runtime?: TextGeneratorRuntime,
 ): Promise<void> {
   const extractedTodos = extractTodosFromPayload(payload);
   if (extractedTodos && extractedTodos.length > 0) {
@@ -467,6 +477,7 @@ async function updateTodoBoard(
     todos: trace.todos,
     artifacts: createArtifactItemsForStage(trace.stage, "generating"),
     narrative: trace.lastNarrative,
+    ...(runtime ? { outputDirectory: runtime.outputDirectory } : {}),
   });
 }
 
@@ -533,12 +544,13 @@ async function logDeepAgentsChunk(
   mode: string,
   payload: unknown,
   trace: DeepAgentsTraceState,
+  runtime?: TextGeneratorRuntime,
 ): Promise<void> {
   const summary = summarizeDeepAgentsAction(mode, payload);
   if (shouldAppendDetailedLog(mode, summary)) {
     await appendWorkflowLog(`[${mode}] ${summary}`);
   }
-  await updateTodoBoard(trace, payload, summary);
+  await updateTodoBoard(trace, payload, summary, runtime);
   writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
 }
 
@@ -615,6 +627,7 @@ async function streamDeepAgentWithLogs(
     todos: trace.todos,
     artifacts: createArtifactItemsForStage(trace.stage, "generating"),
     narrative: trace.lastNarrative,
+    outputDirectory: runtime.outputDirectory,
   });
 
   const stream = await agent.stream(state, {
@@ -628,7 +641,7 @@ async function streamDeepAgentWithLogs(
 
     if (Array.isArray(chunk) && chunk.length === 2 && typeof chunk[0] === "string") {
       const [mode, payload] = chunk as [string, unknown];
-      await logDeepAgentsChunk(mode, payload, trace);
+      await logDeepAgentsChunk(mode, payload, trace, runtime);
       if (mode === "values") {
         lastValuesChunk = payload;
       }
@@ -636,7 +649,7 @@ async function streamDeepAgentWithLogs(
     }
 
     const summary = "收到一条未分类事件。";
-    await updateTodoBoard(trace, chunk, summary);
+    await updateTodoBoard(trace, chunk, summary, runtime);
     writeSystemTraceEvent(trace.logFilePath, "unclassified", chunk, summary);
     lastValuesChunk = chunk;
   }
@@ -649,6 +662,7 @@ async function streamDeepAgentWithLogs(
     todos: trace.todos,
     artifacts: createArtifactItemsForStage(trace.stage, "generating"),
     narrative: trace.lastNarrative,
+    outputDirectory: runtime.outputDirectory,
   });
 
   return lastValuesChunk;
@@ -705,7 +719,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
     };
 
     if (await pathExists(skillsDirectory)) {
-      agentOptions.skills = [".deepagents/skills"];
+      agentOptions.skills = ["/.deepagents/skills"];
     }
 
     agentOptions.backend = new deepagents.FilesystemBackend({
@@ -762,7 +776,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             id: runtime.templateId,
             name: runtime.templateName,
             version: runtime.templateVersion,
-            directory: path.relative(runtime.outputDirectory, runtime.templateDirectory).split(path.sep).join("/"),
+            directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
           },
           planPolicy: {
             planSpecVersion: 1,
@@ -773,13 +787,13 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             retryReasons: runtime.retryReasons ?? [],
           },
           artifacts: {
-            sourcePrd: path.relative(runtime.outputDirectory, runtime.sourcePrdSnapshotPath).split(path.sep).join("/"),
-            analysis: path.relative(runtime.outputDirectory, runtime.deepagentsAnalysisPath).split(path.sep).join("/"),
-            generatedSpec: path.relative(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath).split(path.sep).join("/"),
-            planSpec: path.relative(runtime.outputDirectory, runtime.deepagentsPlanSpecPath).split(path.sep).join("/"),
-            planValidation: path.relative(runtime.outputDirectory, runtime.deepagentsPlanValidationPath).split(path.sep).join("/"),
-            generationValidation: path.relative(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath).split(path.sep).join("/"),
-            errorLog: path.relative(runtime.outputDirectory, runtime.deepagentsErrorLogPath).split(path.sep).join("/"),
+            sourcePrd: toVirtualWorkspacePath(runtime.outputDirectory, runtime.sourcePrdSnapshotPath),
+            analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+            generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
+            planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+            planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+            generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
+            errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
           },
           planSpecSchema: z.toJSONSchema(planSpecSchema),
         },
@@ -807,7 +821,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             id: runtime.templateId,
             name: runtime.templateName,
             version: runtime.templateVersion,
-            directory: path.relative(runtime.outputDirectory, runtime.templateDirectory).split(path.sep).join("/"),
+            directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
           },
           planRepairPolicy: {
             planSpecVersion: 1,
@@ -817,12 +831,12 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             validationFailures: runtime.retryReasons ?? [],
           },
           artifacts: {
-            sourcePrd: path.relative(runtime.outputDirectory, runtime.sourcePrdSnapshotPath).split(path.sep).join("/"),
-            analysis: path.relative(runtime.outputDirectory, runtime.deepagentsAnalysisPath).split(path.sep).join("/"),
-            generatedSpec: path.relative(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath).split(path.sep).join("/"),
-            planSpec: path.relative(runtime.outputDirectory, runtime.deepagentsPlanSpecPath).split(path.sep).join("/"),
-            planValidation: path.relative(runtime.outputDirectory, runtime.deepagentsPlanValidationPath).split(path.sep).join("/"),
-            errorLog: path.relative(runtime.outputDirectory, runtime.deepagentsErrorLogPath).split(path.sep).join("/"),
+            sourcePrd: toVirtualWorkspacePath(runtime.outputDirectory, runtime.sourcePrdSnapshotPath),
+            analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+            generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
+            planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+            planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+            errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
           },
           planSpecSchema: z.toJSONSchema(planSpecSchema),
         },
@@ -851,7 +865,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             id: runtime.templateId,
             name: runtime.templateName,
             version: runtime.templateVersion,
-            directory: path.relative(runtime.outputDirectory, runtime.templateDirectory).split(path.sep).join("/"),
+            directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
           },
           generationPolicy: {
             dataMode: "rest_api",
@@ -862,13 +876,13 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             retryReasons: runtime.retryReasons ?? [],
           },
           artifacts: {
-            analysis: path.relative(runtime.outputDirectory, runtime.deepagentsAnalysisPath).split(path.sep).join("/"),
-            generatedSpec: path.relative(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath).split(path.sep).join("/"),
-            planSpec: path.relative(runtime.outputDirectory, runtime.deepagentsPlanSpecPath).split(path.sep).join("/"),
-            generationValidation: path.relative(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath).split(path.sep).join("/"),
-            planValidation: path.relative(runtime.outputDirectory, runtime.deepagentsPlanValidationPath).split(path.sep).join("/"),
-            report: "app-builder-report.md",
-            errorLog: path.relative(runtime.outputDirectory, runtime.deepagentsErrorLogPath).split(path.sep).join("/"),
+            analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+            generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
+            planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+            generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
+            planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+            report: "/app-builder-report.md",
+            errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
           },
         },
       });
@@ -896,7 +910,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             id: runtime.templateId,
             name: runtime.templateName,
             version: runtime.templateVersion,
-            directory: path.relative(runtime.outputDirectory, runtime.templateDirectory).split(path.sep).join("/"),
+            directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
           },
           generationRepairPolicy: {
             dataMode: "rest_api",
@@ -905,13 +919,13 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             validationFailures: runtime.retryReasons ?? [],
           },
           artifacts: {
-            analysis: path.relative(runtime.outputDirectory, runtime.deepagentsAnalysisPath).split(path.sep).join("/"),
-            generatedSpec: path.relative(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath).split(path.sep).join("/"),
-            planSpec: path.relative(runtime.outputDirectory, runtime.deepagentsPlanSpecPath).split(path.sep).join("/"),
-            generationValidation: path.relative(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath).split(path.sep).join("/"),
-            planValidation: path.relative(runtime.outputDirectory, runtime.deepagentsPlanValidationPath).split(path.sep).join("/"),
-            report: "app-builder-report.md",
-            errorLog: path.relative(runtime.outputDirectory, runtime.deepagentsErrorLogPath).split(path.sep).join("/"),
+            analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+            generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
+            planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+            generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
+            planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+            report: "/app-builder-report.md",
+            errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
           },
         },
       });

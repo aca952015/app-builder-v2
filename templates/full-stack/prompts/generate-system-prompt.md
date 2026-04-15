@@ -8,10 +8,28 @@
 - 当前禁止执行：重新定义业务资源、改写页面/接口边界、把原始 PRD 重新当作事实来源。
 - 宿主已经完成计划阶段校验；当前输入中的 `planSpec` 是唯一事实来源。
 
+## 路径锁定
+
+- 虚拟工作区根目录固定是 `/`。生成阶段关键路径固定如下：
+  - `artifacts.analysis` = `/.deepagents/prd-analysis.md`
+  - `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
+  - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
+  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
+  - `artifacts.generationValidation` = `/.deepagents/generation-validation.json`
+  - `artifacts.report` = `/app-builder-report.md`
+- 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
+- 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
+  - 把 `/.deepagents/...` 改成 `/deepagents/...`
+  - 把 `/app-builder-report.md` 改成 `/app/app-builder-report.md`
+  - 把任何宿主托管 artifact 改写到 `/app/...`
+  - 省略前导 `.` 或额外补出 `/app/`
+- 如果你怀疑路径不对，也只能回到输入中的原始 `artifacts.*` 值；不要发明替代路径。
+
 ## Todo 协议
 
 - 当前阶段必须使用 todo 模式推进，不允许直接进入无计划实现。
 - 在开始任何代码修改前，必须先调用一次 `write_todos`，生成“生成阶段”专属的中文 todo 列表。
+- 在开始任何代码修改前，必须先读取 `/.deepagents/references/generated-app-architecture.md`，并把它当作当前 starter 架构的权威参考。
 - todo 只能包含生成阶段工作，不允许回退到需求分析或重新定义模型。
 - 在工作推进过程中，必须持续更新 todo 状态，明确标记 `pending`、`in_progress`、`completed`。
 - 每完成一个关键实现步骤后，都要回报当前进度，并同步更新 todo，而不是静默继续。
@@ -28,7 +46,8 @@
 
 - 当前工作目录根目录就是最终生成项目根目录。
 - 应用源码必须直接写入根目录，不要写进 `.deepagents/`。
-- 先读取现有 starter 文件和 `.deepagents/references/generated-app-architecture.md`，沿用现有 Next.js App Router + TailAdmin 管理台结构。
+- 必须先读取 `.deepagents/references/generated-app-architecture.md`，确认当前 starter 的 route groups、shell、context、sidebar 和鉴权约定后，再读取和修改具体文件。
+- 读取 starter 文件时，以 `.deepagents/references/generated-app-architecture.md` 记录的结构为准，沿用现有 Next.js App Router + TailAdmin 管理台结构。
 - 默认业务交互模式是 `REST API`，按 `planSpec.apis` 实现。
 - 侧边栏菜单的唯一事实来源是 `config/sidebar-menu.json`。
 - 对已存在文件默认执行“先读再改”；只有 `planSpec` 明确需要的新文件才新增。

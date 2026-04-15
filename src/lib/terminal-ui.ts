@@ -1,10 +1,14 @@
 import React from "react";
+import path from "node:path";
+import { promises as fs } from "node:fs";
 
 import { Box, Text, render, renderToString, type Instance } from "ink";
 
+import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
+
 export type WorkflowStage = "计划阶段" | "生成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
-export type ArtifactStatus = "generating" | "validating" | "verified";
+export type ArtifactStatus = "pending" | "generating" | "generated" | "validating" | "verified";
 export type WorkflowStageMarker = WorkflowStage | "完成阶段";
 
 export type TodoItem = {
@@ -22,6 +26,8 @@ export type TodoBoardState = {
   todos: TodoItem[];
   artifacts: ArtifactItem[];
   narrative: string;
+  elapsedMs?: number;
+  outputDirectory?: string;
   logs?: string[];
 };
 
@@ -106,8 +112,142 @@ export function formatLogHeader(): string {
   return "详细日志：";
 }
 
+export function formatElapsedTime(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
+}
+
 function getVisibleLogs(logs: string[], limit = 8): string[] {
   return logs.slice(-limit);
+}
+
+function normalizeRelativePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function loadPlanSpecFromOutput(outputDirectory: string): Promise<PlanSpec | null> {
+  const planSpecPath = path.join(outputDirectory, ".deepagents", "plan-spec.json");
+  try {
+    const contents = await fs.readFile(planSpecPath, "utf8");
+    const parsed = JSON.parse(contents);
+    const validation = validatePlanSpec(parsed);
+    return validation.success ? validation.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function routeToPageFileCandidates(route: string): string[] {
+  const cleanRoute = route.replace(/^\/+|\/+$/g, "");
+  if (!cleanRoute) {
+    return [
+      "app/page.tsx",
+      "app/(admin)/page.tsx",
+      "app/(full-width-pages)/page.tsx",
+    ];
+  }
+
+  const routePagePath = path.posix.join("app", cleanRoute, "page.tsx");
+  return [
+    routePagePath,
+    path.posix.join("app", "(admin)", cleanRoute, "page.tsx"),
+    path.posix.join("app", "(full-width-pages)", cleanRoute, "page.tsx"),
+  ];
+}
+
+async function countExistingFiles(outputDirectory: string, candidates: string[]): Promise<number> {
+  let count = 0;
+
+  for (const candidate of candidates) {
+    if (await pathExists(path.join(outputDirectory, normalizeRelativePath(candidate)))) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+function decorateProgressLabel(baseLabel: string, completed: number, total: number): string {
+  return `${baseLabel}（${completed}/${total}）`;
+}
+
+async function monitorArtifactItems(state: TodoBoardState): Promise<ArtifactItem[]> {
+  if (!state.outputDirectory) {
+    return state.artifacts;
+  }
+
+  const planSpec = await loadPlanSpecFromOutput(state.outputDirectory);
+  const monitoredArtifacts: ArtifactItem[] = [];
+
+  for (const artifact of state.artifacts) {
+    if (artifact.status === "verified") {
+      monitoredArtifacts.push(artifact);
+      continue;
+    }
+
+    if (artifact.label.startsWith(".deepagents/")) {
+      const artifactPath = path.join(state.outputDirectory, normalizeRelativePath(artifact.label));
+      const exists = await pathExists(artifactPath);
+      monitoredArtifacts.push({
+        label: artifact.label,
+        status: exists ? "generated" : artifact.status,
+      });
+      continue;
+    }
+
+    if (artifact.label === "app-builder-report.md") {
+      const exists = await pathExists(path.join(state.outputDirectory, "app-builder-report.md"));
+      monitoredArtifacts.push({
+        label: artifact.label,
+        status: exists ? "generated" : artifact.status,
+      });
+      continue;
+    }
+
+    if (artifact.label.startsWith("app/api/**") && planSpec) {
+      const apiPaths = planSpec.apis.map((api) => normalizeRelativePath(api.path));
+      const completed = await countExistingFiles(state.outputDirectory, apiPaths);
+      monitoredArtifacts.push({
+        label: decorateProgressLabel("app/api/**", completed, apiPaths.length),
+        status: completed === 0 ? artifact.status : completed >= apiPaths.length ? "generated" : "generating",
+      });
+      continue;
+    }
+
+    if (artifact.label.startsWith("app/** 页面与布局") && planSpec) {
+      let completed = 0;
+      for (const page of planSpec.pages) {
+        const candidates = routeToPageFileCandidates(page.route);
+        const found = await countExistingFiles(state.outputDirectory, candidates);
+        if (found > 0) {
+          completed += 1;
+        }
+      }
+
+      monitoredArtifacts.push({
+        label: decorateProgressLabel("app/** 页面与布局", completed, planSpec.pages.length),
+        status: completed === 0 ? artifact.status : completed >= planSpec.pages.length ? "generated" : "generating",
+      });
+      continue;
+    }
+
+    monitoredArtifacts.push(artifact);
+  }
+
+  return monitoredArtifacts;
 }
 
 function detectWorkflowLogPrefix(content: string): { prefix: string; color: WorkflowLogPrefixColor } {
@@ -181,16 +321,14 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
     return [buildActionLine(state)];
   }
 
-  const lines = [formatWorkflowStageLine(state.stage), "", buildTodoHeader(state)];
+  const lines = [
+    formatWorkflowStageLine(state.stage),
+    `总耗时：${formatElapsedTime(state.elapsedMs ?? 0)}`,
+    "",
+    buildTodoHeader(state),
+  ];
   for (const todo of state.todos) {
     lines.push(`  ${renderTodoStatus(todo.status)} ${todo.content}`);
-  }
-  if (state.artifacts.length > 0) {
-    lines.push("");
-    lines.push(formatArtifactHeader());
-    for (const artifact of state.artifacts) {
-      lines.push(`  ${renderArtifactStatus(artifact.status)} ${artifact.label}`);
-    }
   }
   lines.push("");
   lines.push(buildActionLine(state));
@@ -199,6 +337,13 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
     lines.push(formatLogHeader());
     for (const logLine of getVisibleLogs(state.logs)) {
       lines.push(`  ${logLine}`);
+    }
+  }
+  if (state.artifacts.length > 0) {
+    lines.push("");
+    lines.push(formatArtifactHeader());
+    for (const artifact of state.artifacts) {
+      lines.push(`  ${renderArtifactStatus(artifact.status)} ${artifact.label}`);
     }
   }
   return lines;
@@ -219,12 +364,15 @@ function borderColorForStage(stage: TodoBoardState["stage"]): "cyan" | "green" {
   return stage === "计划阶段" ? "cyan" : "green";
 }
 
-function artifactColorForStatus(status: ArtifactStatus): "yellow" | "blue" | "green" {
+function artifactColorForStatus(status: ArtifactStatus): "gray" | "yellow" | "blue" | "green" {
   switch (status) {
     case "verified":
+    case "generated":
       return "green";
     case "validating":
       return "blue";
+    case "pending":
+      return "gray";
     default:
       return "yellow";
   }
@@ -234,8 +382,12 @@ export function renderArtifactStatus(status: ArtifactStatus): string {
   switch (status) {
     case "verified":
       return "[已验证]";
+    case "generated":
+      return "[已生成]";
     case "validating":
       return "[验证中]";
+    case "pending":
+      return "[待生成]";
     default:
       return "[生成中]";
   }
@@ -277,25 +429,24 @@ export function createStepItemsForLifecycle(stage: WorkflowStage, lifecycle: Art
 }
 
 export function createArtifactItemsForStage(stage: WorkflowStage, status: ArtifactStatus): ArtifactItem[] {
-  if (stage === "计划阶段") {
-    return [
-      { label: ".deepagents/prd-analysis.md", status },
-      { label: ".deepagents/generated-spec.md", status },
-      { label: ".deepagents/plan-spec.json", status },
-      { label: ".deepagents/plan-validation.json", status },
-    ];
-  }
-
-  return [
-    { label: "app/api/**", status },
-    { label: "app/** 页面与布局", status },
-    { label: "app-builder-report.md", status },
-    { label: ".deepagents/generation-validation.json", status },
+  const planArtifacts: ArtifactItem[] = [
+    { label: ".deepagents/prd-analysis.md", status: stage === "计划阶段" ? status : "verified" },
+    { label: ".deepagents/generated-spec.md", status: stage === "计划阶段" ? status : "verified" },
+    { label: ".deepagents/plan-spec.json", status: stage === "计划阶段" ? status : "verified" },
+    { label: ".deepagents/plan-validation.json", status: stage === "计划阶段" ? status : "verified" },
   ];
+
+  const generationArtifacts: ArtifactItem[] = [
+    { label: "app/api/**", status: stage === "生成阶段" ? status : "pending" },
+    { label: "app/** 页面与布局", status: stage === "生成阶段" ? status : "pending" },
+    { label: "app-builder-report.md", status: stage === "生成阶段" ? status : "pending" },
+    { label: ".deepagents/generation-validation.json", status: stage === "生成阶段" ? status : "pending" },
+  ];
+
+  return [...planArtifacts, ...generationArtifacts];
 }
 
 function createTodoBoardElement(state: TodoBoardState) {
-  const completedCount = state.todos.filter((todo) => todo.status === "completed").length;
   const borderColor = borderColorForStage(state.stage);
 
   return React.createElement(
@@ -364,10 +515,10 @@ function createTodoBoardElement(state: TodoBoardState) {
           React.createElement(
             Text,
             {
-              key: "progress",
+              key: "elapsed",
               color: "green",
             },
-            `${completedCount}/${state.todos.length}`,
+            `总耗时：${formatElapsedTime(state.elapsedMs ?? 0)}`,
           ),
         ],
       ),
@@ -385,7 +536,7 @@ function createTodoBoardElement(state: TodoBoardState) {
             {
               key: "steps-panel",
               flexDirection: "column",
-              width: "58%",
+              width: "60%",
             },
             [
               React.createElement(
@@ -421,6 +572,67 @@ function createTodoBoardElement(state: TodoBoardState) {
                   buildActionLine(state),
                 ),
               ),
+              React.createElement(
+                Box,
+                {
+                  key: "logs-box",
+                  flexDirection: "column",
+                  width: "100%",
+                  marginTop: 1,
+                  borderStyle: "round",
+                  borderColor: "gray",
+                  paddingX: 1,
+                },
+                [
+                  React.createElement(
+                    Text,
+                    {
+                      key: "logs-title",
+                      bold: true,
+                    },
+                    formatLogHeader(),
+                  ),
+                  ...getVisibleLogs(state.logs ?? []).map((logLine, index) =>
+                    React.createElement(
+                      Box,
+                      {
+                        key: `log-${index}`,
+                        flexDirection: "row",
+                        flexWrap: "wrap",
+                      },
+                      (() => {
+                        const parsed = parseWorkflowLogLine(logLine);
+                        return [
+                          React.createElement(
+                            Text,
+                            {
+                              key: `log-time-${index}`,
+                              color: "gray",
+                            },
+                            parsed.timestamp ? `[${parsed.timestamp}] ` : "",
+                          ),
+                          React.createElement(
+                            Text,
+                            {
+                              key: `log-prefix-${index}`,
+                              color: parsed.prefixColor,
+                            },
+                            `${parsed.prefix} `,
+                          ),
+                          React.createElement(
+                            Text,
+                            {
+                              key: `log-message-${index}`,
+                              color: "white",
+                            },
+                            parsed.message,
+                          ),
+                        ];
+                      })(),
+                    )
+                  ),
+                ],
+              ),
             ],
           ),
           React.createElement(
@@ -428,7 +640,7 @@ function createTodoBoardElement(state: TodoBoardState) {
             {
               key: "artifacts-panel",
               flexDirection: "column",
-              width: "42%",
+              width: "40%",
             },
             [
               React.createElement(
@@ -450,67 +662,6 @@ function createTodoBoardElement(state: TodoBoardState) {
                 )
               ),
             ],
-          ),
-        ],
-      ),
-      React.createElement(
-        Box,
-        {
-          key: "logs-box",
-          flexDirection: "column",
-          width: "100%",
-          marginTop: 1,
-          borderStyle: "round",
-          borderColor: "gray",
-          paddingX: 1,
-        },
-        [
-          React.createElement(
-            Text,
-            {
-              key: "logs-title",
-              bold: true,
-            },
-            formatLogHeader(),
-          ),
-          ...getVisibleLogs(state.logs ?? []).map((logLine, index) =>
-            React.createElement(
-              Box,
-              {
-                key: `log-${index}`,
-                flexDirection: "row",
-                flexWrap: "wrap",
-              },
-              (() => {
-                const parsed = parseWorkflowLogLine(logLine);
-                return [
-                  React.createElement(
-                    Text,
-                    {
-                      key: `log-time-${index}`,
-                      color: "gray",
-                    },
-                    parsed.timestamp ? `[${parsed.timestamp}] ` : "",
-                  ),
-                  React.createElement(
-                    Text,
-                    {
-                      key: `log-prefix-${index}`,
-                      color: parsed.prefixColor,
-                    },
-                    `${parsed.prefix} `,
-                  ),
-                  React.createElement(
-                    Text,
-                    {
-                      key: `log-message-${index}`,
-                      color: "white",
-                    },
-                    parsed.message,
-                  ),
-                ];
-              })(),
-            )
           ),
         ],
       ),
@@ -594,6 +745,11 @@ export function createTodoBoardRenderer(
 let activeRenderer: TodoBoardRenderer | null = null;
 let activeWorkflowState: TodoBoardState | null = null;
 let activeWorkflowLogs: string[] = [];
+let activeWorkflowStartedAt: number | null = null;
+let activeWorkflowRenderedArtifacts: ArtifactItem[] | null = null;
+let elapsedRefreshTimer: NodeJS.Timeout | null = null;
+let artifactRefreshTimer: NodeJS.Timeout | null = null;
+let artifactRefreshInFlight = false;
 
 function trimWorkflowLogs(logs: string[], maxEntries = 200): string[] {
   return logs.slice(-maxEntries);
@@ -610,9 +766,73 @@ function sanitizeWorkflowLogContent(logLine: string): string {
   return logLine.replace(/^\[[^\]]+\]\s*/, "").trim();
 }
 
+function clearWorkflowTimers(): void {
+  if (elapsedRefreshTimer) {
+    clearInterval(elapsedRefreshTimer);
+    elapsedRefreshTimer = null;
+  }
+
+  if (artifactRefreshTimer) {
+    clearInterval(artifactRefreshTimer);
+    artifactRefreshTimer = null;
+  }
+}
+
+async function renderActiveWorkflowState(forceArtifactRefresh = false): Promise<void> {
+  if (!activeRenderer || !activeWorkflowState) {
+    return;
+  }
+
+  const elapsedMs =
+    activeWorkflowState.elapsedMs ??
+    (activeWorkflowStartedAt === null ? 0 : Date.now() - activeWorkflowStartedAt);
+
+  let artifacts = activeWorkflowRenderedArtifacts ?? activeWorkflowState.artifacts;
+
+  if (forceArtifactRefresh && !artifactRefreshInFlight) {
+    artifactRefreshInFlight = true;
+    try {
+      artifacts = await monitorArtifactItems({
+        ...activeWorkflowState,
+        logs: activeWorkflowLogs,
+        elapsedMs,
+      });
+      activeWorkflowRenderedArtifacts = artifacts;
+    } finally {
+      artifactRefreshInFlight = false;
+    }
+  }
+
+  const renderState: TodoBoardState = {
+    ...activeWorkflowState,
+    elapsedMs,
+    artifacts,
+    logs: activeWorkflowLogs,
+  };
+
+  await activeRenderer.update(renderState);
+}
+
+function ensureWorkflowTimers(): void {
+  if (!elapsedRefreshTimer) {
+    elapsedRefreshTimer = setInterval(() => {
+      void renderActiveWorkflowState(false);
+    }, 1_000);
+  }
+
+  if (!artifactRefreshTimer) {
+    artifactRefreshTimer = setInterval(() => {
+      void renderActiveWorkflowState(true);
+    }, 30_000);
+  }
+}
+
 export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> {
   if (!activeRenderer) {
     activeRenderer = createTodoBoardRenderer();
+  }
+  if (activeWorkflowStartedAt === null) {
+    activeWorkflowStartedAt = Date.now();
   }
 
   activeWorkflowState = {
@@ -620,8 +840,10 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
     logs: state.logs ?? activeWorkflowLogs,
   };
   activeWorkflowLogs = trimWorkflowLogs(activeWorkflowState.logs ?? []);
+  activeWorkflowRenderedArtifacts = activeWorkflowState.artifacts;
+  ensureWorkflowTimers();
 
-  await activeRenderer.update(activeWorkflowState);
+  await renderActiveWorkflowState(true);
 }
 
 export async function appendWorkflowLog(logLine: string): Promise<void> {
@@ -645,19 +867,24 @@ export async function appendWorkflowLog(logLine: string): Promise<void> {
     ...activeWorkflowState,
     logs: activeWorkflowLogs,
   };
-
-  await activeRenderer.update(activeWorkflowState);
+  await renderActiveWorkflowState(false);
 }
 
 export async function closeWorkflowBoard(): Promise<void> {
   if (!activeRenderer) {
     activeWorkflowState = null;
     activeWorkflowLogs = [];
+    activeWorkflowStartedAt = null;
+    activeWorkflowRenderedArtifacts = null;
+    clearWorkflowTimers();
     return;
   }
 
+  clearWorkflowTimers();
   await activeRenderer.stop();
   activeRenderer = null;
   activeWorkflowState = null;
   activeWorkflowLogs = [];
+  activeWorkflowStartedAt = null;
+  activeWorkflowRenderedArtifacts = null;
 }

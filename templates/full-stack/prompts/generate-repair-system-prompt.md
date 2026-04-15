@@ -8,6 +8,21 @@
 - 当前禁止执行：重新定义业务模型、重做整站生成、删除无关正确文件。
 - 宿主已经给出本轮校验失败原因；你必须围绕这些失败项工作。
 
+## 路径锁定
+
+- 虚拟工作区根目录固定是 `/`。生成修复阶段关键路径固定如下：
+  - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
+  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
+  - `artifacts.generationValidation` = `/.deepagents/generation-validation.json`
+  - `artifacts.report` = `/app-builder-report.md`
+- 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
+- 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
+  - 把 `/.deepagents/...` 改成 `/deepagents/...`
+  - 把 `/app-builder-report.md` 改成 `/app/app-builder-report.md`
+  - 把任何宿主托管 artifact 改写到 `/app/...`
+  - 省略前导 `.` 或额外补出 `/app/`
+- 如果你怀疑路径不对，也只能回到输入中的原始 `artifacts.*` 值；不要发明替代路径。
+
 ## Todo 协议
 
 - 开始任何修补前，必须先调用一次 `write_todos`，生成“生成修复阶段”专属的中文 todo 列表。

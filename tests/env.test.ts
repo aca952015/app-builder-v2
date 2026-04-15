@@ -12,11 +12,13 @@ import {
   formatTodoHeader,
   formatWorkflowStageLine,
   renderArtifactStatus,
+  formatElapsedTime,
   resolveDeepagentsStreamModes,
   renderTodoBoardToString,
   renderTodoStatus,
   stripAnsi,
   summarizeDeepAgentsAction,
+  toVirtualWorkspacePath,
   withActivityTimeout,
 } from "../src/lib/text-generator.js";
 
@@ -54,6 +56,23 @@ test("resolveDeepagentsStreamModes rejects invalid modes", () => {
   );
 });
 
+test("toVirtualWorkspacePath anchors files at the virtual workspace root", () => {
+  const outputDirectory = path.resolve("tmp", "app-builder-output");
+
+  assert.equal(
+    toVirtualWorkspacePath(outputDirectory, path.join(outputDirectory, ".deepagents", "plan-spec.json")),
+    "/.deepagents/plan-spec.json",
+  );
+  assert.equal(
+    toVirtualWorkspacePath(outputDirectory, path.join(outputDirectory, "app-builder-report.md")),
+    "/app-builder-report.md",
+  );
+  assert.equal(
+    toVirtualWorkspacePath(outputDirectory, path.join(outputDirectory, "app", "api", "work-orders", "route.ts")),
+    "/app/api/work-orders/route.ts",
+  );
+});
+
 test("estimateRenderedRows accounts for wrapped ascii lines", () => {
   assert.equal(estimateRenderedRows(["12345", "123456"], 5), 3);
 });
@@ -79,30 +98,52 @@ test("formatWorkflowStageLine highlights the active stage in the pipeline", () =
   );
 });
 
+test("formatElapsedTime renders hh:mm:ss", () => {
+  assert.equal(formatElapsedTime(0), "00:00:00");
+  assert.equal(formatElapsedTime(65_000), "00:01:05");
+  assert.equal(formatElapsedTime(3_726_000), "01:02:06");
+});
+
 test("renderArtifactStatus shows workflow output states", () => {
+  assert.equal(renderArtifactStatus("pending"), "[待生成]");
   assert.equal(renderArtifactStatus("generating"), "[生成中]");
+  assert.equal(renderArtifactStatus("generated"), "[已生成]");
   assert.equal(renderArtifactStatus("validating"), "[验证中]");
   assert.equal(renderArtifactStatus("verified"), "[已验证]");
 });
 
 test("createArtifactItemsForStage returns key artifacts for each workflow stage", () => {
   assert.deepEqual(
-    createArtifactItemsForStage("计划阶段", "generating").map((item) => item.label),
+    createArtifactItemsForStage("计划阶段", "generating").map((item) => ({
+      label: item.label,
+      status: item.status,
+    })),
     [
-      ".deepagents/prd-analysis.md",
-      ".deepagents/generated-spec.md",
-      ".deepagents/plan-spec.json",
-      ".deepagents/plan-validation.json",
+      { label: ".deepagents/prd-analysis.md", status: "generating" },
+      { label: ".deepagents/generated-spec.md", status: "generating" },
+      { label: ".deepagents/plan-spec.json", status: "generating" },
+      { label: ".deepagents/plan-validation.json", status: "generating" },
+      { label: "app/api/**", status: "pending" },
+      { label: "app/** 页面与布局", status: "pending" },
+      { label: "app-builder-report.md", status: "pending" },
+      { label: ".deepagents/generation-validation.json", status: "pending" },
     ],
   );
 
   assert.deepEqual(
-    createArtifactItemsForStage("生成阶段", "verified").map((item) => item.label),
+    createArtifactItemsForStage("生成阶段", "verified").map((item) => ({
+      label: item.label,
+      status: item.status,
+    })),
     [
-      "app/api/**",
-      "app/** 页面与布局",
-      "app-builder-report.md",
-      ".deepagents/generation-validation.json",
+      { label: ".deepagents/prd-analysis.md", status: "verified" },
+      { label: ".deepagents/generated-spec.md", status: "verified" },
+      { label: ".deepagents/plan-spec.json", status: "verified" },
+      { label: ".deepagents/plan-validation.json", status: "verified" },
+      { label: "app/api/**", status: "verified" },
+      { label: "app/** 页面与布局", status: "verified" },
+      { label: "app-builder-report.md", status: "verified" },
+      { label: ".deepagents/generation-validation.json", status: "verified" },
     ],
   );
 });
@@ -117,6 +158,7 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
     ],
     artifacts: createArtifactItemsForStage("计划阶段", "validating"),
     narrative: "正在整理分析稿。",
+    elapsedMs: 65_000,
     logs: [
       "[12:34:56] [FLOW] 进入计划阶段，开始流式生成。",
       "[12:34:57] [READ] 读取文件：.deepagents/source-prd.md",
@@ -126,13 +168,15 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
 
   assert.match(output, /计划阶段/);
   assert.match(output, /计划阶段 -> 生成阶段 -> 完成阶段/);
-  assert.match(output, /1\/3/);
+  assert.match(output, /总耗时：00:01:05/);
   assert.match(output, /执行步骤（1\/3）：/);
   assert.match(output, /读取 PRD 与模板上下文/);
   assert.match(output, /整理分析稿与详细 spec/);
   assert.match(output, /关键产出物：/);
   assert.match(output, /prd-analysis\.md/);
   assert.match(output, /\[验证中\]/);
+  assert.match(output, /app-builder-report\.md/);
+  assert.match(output, /\[待生成\]/);
   assert.match(output, /当前动作：正在整理分析稿。/);
   assert.match(output, /详细日志：/);
   assert.match(output, /\[12:34:56\] \[FLOW\] 进入计划阶段/);

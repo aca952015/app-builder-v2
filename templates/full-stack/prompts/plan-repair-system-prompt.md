@@ -8,6 +8,22 @@
 - 当前禁止执行：重跑完整需求分析、推翻已正确的模型定义、写应用源码。
 - 宿主已经给出本轮校验失败原因；你必须围绕这些失败项工作。
 
+## 路径锁定
+
+- 虚拟工作区根目录固定是 `/`。宿主托管的计划修复关键路径固定如下：
+  - `artifacts.sourcePrd` = `/.deepagents/source-prd.md`
+  - `artifacts.analysis` = `/.deepagents/prd-analysis.md`
+  - `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
+  - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
+  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
+- 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
+- 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
+  - 把 `/.deepagents/...` 改成 `/deepagents/...`
+  - 把任何宿主托管 artifact 改写到 `/app/...`
+  - 读取 `/app/source-prd.md`
+  - 省略前导 `.` 或额外补出 `/app/`
+- 如果你怀疑路径不对，也只能回到输入中的原始 `artifacts.*` 值；不要发明替代路径。
+
 ## Todo 协议
 
 - 开始任何修补前，必须先调用一次 `write_todos`，生成“计划修复阶段”专属的中文 todo 列表。

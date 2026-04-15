@@ -329,6 +329,76 @@ class RetryingGenerationTextGenerator implements TextGenerator {
   }
 }
 
+class MisplacedArtifactTextGenerator implements TextGenerator {
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildPlanSpec();
+    const misplacedDeepagentsDirectory = path.join(runtime.outputDirectory, "app", ".deepagents");
+
+    await mkdir(misplacedDeepagentsDirectory, { recursive: true });
+    await writeFile(
+      path.join(misplacedDeepagentsDirectory, "prd-analysis.md"),
+      "# Misplaced 分析稿\n\nThis was incorrectly written beneath /app.\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(misplacedDeepagentsDirectory, "generated-spec.md"),
+      "# Misplaced Spec\n\nThis was incorrectly written beneath /app.\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(misplacedDeepagentsDirectory, "plan-spec.json"),
+      `${JSON.stringify(planSpec, null, 2)}\n`,
+      "utf8",
+    );
+
+    return {
+      summary: "Planner mistakenly wrote host artifacts under /app.",
+      artifactsWritten: [
+        "/app/.deepagents/prd-analysis.md",
+        "/app/.deepagents/generated-spec.md",
+        "/app/.deepagents/plan-spec.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    await mkdir(path.join(runtime.outputDirectory, "app"), { recursive: true });
+    await mkdir(path.join(runtime.outputDirectory, "generated"), { recursive: true });
+    await writeFile(
+      path.join(runtime.outputDirectory, "app", "app-builder-report.md"),
+      "# Misplaced Report\n\nThis was incorrectly written beneath /app.\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(runtime.outputDirectory, "generated", "marker.txt"),
+      "misplaced-artifacts-recovered\n",
+      "utf8",
+    );
+
+    return {
+      summary: "Generator mistakenly wrote the report under /app.",
+      filesWritten: [
+        "/app/app-builder-report.md",
+        "generated/marker.txt",
+      ],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in MisplacedArtifactTextGenerator");
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("generateRepairProject should not be called in MisplacedArtifactTextGenerator");
+  }
+}
+
 test("generateApplication stages starter scaffold and split-phase artifacts", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -516,6 +586,44 @@ test("generateApplication retries the generate phase without rerunning planning"
   }
 });
 
+test("generateApplication relocates host artifacts that were mistakenly written under app", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-misplaced-artifacts-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator: new MisplacedArtifactTextGenerator(),
+    });
+
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents", "prd-analysis.md"), "utf8"),
+      /Misplaced 分析稿/,
+    );
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents", "generated-spec.md"), "utf8"),
+      /Misplaced Spec/,
+    );
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents", "plan-spec.json"), "utf8"),
+      /"version": 1/,
+    );
+    assert.match(
+      await readFile(path.join(result.outputDirectory, "app-builder-report.md"), "utf8"),
+      /Misplaced Report/,
+    );
+    await assert.rejects(() =>
+      access(path.join(result.outputDirectory, "app", ".deepagents", "plan-spec.json")),
+    );
+    await assert.rejects(() =>
+      access(path.join(result.outputDirectory, "app", "app-builder-report.md")),
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("full-stack template starter copies scaffold files into the output root", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-starter-"));
 
@@ -593,6 +701,21 @@ test("starter sidebar source explicitly guards against third-level navigation", 
   assert.match(sidebarSource, /import sidebarMenu from "\.\/sidebar-menu\.json"/);
 });
 
+test("generated app architecture reference matches the TailAdmin starter skeleton", async () => {
+  const architectureSource = await readFile(
+    path.resolve(process.cwd(), "templates/full-stack/references/generated-app-architecture.md"),
+    "utf8",
+  );
+
+  assert.match(architectureSource, /app\/\(admin\)\/layout\.tsx/);
+  assert.match(architectureSource, /app\/\(full-width-pages\)\/login\/page\.tsx/);
+  assert.match(architectureSource, /layout\/AdminShell\.tsx/);
+  assert.match(architectureSource, /config\/sidebar-menu\.json/);
+  assert.match(architectureSource, /SQLite/);
+  assert.match(architectureSource, /TailAdmin/);
+  assert.match(architectureSource, /route groups/);
+});
+
 test("split prompts enforce plan-spec gating and plan-spec-only generation", async () => {
   const planPromptSource = await readFile(
     path.resolve(process.cwd(), "templates/full-stack/prompts/plan-system-prompt.md"),
@@ -616,13 +739,24 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planPromptSource, /不能写应用源码/);
   assert.match(planPromptSource, /必须先调用一次 `write_todos`/);
   assert.match(planPromptSource, /必须持续更新 todo 状态/);
+  assert.match(planPromptSource, /`\/\.deepagents\/source-prd\.md`/);
+  assert.match(planPromptSource, /`\/\.deepagents\/prd-analysis\.md`/);
+  assert.match(planPromptSource, /把 `\/\.deepagents\/\.\.\.` 改成 `\/deepagents\/\.\.\.`/);
   assert.match(generatePromptSource, /`planSpec` 是唯一事实来源/);
   assert.match(generatePromptSource, /不能重新分析原始 PRD/);
   assert.match(generatePromptSource, /implementedPages/);
   assert.match(generatePromptSource, /必须先调用一次 `write_todos`/);
   assert.match(generatePromptSource, /必须持续更新 todo 状态/);
+  assert.match(generatePromptSource, /必须先读取 `\/\.deepagents\/references\/generated-app-architecture\.md`/);
+  assert.match(generatePromptSource, /route groups、shell、context、sidebar 和鉴权约定/);
+  assert.match(generatePromptSource, /`\/\.deepagents\/plan-spec\.json`/);
+  assert.match(generatePromptSource, /`\/app-builder-report\.md`/);
+  assert.match(generatePromptSource, /把 `\/app-builder-report\.md` 改成 `\/app\/app-builder-report\.md`/);
   assert.match(planRepairPromptSource, /validationFailures/);
   assert.match(planRepairPromptSource, /只补齐缺失或错误部分/);
+  assert.match(planRepairPromptSource, /`\/\.deepagents\/source-prd\.md`/);
   assert.match(generateRepairPromptSource, /validationFailures/);
   assert.match(generateRepairPromptSource, /只补齐缺失实现或错误接线/);
+  assert.match(generateRepairPromptSource, /`\/\.deepagents\/generation-validation\.json`/);
+  assert.match(generateRepairPromptSource, /`\/app-builder-report\.md`/);
 });
