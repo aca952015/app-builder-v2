@@ -259,13 +259,13 @@ export function estimateRenderedRows(lines: string[], columns: number): number {
 }
 
 function clearPreviousBoard(renderedRows: number): void {
-  if (!process.stdout.isTTY || renderedRows === 0) {
+  if (!process.stdout.isTTY) {
     return;
   }
 
-  readline.moveCursor(process.stdout, 0, -renderedRows);
+  void renderedRows;
+  readline.cursorTo(process.stdout, 0, 0);
   readline.clearScreenDown(process.stdout);
-  readline.cursorTo(process.stdout, 0);
 }
 
 function renderTodoBoard(trace: DeepAgentsTraceState): void {
@@ -805,9 +805,16 @@ export class DeepAgentsTextGenerator implements TextGenerator {
                 version: runtime.templateVersion,
                 directory: path.relative(runtime.outputDirectory, runtime.templateDirectory).split(path.sep).join("/"),
               },
+              generationPolicy: {
+                dataMode: "rest_api",
+                requireExplicitDataModelBeforeCodegen: true,
+                maxAnalysisRetries: runtime.maxAnalysisRetries ?? 0,
+                analysisAttempt: runtime.analysisAttempt ?? 1,
+                retryStage: runtime.retryStage ?? "计划阶段",
+                retryReasons: runtime.retryReasons ?? [],
+              },
               artifacts: {
                 sourcePrd: path.relative(runtime.outputDirectory, runtime.sourcePrdSnapshotPath).split(path.sep).join("/"),
-                normalizedSpec: path.relative(runtime.outputDirectory, runtime.normalizedSpecSnapshotPath).split(path.sep).join("/"),
                 analysis: path.relative(runtime.outputDirectory, runtime.deepagentsAnalysisPath).split(path.sep).join("/"),
                 generatedSpec: path.relative(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath).split(path.sep).join("/"),
                 errorLog: path.relative(runtime.outputDirectory, runtime.deepagentsErrorLogPath).split(path.sep).join("/"),

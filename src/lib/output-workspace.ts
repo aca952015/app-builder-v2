@@ -51,7 +51,6 @@ export async function prepareOutputWorkspace(options: {
     deepagentsTemplateDirectory: deepagentsDirectory,
     templateLockPath: path.join(outputDirectory, "template-lock.json"),
     sourcePrdSnapshotPath: path.join(deepagentsDirectory, "source-prd.md"),
-    normalizedSpecSnapshotPath: path.join(deepagentsDirectory, "normalized-spec.json"),
     deepagentsAnalysisPath: path.join(deepagentsDirectory, "prd-analysis.md"),
     deepagentsDetailedSpecPath: path.join(deepagentsDirectory, "generated-spec.md"),
   };

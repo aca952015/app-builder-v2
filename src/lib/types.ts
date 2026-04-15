@@ -132,7 +132,6 @@ export type OutputWorkspace = {
   deepagentsTemplateDirectory: string;
   templateLockPath: string;
   sourcePrdSnapshotPath: string;
-  normalizedSpecSnapshotPath: string;
   deepagentsAnalysisPath: string;
   deepagentsDetailedSpecPath: string;
 };
@@ -151,9 +150,12 @@ export type TextGeneratorRuntime = {
   templateDirectory: string;
   templateSystemPromptPath: string;
   sourcePrdSnapshotPath: string;
-  normalizedSpecSnapshotPath: string;
   deepagentsAnalysisPath: string;
   deepagentsDetailedSpecPath: string;
+  analysisAttempt?: number;
+  maxAnalysisRetries?: number;
+  retryReasons?: string[];
+  retryStage?: "计划阶段" | "生成阶段";
 };
 
 export type TextGenerator = {

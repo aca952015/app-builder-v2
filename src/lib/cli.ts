@@ -72,11 +72,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
   stdout.log(`Session: ${result.sessionId}`);
   stdout.log(`Template: ${result.templateId}`);
   stdout.log(`Generated ${result.report.appName} at ${result.outputDirectory}`);
-  stdout.log(`Entities: ${result.report.entities.join(", ")}`);
-  if (result.report.defaultsApplied.length > 0) {
-    stdout.log(`Defaults: ${result.report.defaultsApplied.join(" | ")}`);
-  }
-  if (result.report.warnings.length > 0) {
-    stderr.error(`Warnings: ${result.report.warnings.join(" | ")}`);
+  if (result.report.entities.length > 0) {
+    stdout.log(`Entities: ${result.report.entities.join(", ")}`);
   }
 }

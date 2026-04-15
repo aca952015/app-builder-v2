@@ -21,10 +21,96 @@ class StubTextGenerator implements TextGenerator {
       "stub-generator-ran\n",
       "utf8",
     );
+    await writeFile(
+      runtime.deepagentsAnalysisPath,
+      [
+        "# Stub 需求分析报告",
+        "",
+        "## 1. 产品目标",
+        "",
+        "验证宿主不会再用硬编码 fallback 重写分析稿。",
+        "",
+        "## 2. 主要对象",
+        "",
+        "- WorkOrder",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      runtime.deepagentsDetailedSpecPath,
+      [
+        "# Stub 实施详细设计规格书",
+        "",
+        "## 1. 产品概述",
+        "",
+        "这是 generator 自己写入的详细 spec。",
+        "",
+        "## 3. 数据模型 (Prisma Schema)",
+        "",
+        "### WorkOrder",
+        "",
+        "- title",
+        "- status",
+        "",
+        "## 5. 页面清单与功能详情",
+        "",
+        "- 工单列表 (/work-orders)",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
 
     return {
       summary: "Stub generator updated the starter scaffold.",
-      filesWritten: ["app-builder-report.md", "generated/marker.txt"],
+      filesWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        "app-builder-report.md",
+        "generated/marker.txt",
+      ],
+      notes: [],
+    };
+  }
+}
+
+class RetryingStubTextGenerator implements TextGenerator {
+  attempts = 0;
+
+  async generateProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    this.attempts += 1;
+
+    if (this.attempts === 1) {
+      return {
+        summary: "过早返回结构化结果。",
+        filesWritten: [],
+        notes: [],
+      };
+    }
+
+    await writeFile(
+      runtime.deepagentsAnalysisPath,
+      "# 重试后的分析稿\n\n已在同一工作目录中补齐 artifacts.analysis。\n",
+      "utf8",
+    );
+    await writeFile(
+      runtime.deepagentsDetailedSpecPath,
+      "# 重试后的详细 Spec\n\n已在同一工作目录中补齐 artifacts.generatedSpec。\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(runtime.outputDirectory, "app-builder-report.md"),
+      "# Retry Report\n\nArtifacts repaired during retry.\n",
+      "utf8",
+    );
+
+    return {
+      summary: "重试后已补齐必需 artifacts。",
+      filesWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        "app-builder-report.md",
+      ],
       notes: [],
     };
   }
@@ -69,10 +155,6 @@ test("generateApplication stages starter scaffold and artifacts", async () => {
       path.join(result.outputDirectory, ".deepagents/source-prd.md"),
       "utf8",
     );
-    const normalizedSpecSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/normalized-spec.json"),
-      "utf8",
-    );
     const analysisSnapshot = await readFile(
       path.join(result.outputDirectory, ".deepagents/prd-analysis.md"),
       "utf8",
@@ -108,18 +190,52 @@ test("generateApplication stages starter scaffold and artifacts", async () => {
     assert.match(promptSnapshot, /TailAdmin/);
     assert.match(promptSnapshot, /config\/sidebar-menu\.json/);
     assert.match(sourcePrdSnapshot, /# Field Ops Planner/);
-    assert.match(normalizedSpecSnapshot, /"appName": "Field Ops Planner"/);
-    assert.match(analysisSnapshot, /PRD 分析稿|产品目标/);
-    assert.doesNotMatch(analysisSnapshot, /deepagents 将在运行过程中更新这份分析稿/);
-    assert.match(generatedSpecSnapshot, /生成用 Spec|产品概述/);
-    assert.doesNotMatch(generatedSpecSnapshot, /deepagents 将在运行过程中更新这份详细 spec/);
-    assert.match(generatedSpecSnapshot, /## 产品概述/);
-    assert.match(generatedSpecSnapshot, /## 数据模型/);
+    assert.match(analysisSnapshot, /# Stub 需求分析报告/);
+    assert.match(analysisSnapshot, /## 1\. 产品目标/);
+    assert.match(generatedSpecSnapshot, /# Stub 实施详细设计规格书/);
+    assert.match(generatedSpecSnapshot, /## 3\. 数据模型 \(Prisma Schema\)/);
+    assert.match(generatedSpecSnapshot, /WorkOrder/);
+    assert.match(generatedSpecSnapshot, /## 5\. 页面清单与功能详情/);
     assert.doesNotMatch(deepagentsConfig, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.doesNotMatch(stagedReference, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.equal(result.files.some((file) => file.startsWith(".git/")), false);
+    await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/normalized-spec.json")));
     await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/prompts")));
     await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/starter")));
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication retries when the agent returns before required artifacts are written", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-retry-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new RetryingStubTextGenerator();
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+    });
+
+    assert.equal(generator.attempts, 2);
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8"),
+      /重试后的分析稿/,
+    );
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8"),
+      /重试后的详细 Spec/,
+    );
+    assert.match(
+      await readFile(path.join(result.outputDirectory, "app-builder-report.md"), "utf8"),
+      /Artifacts repaired during retry/,
+    );
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8"),
+      /artifacts\.analysis|artifacts\.generatedSpec|filesWritten/,
+    );
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -198,4 +314,15 @@ test("starter sidebar source explicitly guards against third-level navigation", 
 
   assert.match(sidebarSource, /supports at most two menu levels/);
   assert.match(sidebarSource, /import sidebarMenu from "\.\/sidebar-menu\.json"/);
+});
+
+test("system prompt requires retries to continue the unfinished stage in place", async () => {
+  const promptSource = await readFile(
+    path.resolve(process.cwd(), "templates/full-stack/prompts/system-prompt.md"),
+    "utf8",
+  );
+
+  assert.match(promptSource, /generationPolicy\.retryStage/);
+  assert.match(promptSource, /继续完成该阶段未完成的工作/);
+  assert.match(promptSource, /不要删除、覆盖或重建整个会话目录/);
 });
