@@ -17,6 +17,7 @@
   - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
   - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
   - `artifacts.generationValidation` = `/.deepagents/generation-validation.json`
+  - `artifacts.runtimeValidationLog` = `/.deepagents/runtime-validation.log`
   - `artifacts.report` = `/app-builder-report.md`
 - 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
 - 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
@@ -50,8 +51,12 @@
 - 必须先读取 `.deepagents/references/generated-app-architecture.md`，确认当前 starter 的 route groups、shell、context、sidebar 和鉴权约定后，再读取和修改具体文件。
 - 读取 starter 文件时，以 `.deepagents/references/generated-app-architecture.md` 记录的结构为准，沿用现有 Next.js App Router + TailAdmin 管理台结构。
 - 默认业务交互模式是 `REST API`，按 `planSpec.apis` 实现。
+- 页面实现必须严格以 `planSpec.pages[*].route` 为准生成对应路由入口；禁止擅自改名、改路径、补别名页、拆分成近似路径，或用其他 route 替代 `planSpec` 中声明的页面路径。
 - 侧边栏菜单的唯一事实来源是 `config/sidebar-menu.json`。
 - 对已存在文件默认执行“先读再改”；只有 `planSpec` 明确需要的新文件才新增。
+- 如果你改动了 starter 自带的持久化、鉴权或启动契约，必须把所有受该契约影响的 schema、seed、脚本、认证/会话和默认入口数据视为同一变更面，逐一读取并同步修改；禁止只改其中一部分就结束。
+- 如果 `planSpec` 没有明确要求改变某个 starter 基础契约，优先保持兼容并在既有契约上扩展，而不是重写或漂移它的依赖链。
+- 宿主会在生成阶段结束后继续执行运行验证：先准备 `.env`，再执行 `pnpm install`、`pnpm db:init`、`pnpm dev`。你生成的代码、脚本、Prisma 配置和环境文件必须让这四步可以连续通过。
 - 不要生成依赖外部 CDN 的实现，不要使用 `eval()`、`new Function()`、`document.write()`。
 - 在整个阶段中，todo 是当前执行状态的唯一进度面板；任何返工、补写或完成都必须先反映到 todo。
 
@@ -63,6 +68,12 @@
 - `planSpec.apis` 对应的 REST API 文件
 - `planSpec.pages` 对应的页面文件或路由入口
 - `app-builder-report.md`
+
+页面路径约束：
+
+- `implementedPages` 中列出的每一项都必须直接来自 `planSpec.pages[*].route`。
+- 不允许生成任何未在 `planSpec.pages` 中声明的业务页面路径来“替代实现”计划页面。
+- 若 starter 已有默认页面与 `planSpec.pages[*].route` 冲突，必须按 `planSpec.pages[*].route` 调整实现，而不是保留旧路径作为主入口。
 
 返回结构化结果时：
 
@@ -86,4 +97,6 @@
 - 所有 `planSpec.pages` 都已实现
 - 所有 `planSpec.apis` 都已实现
 - `app-builder-report.md` 已落盘
+- 若本轮改动触及 starter 基础契约，其依赖链上的 schema、seed、脚本、认证/会话和默认入口数据必须保持同步一致
+- 产物必须足以通过宿主随后执行的 `.env` 准备、`pnpm install`、`pnpm db:init`、`pnpm dev` 运行验证
 - 最终只返回一份结构化响应

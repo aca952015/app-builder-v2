@@ -79,6 +79,34 @@ export type GeneratedProject = {
   notes: string[];
 };
 
+export type GenerationValidationStep = {
+  name: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type GeneratedAppValidator = {
+  validate(outputDirectory: string, runtime: TextGeneratorRuntime): Promise<{
+    reasons: string[];
+    steps: GenerationValidationStep[];
+  }>;
+};
+
+export type WorkflowPhase = "plan" | "plan_repair" | "generate" | "generate_repair" | "complete";
+export type ValidationPhase = "plan" | "generate";
+
+export type SessionValidationResult = {
+  sessionId: string;
+  phase: ValidationPhase;
+  outputDirectory: string;
+  valid: boolean;
+  reasons: string[];
+  validationPath: string;
+  runtimeValidationLogPath?: string;
+  workflowPhase: WorkflowPhase;
+  resumedFromPhase?: Extract<WorkflowPhase, "plan_repair" | "generate_repair">;
+};
+
 export type PlanResult = {
   summary: string;
   artifactsWritten: string[];
@@ -150,6 +178,7 @@ export type OutputWorkspace = {
   deepagentsDirectory: string;
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
+  deepagentsRuntimeValidationLogPath: string;
   deepagentsConfigPath: string;
   deepagentsPlanPromptSnapshotPath: string;
   deepagentsPlanRepairPromptSnapshotPath: string;
@@ -171,6 +200,7 @@ export type TextGeneratorRuntime = {
   deepagentsDirectory: string;
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
+  deepagentsRuntimeValidationLogPath: string;
   deepagentsConfigPath: string;
   deepagentsPlanPromptSnapshotPath: string;
   deepagentsPlanRepairPromptSnapshotPath: string;
@@ -211,4 +241,5 @@ export type GenerateAppOptions = {
   templateId?: string;
   force?: boolean;
   generator?: TextGenerator;
+  validator?: GeneratedAppValidator;
 };

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm run build && node dist/tests/env.test.js && node dist/tests/parser.test.js && node dist/tests/generator.test.js",
+    "test": "pnpm run build && node dist/tests/env.test.js && node dist/tests/parser.test.js && node dist/tests/generator.test.js && node dist/tests/cli.test.js",
     "lint": "node ./scripts/lint.mjs",
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test"
   },

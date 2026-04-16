@@ -1,5 +1,10 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
+import { request } from "node:http";
+import { createServer } from "node:net";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { prepareOutputWorkspace, writeDeepagentsConfig } from "./output-workspace.js";
@@ -15,17 +20,384 @@ import {
   updateWorkflowBoard,
 } from "./terminal-ui.js";
 import {
+  type GeneratedAppValidator,
   GenerateAppOptions,
   GeneratedProject,
+  GenerationValidationStep,
   GenerationReport,
   GenerationResult,
   PlanResult,
+  SessionValidationResult,
+  TextGenerator,
   TextGeneratorRuntime,
+  ValidationPhase,
 } from "./types.js";
 
 const MAX_PLAN_REPAIRS = 2;
 const MAX_GENERATION_REPAIRS = 2;
+const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段";
+
+class PassthroughGeneratedAppValidator implements GeneratedAppValidator {
+  async validate(): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
+    return {
+      reasons: [],
+      steps: [],
+    };
+  }
+}
+
+function summarizeCommandOutput(output: string): string {
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return "没有捕获到额外输出。";
+  }
+
+  const excerpt = lines.slice(-8).join(" | ");
+  return excerpt.length > 400 ? `${excerpt.slice(0, 397)}...` : excerpt;
+}
+
+async function appendRuntimeValidationLog(logPath: string, lines: string[]): Promise<void> {
+  await fs.appendFile(logPath, `${lines.join("\n")}\n`, "utf8");
+}
+
+async function terminateChildProcess(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  child.kill("SIGTERM");
+  const exitPromise = once(child, "exit").catch(() => undefined);
+  const settled = await Promise.race([
+    exitPromise.then(() => true),
+    sleep(3_000).then(() => false),
+  ]);
+
+  if (settled) {
+    return;
+  }
+
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+  }
+  await exitPromise;
+}
+
+async function runCommandStep(options: {
+  name: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+  logPath: string;
+}): Promise<{ step: GenerationValidationStep; output: string }> {
+  const child = spawn(options.command, options.args, {
+    cwd: options.cwd,
+    env: {
+      ...process.env,
+      ...options.env,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let output = "";
+  let timedOut = false;
+
+  await appendRuntimeValidationLog(options.logPath, [
+    `=== ${options.name} ===`,
+    `$ ${[options.command, ...options.args].join(" ")}`,
+    "",
+  ]);
+
+  const onChunk = (chunk: Buffer) => {
+    const text = chunk.toString("utf8");
+    output += text;
+    void fs.appendFile(options.logPath, text, "utf8");
+  };
+
+  child.stdout.on("data", onChunk);
+  child.stderr.on("data", onChunk);
+
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    void terminateChildProcess(child);
+  }, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
+
+  const [exitCode, signal] = await once(child, "exit") as [number | null, NodeJS.Signals | null];
+  clearTimeout(timeout);
+
+  await appendRuntimeValidationLog(options.logPath, [
+    "",
+    timedOut
+      ? `[timeout] ${options.name} 在 ${(options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS) / 1000}s 内未完成。`
+      : `[exit] code=${exitCode ?? "null"} signal=${signal ?? "null"}`,
+    "",
+  ]);
+
+  if (timedOut) {
+    return {
+      step: {
+        name: options.name,
+        ok: false,
+        detail: `执行超时。摘要：${summarizeCommandOutput(output)}`,
+      },
+      output,
+    };
+  }
+
+  if (exitCode !== 0) {
+    return {
+      step: {
+        name: options.name,
+        ok: false,
+        detail: `退出码 ${exitCode ?? "null"}。摘要：${summarizeCommandOutput(output)}`,
+      },
+      output,
+    };
+  }
+
+  return {
+    step: {
+      name: options.name,
+      ok: true,
+      detail: "执行成功。",
+    },
+    output,
+  };
+}
+
+async function ensureEnvFile(outputDirectory: string, logPath: string): Promise<GenerationValidationStep> {
+  const envExamplePath = path.join(outputDirectory, ".env.example");
+  const envPath = path.join(outputDirectory, ".env");
+
+  if (await readIfExists(envPath)) {
+    await appendRuntimeValidationLog(logPath, [
+      "=== mv .env.example .env ===",
+      "[skip] .env 已存在，保留当前文件。",
+      "",
+    ]);
+    return {
+      name: "mv .env.example .env",
+      ok: true,
+      detail: ".env 已存在，跳过覆盖。",
+    };
+  }
+
+  const envExampleContents = await readIfExists(envExamplePath);
+  if (!envExampleContents) {
+    await appendRuntimeValidationLog(logPath, [
+      "=== mv .env.example .env ===",
+      "[error] 缺少 .env.example，无法准备运行环境。",
+      "",
+    ]);
+    return {
+      name: "mv .env.example .env",
+      ok: false,
+      detail: "缺少 .env.example，无法生成 .env。",
+    };
+  }
+
+  await fs.copyFile(envExamplePath, envPath);
+  await appendRuntimeValidationLog(logPath, [
+    "=== mv .env.example .env ===",
+    "[ok] 已按校验要求从 .env.example 生成 .env（保留 example 以支持重复验证）。",
+    "",
+  ]);
+  return {
+    name: "mv .env.example .env",
+    ok: true,
+    detail: "已从 .env.example 生成 .env。",
+  };
+}
+
+async function reserveFreePort(): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close(() => reject(new Error("Could not allocate a free port.")));
+        return;
+      }
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+  });
+}
+
+async function pingDevServer(port: number): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/",
+        method: "GET",
+        timeout: 1_000,
+      },
+      (response) => {
+        response.resume();
+        resolve(true);
+      },
+    );
+
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on("error", () => resolve(false));
+    req.end();
+  });
+}
+
+async function runDevValidationStep(outputDirectory: string, logPath: string): Promise<GenerationValidationStep> {
+  const port = await reserveFreePort();
+  const child = spawn("pnpm", ["dev"], {
+    cwd: outputDirectory,
+    env: {
+      ...process.env,
+      HOSTNAME: "127.0.0.1",
+      PORT: String(port),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let output = "";
+  let finished = false;
+
+  await appendRuntimeValidationLog(logPath, [
+    "=== pnpm dev ===",
+    `$ PORT=${port} HOSTNAME=127.0.0.1 pnpm dev`,
+    "",
+  ]);
+
+  const onChunk = (chunk: Buffer) => {
+    const text = chunk.toString("utf8");
+    output += text;
+    void fs.appendFile(logPath, text, "utf8");
+  };
+
+  child.stdout.on("data", onChunk);
+  child.stderr.on("data", onChunk);
+
+  const finish = async (step: GenerationValidationStep): Promise<GenerationValidationStep> => {
+    if (finished) {
+      return step;
+    }
+    finished = true;
+    await terminateChildProcess(child);
+    await appendRuntimeValidationLog(logPath, [
+      "",
+      step.ok ? `[ok] ${step.detail}` : `[error] ${step.detail}`,
+      "",
+    ]);
+    return step;
+  };
+
+  const timeoutAt = Date.now() + DEFAULT_DEV_SERVER_READY_TIMEOUT_MS;
+  while (!finished && Date.now() < timeoutAt) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      const exitCode = child.exitCode;
+      const signal = child.signalCode;
+      return await finish({
+        name: "pnpm dev",
+        ok: false,
+        detail: `开发服务器提前退出，exitCode=${exitCode ?? "null"} signal=${signal ?? "null"}。摘要：${summarizeCommandOutput(output)}`,
+      });
+    }
+
+    if (await pingDevServer(port)) {
+      return await finish({
+        name: "pnpm dev",
+        ok: true,
+        detail: `开发服务器已在 http://127.0.0.1:${port} 成功启动并响应请求。`,
+      });
+    }
+
+    await sleep(1_000);
+  }
+
+  return await finish({
+    name: "pnpm dev",
+    ok: false,
+    detail: `等待开发服务器启动超时。摘要：${summarizeCommandOutput(output)}`,
+  });
+}
+
+class ShellGeneratedAppValidator implements GeneratedAppValidator {
+  async validate(outputDirectory: string, runtime: TextGeneratorRuntime): Promise<{
+    reasons: string[];
+    steps: GenerationValidationStep[];
+  }> {
+    await fs.writeFile(runtime.deepagentsRuntimeValidationLogPath, "", "utf8");
+
+    const steps: GenerationValidationStep[] = [];
+
+    const envStep = await ensureEnvFile(outputDirectory, runtime.deepagentsRuntimeValidationLogPath);
+    steps.push(envStep);
+    if (!envStep.ok) {
+      return {
+        reasons: [`生成阶段运行验证失败：mv .env.example .env 未通过。${envStep.detail} 详见 .deepagents/runtime-validation.log。`],
+        steps,
+      };
+    }
+
+    const installResult = await runCommandStep({
+      name: "pnpm install",
+      command: "pnpm",
+      args: ["install"],
+      cwd: outputDirectory,
+      logPath: runtime.deepagentsRuntimeValidationLogPath,
+    });
+    steps.push(installResult.step);
+    if (!installResult.step.ok) {
+      return {
+        reasons: [`生成阶段运行验证失败：pnpm install 未通过。${installResult.step.detail} 详见 .deepagents/runtime-validation.log。`],
+        steps,
+      };
+    }
+
+    const dbInitResult = await runCommandStep({
+      name: "pnpm db:init",
+      command: "pnpm",
+      args: ["db:init"],
+      cwd: outputDirectory,
+      logPath: runtime.deepagentsRuntimeValidationLogPath,
+    });
+    steps.push(dbInitResult.step);
+    if (!dbInitResult.step.ok) {
+      return {
+        reasons: [`生成阶段运行验证失败：pnpm db:init 未通过。${dbInitResult.step.detail} 详见 .deepagents/runtime-validation.log。`],
+        steps,
+      };
+    }
+
+    const devStep = await runDevValidationStep(outputDirectory, runtime.deepagentsRuntimeValidationLogPath);
+    steps.push(devStep);
+    if (!devStep.ok) {
+      return {
+        reasons: [`生成阶段运行验证失败：pnpm dev 未通过。${devStep.detail} 详见 .deepagents/runtime-validation.log。`],
+        steps,
+      };
+    }
+
+    return {
+      reasons: [],
+      steps,
+    };
+  }
+}
 
 async function readIfExists(filePath: string): Promise<string | null> {
   try {
@@ -37,6 +409,112 @@ async function readIfExists(filePath: string): Promise<string | null> {
     }
     throw error;
   }
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeRelativePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+function routeToPageFileCandidates(route: string): string[] {
+  const cleanRoute = route.replace(/^\/+|\/+$/g, "");
+  if (!cleanRoute) {
+    return [
+      "app/page.tsx",
+      "app/(admin)/page.tsx",
+      "app/(full-width-pages)/page.tsx",
+    ];
+  }
+
+  const routePagePath = path.posix.join("app", cleanRoute, "page.tsx");
+  return [
+    routePagePath,
+    path.posix.join("app", "(admin)", cleanRoute, "page.tsx"),
+    path.posix.join("app", "(full-width-pages)", cleanRoute, "page.tsx"),
+  ];
+}
+
+function uniqueValues(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const value of values) {
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    result.push(value);
+  }
+
+  return result;
+}
+
+async function collectGeneratedCoverage(
+  outputDirectory: string,
+  planSpec: PlanSpec,
+): Promise<{
+  pageExistsByRoute: Map<string, boolean>;
+  apiExistsByPath: Map<string, boolean>;
+  missingPageRoutes: string[];
+  missingApiPaths: string[];
+  missingResources: string[];
+}> {
+  const uniquePageRoutes = uniqueValues(planSpec.pages.map((page) => page.route));
+  const uniqueApiPaths = uniqueValues(planSpec.apis.map((api) => api.path));
+  const pageExistsByRoute = new Map<string, boolean>();
+  const apiExistsByPath = new Map<string, boolean>();
+
+  for (const route of uniquePageRoutes) {
+    const candidates = routeToPageFileCandidates(route);
+    let exists = false;
+    for (const candidate of candidates) {
+      if (await pathExists(path.join(outputDirectory, normalizeRelativePath(candidate)))) {
+        exists = true;
+        break;
+      }
+    }
+    pageExistsByRoute.set(route, exists);
+  }
+
+  for (const apiPath of uniqueApiPaths) {
+    apiExistsByPath.set(
+      apiPath,
+      await pathExists(path.join(outputDirectory, normalizeRelativePath(apiPath))),
+    );
+  }
+
+  const missingPageRoutes = uniquePageRoutes.filter((route) => pageExistsByRoute.get(route) !== true);
+  const missingApiPaths = uniqueApiPaths.filter((apiPath) => apiExistsByPath.get(apiPath) !== true);
+  const missingResources: string[] = [];
+
+  for (const resource of planSpec.resources) {
+    const plannedPages = planSpec.pages.filter((page) => page.resourceName === resource.name);
+    const plannedApis = planSpec.apis.filter((api) => api.resourceName === resource.name);
+    const hasExpectedPage =
+      plannedPages.length === 0 || plannedPages.some((page) => pageExistsByRoute.get(page.route) === true);
+    const hasExpectedApi =
+      plannedApis.length > 0 && plannedApis.some((api) => apiExistsByPath.get(api.path) === true);
+
+    if (!hasExpectedPage || !hasExpectedApi) {
+      missingResources.push(resource.name);
+    }
+  }
+
+  return {
+    pageExistsByRoute,
+    apiExistsByPath,
+    missingPageRoutes,
+    missingApiPaths,
+    missingResources,
+  };
 }
 
 function resolveAppPrefixedPath(outputDirectory: string, filePath: string): string {
@@ -116,15 +594,6 @@ function collectPlanSpecConsistencyIssues(planSpec: PlanSpec): string[] {
     }
   }
 
-  for (const resource of planSpec.resources) {
-    if (!planSpec.pages.some((page) => page.resourceName === resource.name)) {
-      issues.push(`资源 ${resource.name} 缺少页面映射`);
-    }
-    if (!planSpec.apis.some((api) => api.resourceName === resource.name)) {
-      issues.push(`资源 ${resource.name} 缺少 REST API 规划`);
-    }
-  }
-
   for (const check of planSpec.acceptanceChecks) {
     if (check.type === "resource" && !resourceNames.has(check.target)) {
       issues.push(`acceptanceChecks ${check.id} 指向未定义资源 ${check.target}`);
@@ -143,6 +612,218 @@ function collectPlanSpecConsistencyIssues(planSpec: PlanSpec): string[] {
   return issues;
 }
 
+function normalizePlanSpecToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
+}
+
+function toKebabCase(value: string): string {
+  return value
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[\s_]+/g, "-")
+    .replace(/[^a-zA-Z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+}
+
+function normalizePageRouteToken(route: string): string {
+  const trimmed = route.replace(/^\/+|\/+$/g, "");
+  if (!trimmed) {
+    return "dashboard";
+  }
+
+  return normalizePlanSpecToken(
+    trimmed
+      .split("/")
+      .map((segment) => segment.replace(/\[(.+?)\]/g, "$1"))
+      .join("-"),
+  );
+}
+
+function buildInferredResource(name: string): PlanSpec["resources"][number] {
+  const routeSegmentBase = toKebabCase(name);
+  const routeSegment = routeSegmentBase.endsWith("s") ? routeSegmentBase : `${routeSegmentBase}s`;
+  const pluralName = name.endsWith("s") ? name : `${name}s`;
+
+  return {
+    name,
+    pluralName,
+    routeSegment,
+    description: `由现有 API 定义反推补齐的 ${name} 资源。`,
+    fields: [
+      {
+        name: "id",
+        label: "ID",
+        type: "string",
+        required: true,
+        source: "assumption",
+        description: "宿主自动补齐的资源主键。",
+      },
+      {
+        name: "name",
+        label: "名称",
+        type: "string",
+        required: true,
+        source: "assumption",
+        description: "宿主自动补齐的资源展示名称。",
+      },
+      {
+        name: "createdAt",
+        label: "创建时间",
+        type: "datetime",
+        required: false,
+        source: "assumption",
+        description: "宿主自动补齐的资源创建时间。",
+      },
+    ],
+    relations: [],
+  };
+}
+
+function resolvePageAcceptanceTarget(
+  target: string,
+  pages: PlanSpec["pages"],
+): string | null {
+  if (pages.some((page) => page.route === target)) {
+    return target;
+  }
+
+  const normalizedTarget = normalizePlanSpecToken(target);
+  if (!normalizedTarget) {
+    return null;
+  }
+
+  if (normalizedTarget === "dashboard") {
+    const dashboardPage = pages.find((page) => page.route === "/");
+    if (dashboardPage) {
+      return dashboardPage.route;
+    }
+  }
+
+  const byName = pages.filter((page) => normalizePlanSpecToken(page.name) === normalizedTarget);
+  if (byName.length === 1) {
+    return byName[0]!.route;
+  }
+
+  const byRoute = pages.filter((page) => normalizePageRouteToken(page.route) === normalizedTarget);
+  if (byRoute.length === 1) {
+    return byRoute[0]!.route;
+  }
+
+  const byResource = pages.filter(
+    (page) => page.resourceName && normalizePlanSpecToken(page.resourceName) === normalizedTarget,
+  );
+  if (byResource.length === 1) {
+    return byResource[0]!.route;
+  }
+
+  return null;
+}
+
+function isCrossCuttingAcceptanceCheck(check: PlanSpec["acceptanceChecks"][number]): boolean {
+  const haystack = normalizePlanSpecToken(`${check.target} ${check.description}`);
+  return [
+    "performance",
+    "security",
+    "retention",
+    "query",
+    "permission",
+    "encrypt",
+    "auth",
+    "loadtime",
+    "historydata",
+  ].some((keyword) => haystack.includes(keyword));
+}
+
+function normalizePlanSpecForHostValidation(planSpec: PlanSpec): {
+  planSpec: PlanSpec;
+  notes: string[];
+} {
+  const nextPlanSpec = JSON.parse(JSON.stringify(planSpec)) as PlanSpec;
+  const notes: string[] = [];
+
+  const existingResourceNames = new Set(nextPlanSpec.resources.map((resource) => resource.name));
+  const inferredResourceNames = Array.from(
+    new Set(
+      nextPlanSpec.apis
+        .map((api) => api.resourceName)
+        .filter((resourceName) => !existingResourceNames.has(resourceName)),
+    ),
+  );
+
+  for (const resourceName of inferredResourceNames) {
+    nextPlanSpec.resources.push(buildInferredResource(resourceName));
+    existingResourceNames.add(resourceName);
+    notes.push(`宿主根据 API 定义自动补齐资源 ${resourceName}。`);
+  }
+
+  if (inferredResourceNames.length > 0) {
+    for (const page of nextPlanSpec.pages) {
+      if (page.resourceName) {
+        continue;
+      }
+
+      const matchingResource = nextPlanSpec.resources.find(
+        (resource) => normalizePlanSpecToken(resource.routeSegment) === normalizePageRouteToken(page.route),
+      );
+      if (!matchingResource) {
+        continue;
+      }
+
+      page.resourceName = matchingResource.name;
+      notes.push(`宿主将页面 ${page.route} 关联到资源 ${matchingResource.name}。`);
+    }
+  }
+
+  const resourceNames = new Set(nextPlanSpec.resources.map((resource) => resource.name));
+  nextPlanSpec.acceptanceChecks = nextPlanSpec.acceptanceChecks.flatMap((check) => {
+    if (check.type === "page") {
+      const resolvedTarget = resolvePageAcceptanceTarget(check.target, nextPlanSpec.pages);
+      if (resolvedTarget && resolvedTarget !== check.target) {
+        notes.push(`宿主将验收项 ${check.id} 的页面目标从 ${check.target} 归一化为 ${resolvedTarget}。`);
+        return [{ ...check, target: resolvedTarget }];
+      }
+      return [check];
+    }
+
+    if (check.type === "resource") {
+      if (resourceNames.has(check.target)) {
+        return [check];
+      }
+
+      const resolvedResource = nextPlanSpec.resources.find((resource) => {
+        const normalizedTarget = normalizePlanSpecToken(check.target);
+        return (
+          normalizePlanSpecToken(resource.name) === normalizedTarget ||
+          normalizePlanSpecToken(resource.pluralName) === normalizedTarget ||
+          normalizePlanSpecToken(resource.routeSegment) === normalizedTarget
+        );
+      });
+
+      if (resolvedResource) {
+        notes.push(`宿主将验收项 ${check.id} 的资源目标从 ${check.target} 归一化为 ${resolvedResource.name}。`);
+        return [{ ...check, target: resolvedResource.name }];
+      }
+
+      if (isCrossCuttingAcceptanceCheck(check)) {
+        notes.push(`宿主移除了无法结构化校验的跨领域验收项 ${check.id}（${check.target}）。`);
+        return [];
+      }
+    }
+
+    return [check];
+  });
+
+  return {
+    planSpec: nextPlanSpec,
+    notes,
+  };
+}
+
 async function writePlanValidationResult(
   validationPath: string,
   payload: {
@@ -154,11 +835,63 @@ async function writePlanValidationResult(
   await fs.writeFile(validationPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+async function normalizePersistedPlanSpec(runtime: TextGeneratorRuntime, planSpec: PlanSpec): Promise<PlanSpec> {
+  const normalized = normalizePlanSpecForHostValidation(planSpec);
+  if (normalized.notes.length === 0) {
+    return planSpec;
+  }
+
+  await fs.writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(normalized.planSpec, null, 2)}\n`, "utf8");
+  await appendWorkflowLog(`[host] 计划规格已自动归一化：${normalized.notes.join(" ")}`);
+  return normalized.planSpec;
+}
+
+function isMissingStructuredResponseError(error: unknown): boolean {
+  return error instanceof Error && /did not return a valid structured response/.test(error.message);
+}
+
+async function synthesizeRecoveredPlanResult(
+  runtime: TextGeneratorRuntime,
+  error: unknown,
+): Promise<PlanResult | null> {
+  if (!isMissingStructuredResponseError(error)) {
+    return null;
+  }
+
+  const artifactsWritten = (
+    await Promise.all([
+      runtime.deepagentsAnalysisPath,
+      runtime.deepagentsDetailedSpecPath,
+      runtime.deepagentsPlanSpecPath,
+    ].map(async (filePath) => {
+      const contents = await readIfExists(filePath);
+      if (!contents || contents.trim().length === 0) {
+        return null;
+      }
+      return path.relative(runtime.outputDirectory, filePath).split(path.sep).join("/");
+    }))
+  ).filter((value): value is string => value !== null);
+
+  if (artifactsWritten.length === 0) {
+    return null;
+  }
+
+  await appendWorkflowLog("[host] 计划阶段结构化响应缺失，改为基于已落盘 artifact 尝试恢复。");
+
+  return {
+    summary: "结构化响应缺失，宿主已基于已落盘计划产物恢复结果。",
+    artifactsWritten,
+    planSpecVersion: 1,
+    notes: ["host-recovered-from-missing-structured-response"],
+  };
+}
+
 async function writeGenerationValidationResult(
   validationPath: string,
   payload: {
     valid: boolean;
     reasons: string[];
+    steps?: GenerationValidationStep[];
   },
 ): Promise<void> {
   await fs.writeFile(validationPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
@@ -178,7 +911,7 @@ async function updateWorkflowState(
   await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
-async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: PlanResult): Promise<{
+async function collectPersistedPlanValidation(runtime: TextGeneratorRuntime): Promise<{
   reasons: string[];
   planSpec: PlanSpec | null;
 }> {
@@ -211,7 +944,7 @@ async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: Plan
       if (!validation.success) {
         reasons.push(...validation.issues.map((issue) => `计划阶段未完成：artifacts.planSpec 校验失败：${issue}`));
       } else {
-        planSpec = validation.data;
+        planSpec = await normalizePersistedPlanSpec(runtime, validation.data);
         reasons.push(...collectPlanSpecConsistencyIssues(planSpec).map(
           (issue) => `计划阶段未完成：artifacts.planSpec 一致性校验失败：${issue}`,
         ));
@@ -221,6 +954,20 @@ async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: Plan
       reasons.push(`计划阶段未完成：artifacts.planSpec 不是合法 JSON：${message}`);
     }
   }
+
+  return {
+    reasons,
+    planSpec,
+  };
+}
+
+async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: PlanResult): Promise<{
+  reasons: string[];
+  planSpec: PlanSpec | null;
+}> {
+  const validation = await collectPersistedPlanValidation(runtime);
+  const reasons = [...validation.reasons];
+  const { planSpec } = validation;
 
   if (result.planSpecVersion !== 1) {
     reasons.push(`计划阶段未完成：结构化结果返回了不支持的 planSpecVersion=${result.planSpecVersion}。`);
@@ -242,11 +989,60 @@ async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: Plan
   };
 }
 
+async function collectPersistedGeneratedValidation(
+  outputDirectory: string,
+  runtime: TextGeneratorRuntime,
+  planSpec: PlanSpec,
+  validator: GeneratedAppValidator,
+): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
+  await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
+
+  const reasons: string[] = [];
+  const reportPath = path.join(outputDirectory, "app-builder-report.md");
+  const reportContents = await readIfExists(reportPath);
+  if (!reportContents || reportContents.trim().length === 0) {
+    reasons.push("生成阶段未完成：app-builder-report.md 尚未落盘。");
+  }
+
+  const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
+
+  if (coverage.missingApiPaths.length > 0) {
+    reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
+  }
+
+  if (coverage.missingPageRoutes.length > 0) {
+    reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
+  }
+
+  if (coverage.missingResources.length > 0) {
+    reasons.push(`生成阶段未完成：以下资源对应的页面或接口尚未完整落盘：${coverage.missingResources.join(", ")}。`);
+  }
+
+  let steps: GenerationValidationStep[] = [];
+  if (reasons.length === 0) {
+    const runtimeValidation = await validator.validate(outputDirectory, runtime);
+    reasons.push(...runtimeValidation.reasons);
+    steps = runtimeValidation.steps;
+  } else {
+    await fs.writeFile(
+      runtime.deepagentsRuntimeValidationLogPath,
+      "未执行运行命令验证：宿主落盘文件校验尚未通过。\n",
+      "utf8",
+    );
+  }
+
+  return {
+    reasons,
+    steps,
+  };
+}
+
 async function validateGeneratedArtifacts(
   outputDirectory: string,
   runtime: TextGeneratorRuntime,
   planSpec: PlanSpec,
   result: GeneratedProject,
+  validator: GeneratedAppValidator,
 ): Promise<{ reasons: string[] }> {
   await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
 
@@ -265,34 +1061,34 @@ async function validateGeneratedArtifacts(
     reasons.push("生成阶段未完成：app-builder-report.md 尚未落盘。");
   }
 
-  const implementedResources = new Set(result.implementedResources);
-  const implementedPages = new Set(result.implementedPages);
-  const implementedApis = new Set(result.implementedApis);
-
-  const missingResources = planSpec.resources
-    .map((resource) => resource.name)
-    .filter((name) => !implementedResources.has(name));
-  if (missingResources.length > 0) {
-    reasons.push(`生成阶段未完成：以下资源未被声明为已实现：${missingResources.join(", ")}。`);
+  const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
+  if (coverage.missingResources.length > 0) {
+    reasons.push(`生成阶段未完成：以下资源对应的页面或接口尚未完整落盘：${coverage.missingResources.join(", ")}。`);
+  }
+  if (coverage.missingPageRoutes.length > 0) {
+    reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
+  }
+  if (coverage.missingApiPaths.length > 0) {
+    reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
   }
 
-  const missingPages = planSpec.pages
-    .map((page) => page.route)
-    .filter((route) => !implementedPages.has(route));
-  if (missingPages.length > 0) {
-    reasons.push(`生成阶段未完成：以下页面未被声明为已实现：${missingPages.join(", ")}。`);
-  }
-
-  const missingApis = planSpec.apis
-    .map((api) => api.path)
-    .filter((apiPath) => !implementedApis.has(apiPath));
-  if (missingApis.length > 0) {
-    reasons.push(`生成阶段未完成：以下接口未被声明为已实现：${missingApis.join(", ")}。`);
+  let steps: GenerationValidationStep[] = [];
+  if (reasons.length === 0) {
+    const runtimeValidation = await validator.validate(outputDirectory, runtime);
+    reasons.push(...runtimeValidation.reasons);
+    steps = runtimeValidation.steps;
+  } else {
+    await fs.writeFile(
+      runtime.deepagentsRuntimeValidationLogPath,
+      "未执行运行命令验证：宿主结构化交付物校验尚未通过。\n",
+      "utf8",
+    );
   }
 
   await writeGenerationValidationResult(runtime.deepagentsGenerationValidationPath, {
     valid: reasons.length === 0,
     reasons,
+    steps,
   });
 
   return { reasons };
@@ -342,6 +1138,415 @@ async function collectGeneratedFiles(outputDirectory: string): Promise<string[]>
   return files.sort();
 }
 
+async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): Promise<TextGeneratorRuntime> {
+  const outputDirectory = path.resolve(cwd, ".out", sessionId);
+  const deepagentsDirectory = path.join(outputDirectory, ".deepagents");
+  const configPath = path.join(deepagentsDirectory, "config.json");
+
+  if (!await pathExists(outputDirectory)) {
+    throw new Error(`Session "${sessionId}" was not found under ${path.resolve(cwd, ".out")}.`);
+  }
+
+  if (!await pathExists(deepagentsDirectory)) {
+    throw new Error(`Session "${sessionId}" is missing the .deepagents workspace.`);
+  }
+
+  let templateId = "unknown";
+  let templateName = "unknown";
+  let templateVersion = "unknown";
+
+  const configContents = await readIfExists(configPath);
+  if (configContents) {
+    try {
+      const parsed = JSON.parse(configContents) as {
+        template?: {
+          id?: unknown;
+          name?: unknown;
+          version?: unknown;
+        };
+      };
+      if (typeof parsed.template?.id === "string" && parsed.template.id.trim() !== "") {
+        templateId = parsed.template.id;
+      }
+      if (typeof parsed.template?.name === "string" && parsed.template.name.trim() !== "") {
+        templateName = parsed.template.name;
+      }
+      if (typeof parsed.template?.version === "string" && parsed.template.version.trim() !== "") {
+        templateVersion = parsed.template.version;
+      }
+    } catch {
+      // Ignore malformed config here; phase validation will report durable artifact failures separately.
+    }
+  }
+
+  return {
+    sessionId,
+    outputDirectory,
+    deepagentsDirectory,
+    deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
+    deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
+    deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+    deepagentsConfigPath: configPath,
+    deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
+    deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
+    deepagentsGeneratePromptSnapshotPath: path.join(deepagentsDirectory, "generate-system-prompt.md"),
+    deepagentsGenerateRepairPromptSnapshotPath: path.join(deepagentsDirectory, "generate-repair-system-prompt.md"),
+    templateId,
+    templateName,
+    templateVersion,
+    templateDirectory: deepagentsDirectory,
+    templatePlanPromptPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
+    templatePlanRepairPromptPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
+    templateGeneratePromptPath: path.join(deepagentsDirectory, "generate-system-prompt.md"),
+    templateGenerateRepairPromptPath: path.join(deepagentsDirectory, "generate-repair-system-prompt.md"),
+    sourcePrdSnapshotPath: path.join(deepagentsDirectory, "source-prd.md"),
+    deepagentsAnalysisPath: path.join(deepagentsDirectory, "prd-analysis.md"),
+    deepagentsDetailedSpecPath: path.join(deepagentsDirectory, "generated-spec.md"),
+    deepagentsPlanSpecPath: path.join(deepagentsDirectory, "plan-spec.json"),
+    deepagentsPlanValidationPath: path.join(deepagentsDirectory, "plan-validation.json"),
+    deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
+    maxPlanRetries: MAX_PLAN_REPAIRS,
+    maxGenerateRetries: MAX_GENERATION_REPAIRS,
+  };
+}
+
+function requireSessionGenerator(generator?: TextGenerator): TextGenerator {
+  if (generator) {
+    return generator;
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is required.");
+  }
+
+  return new DeepAgentsTextGenerator();
+}
+
+function createSessionRuntime(
+  runtime: TextGeneratorRuntime,
+  overrides: Partial<TextGeneratorRuntime> = {},
+): TextGeneratorRuntime {
+  return {
+    ...runtime,
+    ...overrides,
+  };
+}
+
+async function countRetryAttempts(logPath: string, stage: RetryStage): Promise<number> {
+  const contents = await readIfExists(logPath);
+  if (!contents) {
+    return 0;
+  }
+
+  return contents
+    .split(/\r?\n/)
+    .filter((line) => line.includes(`triggered for ${stage}`))
+    .length;
+}
+
+async function continueGenerateFlow(options: {
+  runtime: TextGeneratorRuntime;
+  generator: TextGenerator;
+  validator: GeneratedAppValidator;
+  approvedPlan: PlanSpec;
+  initialRetryReasons: string[];
+}): Promise<void> {
+  let generationRetryReasons = [...options.initialRetryReasons];
+
+  if (generationRetryReasons.length === 0) {
+    await updateWorkflowState(options.runtime.deepagentsConfigPath, "generate", ["plan"]);
+
+    const initialRuntime = createSessionRuntime(options.runtime, {
+      generateAttempt: 1,
+      retryReasons: [],
+    });
+    const generatedProject = await options.generator.generateProject(options.approvedPlan, initialRuntime);
+    await appendWorkflowLog("[host] 生成阶段流式输出完成，开始宿主校验。");
+    await updateWorkflowBoard({
+      stage: "生成阶段",
+      todos: createStepItemsForLifecycle("生成阶段", "validating"),
+      artifacts: createArtifactItemsForStage("生成阶段", "validating"),
+      narrative: "正在验证生成阶段交付物。",
+      outputDirectory: options.runtime.outputDirectory,
+    });
+    const validation = await validateGeneratedArtifacts(
+      options.runtime.outputDirectory,
+      initialRuntime,
+      options.approvedPlan,
+      generatedProject,
+      options.validator,
+    );
+    if (validation.reasons.length === 0) {
+      await appendWorkflowLog("[host] 生成阶段交付物通过校验。");
+      await updateWorkflowBoard({
+        stage: "生成阶段",
+        todos: createStepItemsForLifecycle("生成阶段", "verified"),
+        artifacts: createArtifactItemsForStage("生成阶段", "verified"),
+        narrative: "生成阶段交付物已验证，全部通过。",
+        outputDirectory: options.runtime.outputDirectory,
+      });
+      await updateWorkflowState(options.runtime.deepagentsConfigPath, "complete", ["plan", "generate"]);
+      await appendWorkflowLog("[host] 全部阶段完成，准备汇总输出。");
+      return;
+    }
+
+    generationRetryReasons = validation.reasons;
+    await appendWorkflowLog(`[host] 生成阶段校验失败，待修复问题 ${validation.reasons.length} 条。`);
+  }
+
+  const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "生成修复阶段");
+
+  for (let repairIndex = 0; generationRetryReasons.length > 0 && repairIndex < MAX_GENERATION_REPAIRS; repairIndex += 1) {
+    await updateWorkflowState(options.runtime.deepagentsConfigPath, "generate_repair", ["plan"]);
+    await appendRetryNote(
+      options.runtime.deepagentsErrorLogPath,
+      existingRepairAttempts + repairIndex + 1,
+      "生成修复阶段",
+      generationRetryReasons,
+    );
+    await appendWorkflowLog(`[host] 启动生成修复轮次 ${existingRepairAttempts + repairIndex + 1}。`);
+
+    const repairRuntime = createSessionRuntime(options.runtime, {
+      generateAttempt: existingRepairAttempts + repairIndex + 2,
+      retryReasons: generationRetryReasons,
+    });
+    const repairedProject = await options.generator.generateRepairProject(options.approvedPlan, repairRuntime);
+    await appendWorkflowLog("[host] 生成修复输出完成，开始复核。");
+    await updateWorkflowBoard({
+      stage: "生成阶段",
+      todos: createStepItemsForLifecycle("生成阶段", "validating"),
+      artifacts: createArtifactItemsForStage("生成阶段", "validating"),
+      narrative: "正在复核修复后的生成交付物。",
+      outputDirectory: options.runtime.outputDirectory,
+    });
+    const validation = await validateGeneratedArtifacts(
+      options.runtime.outputDirectory,
+      repairRuntime,
+      options.approvedPlan,
+      repairedProject,
+      options.validator,
+    );
+    if (validation.reasons.length === 0) {
+      await appendWorkflowLog("[host] 修复后的生成交付物通过校验。");
+      await updateWorkflowBoard({
+        stage: "生成阶段",
+        todos: createStepItemsForLifecycle("生成阶段", "verified"),
+        artifacts: createArtifactItemsForStage("生成阶段", "verified"),
+        narrative: "生成阶段交付物已验证，全部通过。",
+        outputDirectory: options.runtime.outputDirectory,
+      });
+      await updateWorkflowState(options.runtime.deepagentsConfigPath, "complete", ["plan", "generate"]);
+      await appendWorkflowLog("[host] 全部阶段完成，准备汇总输出。");
+      return;
+    }
+
+    generationRetryReasons = validation.reasons;
+    await appendWorkflowLog(
+      `[host] 生成修复轮次 ${existingRepairAttempts + repairIndex + 1} 仍未通过，剩余问题 ${validation.reasons.length} 条。`,
+    );
+  }
+
+  throw new Error(`Generation validation failed: ${generationRetryReasons.join(" | ")}`);
+}
+
+async function continuePlanRepairFlow(options: {
+  runtime: TextGeneratorRuntime;
+  generator: TextGenerator;
+  validator: GeneratedAppValidator;
+  initialRetryReasons: string[];
+}): Promise<void> {
+  let approvedPlan: PlanSpec | null = null;
+  let planRetryReasons = [...options.initialRetryReasons];
+  const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "计划修复阶段");
+
+  for (let repairIndex = 0; !approvedPlan && repairIndex < MAX_PLAN_REPAIRS; repairIndex += 1) {
+    await updateWorkflowState(options.runtime.deepagentsConfigPath, "plan_repair", []);
+    await appendRetryNote(
+      options.runtime.deepagentsErrorLogPath,
+      existingRepairAttempts + repairIndex + 1,
+      "计划修复阶段",
+      planRetryReasons,
+    );
+    await appendWorkflowLog(`[host] 启动计划修复轮次 ${existingRepairAttempts + repairIndex + 1}。`);
+
+    const repairRuntime = createSessionRuntime(options.runtime, {
+      planAttempt: existingRepairAttempts + repairIndex + 2,
+      retryReasons: planRetryReasons,
+    });
+    const repairResult = await options.generator.planRepairProject(repairRuntime);
+    await appendWorkflowLog("[host] 计划修复输出完成，开始复核。");
+    await updateWorkflowBoard({
+      stage: "计划阶段",
+      todos: createStepItemsForLifecycle("计划阶段", "validating"),
+      artifacts: createArtifactItemsForStage("计划阶段", "validating"),
+      narrative: "正在复核修复后的计划产出物。",
+      outputDirectory: options.runtime.outputDirectory,
+    });
+    const validation = await validatePlanArtifacts(repairRuntime, repairResult);
+    if (validation.reasons.length === 0) {
+      approvedPlan = validation.planSpec;
+      await appendWorkflowLog("[host] 修复后的计划阶段产出物通过校验。");
+      await updateWorkflowBoard({
+        stage: "计划阶段",
+        todos: createStepItemsForLifecycle("计划阶段", "verified"),
+        artifacts: createArtifactItemsForStage("计划阶段", "verified"),
+        narrative: "计划阶段产出物已验证，通过生成门禁。",
+        outputDirectory: options.runtime.outputDirectory,
+      });
+      break;
+    }
+
+    planRetryReasons = validation.reasons;
+    await appendWorkflowLog(
+      `[host] 计划修复轮次 ${existingRepairAttempts + repairIndex + 1} 仍未通过，剩余问题 ${validation.reasons.length} 条。`,
+    );
+  }
+
+  if (!approvedPlan) {
+    throw new Error(`Plan validation failed: ${planRetryReasons.join(" | ")}`);
+  }
+
+  await continueGenerateFlow({
+    runtime: options.runtime,
+    generator: options.generator,
+    validator: options.validator,
+    approvedPlan,
+    initialRetryReasons: [],
+  });
+}
+
+export async function validateSessionPhase(options: {
+  sessionId: string;
+  phase: ValidationPhase;
+  cwd?: string;
+  generator?: TextGenerator;
+  validator?: GeneratedAppValidator;
+}): Promise<SessionValidationResult> {
+  const runtime = await createRuntimeForSession(options.sessionId, options.cwd);
+  const validator = options.validator ?? new ShellGeneratedAppValidator();
+
+  if (options.phase === "plan") {
+    const validation = await collectPersistedPlanValidation(runtime);
+    await writePlanValidationResult(runtime.deepagentsPlanValidationPath, {
+      valid: validation.reasons.length === 0,
+      reasons: validation.reasons,
+      ...(validation.planSpec ? { planSpecVersion: validation.planSpec.version } : {}),
+    });
+
+    if (validation.reasons.length > 0) {
+      const generator = requireSessionGenerator(options.generator);
+      await appendWorkflowLog("[host] validate 检测到计划阶段失败，恢复到计划修复阶段。");
+      try {
+        await continuePlanRepairFlow({
+          runtime,
+          generator,
+          validator,
+          initialRetryReasons: validation.reasons,
+        });
+      } finally {
+        await closeWorkflowBoard();
+      }
+
+      return {
+        sessionId: runtime.sessionId,
+        phase: options.phase,
+        outputDirectory: runtime.outputDirectory,
+        valid: true,
+        reasons: [],
+        validationPath: runtime.deepagentsPlanValidationPath,
+        runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
+        workflowPhase: "complete",
+        resumedFromPhase: "plan_repair",
+      };
+    }
+
+    return {
+      sessionId: runtime.sessionId,
+      phase: options.phase,
+      outputDirectory: runtime.outputDirectory,
+      valid: true,
+      reasons: [],
+      validationPath: runtime.deepagentsPlanValidationPath,
+      runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
+      workflowPhase: "plan",
+    };
+  }
+
+  const planValidation = await collectPersistedPlanValidation(runtime);
+  const reasons = [...planValidation.reasons];
+  let steps: GenerationValidationStep[] = [];
+
+  if (!planValidation.planSpec) {
+    reasons.push("生成阶段校验前置失败：artifacts.planSpec 不可用，无法继续验证生成交付物。");
+  }
+
+  if (reasons.length === 0 && planValidation.planSpec) {
+    const generationValidation = await collectPersistedGeneratedValidation(
+      runtime.outputDirectory,
+      runtime,
+      planValidation.planSpec,
+      validator,
+    );
+    reasons.push(...generationValidation.reasons);
+    steps = generationValidation.steps;
+  } else {
+    await fs.writeFile(
+      runtime.deepagentsRuntimeValidationLogPath,
+      "未执行运行命令验证：生成阶段前置计划产物校验未通过。\n",
+      "utf8",
+    );
+  }
+
+  await writeGenerationValidationResult(runtime.deepagentsGenerationValidationPath, {
+    valid: reasons.length === 0,
+    reasons,
+    steps,
+  });
+
+  if (reasons.length > 0) {
+    const generator = requireSessionGenerator(options.generator);
+    if (!planValidation.planSpec) {
+      throw new Error(`Generation validation failed: ${reasons.join(" | ")}`);
+    }
+
+    await appendWorkflowLog("[host] validate 检测到生成阶段失败，恢复到生成修复阶段。");
+    try {
+      await continueGenerateFlow({
+        runtime,
+        generator,
+        validator,
+        approvedPlan: planValidation.planSpec,
+        initialRetryReasons: reasons,
+      });
+    } finally {
+      await closeWorkflowBoard();
+    }
+
+    return {
+      sessionId: runtime.sessionId,
+      phase: options.phase,
+      outputDirectory: runtime.outputDirectory,
+      valid: true,
+      reasons: [],
+      validationPath: runtime.deepagentsGenerationValidationPath,
+      runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
+      workflowPhase: "complete",
+      resumedFromPhase: "generate_repair",
+    };
+  }
+
+  return {
+    sessionId: runtime.sessionId,
+    phase: options.phase,
+    outputDirectory: runtime.outputDirectory,
+    valid: true,
+    reasons: [],
+    validationPath: runtime.deepagentsGenerationValidationPath,
+    runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
+    workflowPhase: "generate",
+  };
+}
+
 export async function generateApplication(options: GenerateAppOptions): Promise<GenerationResult> {
   try {
     const workspaceOptions: {
@@ -374,6 +1579,9 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         }
         return new DeepAgentsTextGenerator();
       })();
+    const validator =
+      options.validator ??
+      (options.generator ? new PassthroughGeneratedAppValidator() : new ShellGeneratedAppValidator());
     await copyStarterScaffold(template, workspace.outputDirectory);
 
     await writeDeepagentsConfig(workspace, {
@@ -392,6 +1600,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         planSpec: ".deepagents/plan-spec.json",
         planValidation: ".deepagents/plan-validation.json",
         generationValidation: ".deepagents/generation-validation.json",
+        runtimeValidationLog: ".deepagents/runtime-validation.log",
         errorLog: ".deepagents/error.log",
       },
       prompts: {
@@ -409,6 +1618,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       deepagentsDirectory: workspace.deepagentsDirectory,
       deepagentsLogPath: workspace.deepagentsLogPath,
       deepagentsErrorLogPath: workspace.deepagentsErrorLogPath,
+      deepagentsRuntimeValidationLogPath: workspace.deepagentsRuntimeValidationLogPath,
       deepagentsConfigPath: workspace.deepagentsConfigPath,
       deepagentsPlanPromptSnapshotPath: workspace.deepagentsPlanPromptSnapshotPath,
       deepagentsPlanRepairPromptSnapshotPath: workspace.deepagentsPlanRepairPromptSnapshotPath,
@@ -441,7 +1651,16 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         planAttempt: 1,
         retryReasons: [],
       });
-      const planResult = await generator.planProject(spec, initialRuntime);
+      let planResult: PlanResult;
+      try {
+        planResult = await generator.planProject(spec, initialRuntime);
+      } catch (error) {
+        const recovered = await synthesizeRecoveredPlanResult(initialRuntime, error);
+        if (!recovered) {
+          throw error;
+        }
+        planResult = recovered;
+      }
       await appendWorkflowLog("[host] 计划阶段流式输出完成，开始宿主校验。");
       await updateWorkflowBoard({
         stage: "计划阶段",
@@ -476,7 +1695,16 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         planAttempt: repairIndex + 2,
         retryReasons: planRetryReasons,
       });
-      const repairResult = await generator.planRepairProject(repairRuntime);
+      let repairResult: PlanResult;
+      try {
+        repairResult = await generator.planRepairProject(repairRuntime);
+      } catch (error) {
+        const recovered = await synthesizeRecoveredPlanResult(repairRuntime, error);
+        if (!recovered) {
+          throw error;
+        }
+        repairResult = recovered;
+      }
       await appendWorkflowLog("[host] 计划修复输出完成，开始复核。");
       await updateWorkflowBoard({
         stage: "计划阶段",
@@ -525,7 +1753,13 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         narrative: "正在验证生成阶段交付物。",
         outputDirectory: workspace.outputDirectory,
       });
-      const validation = await validateGeneratedArtifacts(workspace.outputDirectory, initialRuntime, approvedPlan, generatedProject);
+      const validation = await validateGeneratedArtifacts(
+        workspace.outputDirectory,
+        initialRuntime,
+        approvedPlan,
+        generatedProject,
+        validator,
+      );
       if (validation.reasons.length === 0) {
         generationRetryReasons = [];
         await appendWorkflowLog("[host] 生成阶段交付物通过校验。");
@@ -560,7 +1794,13 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         narrative: "正在复核修复后的生成交付物。",
         outputDirectory: workspace.outputDirectory,
       });
-      const validation = await validateGeneratedArtifacts(workspace.outputDirectory, repairRuntime, approvedPlan, repairedProject);
+      const validation = await validateGeneratedArtifacts(
+        workspace.outputDirectory,
+        repairRuntime,
+        approvedPlan,
+        repairedProject,
+        validator,
+      );
       if (validation.reasons.length === 0) {
         generationRetryReasons = [];
         await appendWorkflowLog("[host] 修复后的生成交付物通过校验。");

@@ -78,7 +78,7 @@
 
 额外要求：
 
-- 每个 `resource` 至少要有一个页面映射和一个 REST API 规划。
+- 每个 `resource` 至少要在结构化 spec 中具备清晰用途；是否需要 REST API 由业务场景决定，不强制每个资源都规划独立 API。
 - `acceptanceChecks.target` 必须使用以下规则：
   - `resource` 类型填资源名
   - `page` 类型填页面路由
@@ -112,5 +112,7 @@
 
 - 最终只能返回结构化响应。
 - 不要输出分析过程正文。
+- 不要输出 `<think>`、思维链、自然语言总结、Markdown 代码块，或任何包裹在结构化响应之外的文本。
+- 如果已经完成落盘，必须立刻返回结构化响应；不要先输出“Returning structured response:”之类的说明文字。
 - `artifactsWritten` 必须按实际落盘顺序列出你创建或更新过的计划阶段文件相对路径。
 - `planSpecVersion` 固定写 `1`。

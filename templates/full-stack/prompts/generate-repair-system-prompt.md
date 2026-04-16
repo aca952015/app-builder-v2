@@ -15,6 +15,7 @@
   - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
   - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
   - `artifacts.generationValidation` = `/.deepagents/generation-validation.json`
+  - `artifacts.runtimeValidationLog` = `/.deepagents/runtime-validation.log`
   - `artifacts.report` = `/app-builder-report.md`
 - 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
 - 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
@@ -37,6 +38,7 @@
 - `generationRepairPolicy.validationFailures`
 - `artifacts.planSpec`
 - `artifacts.generationValidation`
+- `artifacts.runtimeValidationLog`
 - 已存在的相关源码文件
 
 你必须先读取这些现有文件，再开始修补。
@@ -44,9 +46,12 @@
 ## 修补规则
 
 - 以 `validationFailures` 和 `artifacts.generationValidation` 中的失败项为唯一修补目标。
+- 如果失败项来自宿主运行验证，你必须结合 `artifacts.runtimeValidationLog` 中的真实命令输出修复问题，目标是让宿主重新执行“先准备 `.env`，再执行 `pnpm install`、`pnpm db:init`、`pnpm dev`”时可以通过。
+- 如果失败根因来自 starter 自带的持久化、鉴权或启动契约被局部改坏，你必须沿依赖链同步修补所有受影响的 schema、seed、脚本、认证/会话和默认入口数据，直到整条链路重新一致。
 - 只补齐缺失实现或错误接线，不得整轮重做已经正确的代码。
 - 如需修改现有文件，必须先读再改。
 - 优先局部修复缺失的资源、页面、API、报告文件或接线路径。
+- 页面修复必须严格以 `planSpec.pages[*].route` 为准；禁止把缺失页面修成其他近似路径、别名路径或 starter 默认路径来蒙混通过。
 - 修补完成后，保留当前工作目录中的既有文件结构。
 
 ## 完成条件
@@ -55,6 +60,7 @@
 
 - 已针对所有失败项完成修补
 - 所有修补都已实际落盘
+- 若修补触及 starter 基础契约，其依赖链上的 schema、seed、脚本、认证/会话和默认入口数据必须保持同步一致
 - 最终只返回结构化响应
 
 ## 最终响应
