@@ -166,6 +166,8 @@ type ToolCallDetail = {
   result: unknown;
 };
 
+let lastTodoStatuses = new Map<string, TodoStatus>();
+
 function defaultTodosForStage(stage: "计划阶段" | "生成阶段"): TodoItem[] {
   return createDefaultStepItems(stage);
 }
@@ -206,6 +208,90 @@ function extractTodosFromPayload(value: unknown): TodoItem[] | null {
     }
   }
 
+  return null;
+}
+
+function extractTodosFromText(value: string): TodoItem[] | null {
+  const match = value.match(/Updated todo list to (\[[\s\S]*\])$/);
+  if (!match) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(match[1]!);
+    return isTodoList(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractTodosFromToolOutput(value: unknown): TodoItem[] | null {
+  const extracted = extractTodosFromPayload(value);
+  if (extracted) {
+    return extracted;
+  }
+
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const content = record.content;
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const text = content
+    .map((part) => {
+      if (!part || typeof part !== "object") {
+        return "";
+      }
+      return typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  return text ? extractTodosFromText(text) : null;
+}
+
+function summarizeWriteTodosEvent(record: Record<string, unknown>, event: string | null): string | null {
+  const parsedInput = parseToolInput(record.input);
+  const todos =
+    extractTodosFromPayload(parsedInput) ??
+    extractTodosFromToolOutput(record.output);
+
+  if (!todos) {
+    return null;
+  }
+
+  if (event === "on_tool_start") {
+    return null;
+  }
+
+  if (event === "on_tool_end") {
+    const newlyCompleted = todos.filter((todo) => {
+      const previousStatus = lastTodoStatuses.get(todo.content);
+      return todo.status === "completed" && previousStatus !== "completed";
+    });
+    const newlyStarted = todos.filter((todo) => {
+      const previousStatus = lastTodoStatuses.get(todo.content);
+      return todo.status === "in_progress" && previousStatus !== "in_progress" && previousStatus !== "completed";
+    });
+
+    lastTodoStatuses = new Map(todos.map((todo) => [todo.content, todo.status]));
+
+    if (newlyCompleted.length > 0) {
+      return `${newlyCompleted[newlyCompleted.length - 1]!.content}工作完成。`;
+    }
+
+    if (newlyStarted.length > 0) {
+      return `${newlyStarted[newlyStarted.length - 1]!.content}工作开始。`;
+    }
+
+    return null;
+  }
+
+  lastTodoStatuses = new Map(todos.map((todo) => [todo.content, todo.status]));
   return null;
 }
 
@@ -254,6 +340,43 @@ function parseToolInput(value: unknown): Record<string, unknown> | null {
   }
 
   return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function formatReadFileRange(input: Record<string, unknown> | null): string | null {
+  if (!input) {
+    return null;
+  }
+
+  const offset = typeof input.offset === "number" && Number.isFinite(input.offset) ? input.offset : null;
+  const limit = typeof input.limit === "number" && Number.isFinite(input.limit) ? input.limit : null;
+
+  if (offset === null && limit === null) {
+    return "全量";
+  }
+
+  if (offset !== null && limit !== null && limit > 0) {
+    const start = Math.max(1, Math.floor(offset) + 1);
+    const end = Math.max(start, Math.floor(offset + limit));
+    return `${start}-${end}行`;
+  }
+
+  if (offset !== null && limit === null) {
+    return `第${Math.max(1, Math.floor(offset) + 1)}行起`;
+  }
+
+  if (offset === null && limit !== null && limit > 0) {
+    return `1-${Math.floor(limit)}行`;
+  }
+
+  return null;
+}
+
+function describeToolLocation(toolName: string, input: Record<string, unknown> | null): string | null {
+  if (toolName === "read_file") {
+    return formatReadFileRange(input);
+  }
+
+  return null;
 }
 
 function describeToolTarget(toolName: string, payload: unknown): string | null {
@@ -312,18 +435,28 @@ function summarizeToolEvent(payload: unknown): string | null {
     return null;
   }
 
+  if (toolName === "write_todos") {
+    return summarizeWriteTodosEvent(record, event);
+  }
+
+  const parsedInput = parseToolInput(record.input);
   const target = describeToolTarget(toolName, payload);
+  const location = describeToolLocation(toolName, parsedInput);
   const action = humanizeToolName(toolName);
+  const detailedTarget =
+    target && target !== toolName
+      ? `${target.replace(`${toolName} `, "")}${location ? `（${location}）` : ""}`
+      : null;
 
   if (event === "on_tool_start") {
-    return target && target !== toolName ? `${action}：${target.replace(`${toolName} `, "")}` : `${action}。`;
+    return detailedTarget ? `${action}：${detailedTarget}` : `${action}。`;
   }
 
   if (event === "on_tool_end") {
-    return target && target !== toolName ? `${action}完成：${target.replace(`${toolName} `, "")}` : `${action} 完成。`;
+    return detailedTarget ? `${action}完成：${detailedTarget}` : `${action} 完成。`;
   }
 
-  return target && target !== toolName ? `${action}：${target.replace(`${toolName} `, "")}` : `${action}。`;
+  return detailedTarget ? `${action}：${detailedTarget}` : `${action}。`;
 }
 
 function summarizeMessageToolCall(payload: unknown): string | null {
@@ -336,9 +469,10 @@ function summarizeMessageToolCall(payload: unknown): string | null {
   const action = humanizeToolName(first.name);
   const args = first.args && typeof first.args === "object" ? first.args as Record<string, unknown> : null;
   const target = args?.file_path ?? args?.path;
+  const location = describeToolLocation(first.name, args);
 
   if (typeof target === "string" && target.trim()) {
-    return `准备${action}：${target}`;
+    return `准备${action}：${target}${location ? `（${location}）` : ""}`;
   }
 
   return `准备${action}。`;

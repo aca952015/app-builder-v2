@@ -399,6 +399,70 @@ class MisplacedArtifactTextGenerator implements TextGenerator {
   }
 }
 
+class RestSplitApiTextGenerator implements TextGenerator {
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildPlanSpec();
+    planSpec.apis = [
+      {
+        name: "WorkOrderCollectionGet",
+        resourceName: "WorkOrder",
+        path: "/app/api/work-orders/route.ts",
+        methods: ["GET"],
+        requestShape: "分页查询参数。",
+        responseShape: "工单列表。",
+      },
+      {
+        name: "WorkOrderCollectionPost",
+        resourceName: "WorkOrder",
+        path: "/app/api/work-orders/route.ts",
+        methods: ["POST"],
+        requestShape: "创建工单对象。",
+        responseShape: "新建工单对象。",
+      },
+    ];
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# REST Split 分析稿\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# REST Split 详细 Spec\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+
+    return {
+      summary: "计划阶段允许同一路径按 method 拆分接口。",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    await writeFile(
+      path.join(runtime.outputDirectory, "app-builder-report.md"),
+      "# REST Split Report\n\nGeneration succeeded.\n",
+      "utf8",
+    );
+
+    return {
+      summary: "生成阶段成功。",
+      filesWritten: ["app-builder-report.md"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: Array.from(new Set(planSpec.apis.map((api) => api.path))),
+      notes: [],
+    };
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in RestSplitApiTextGenerator");
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("generateRepairProject should not be called in RestSplitApiTextGenerator");
+  }
+}
+
 test("generateApplication stages starter scaffold and split-phase artifacts", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -502,6 +566,8 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(stagedTemplateManifest, /"generateRepair": "prompts\/generate-repair-system-prompt\.md"/);
     assert.match(planPromptSnapshot, /artifacts\.planSpec/);
     assert.match(planPromptSnapshot, /唯一职责是把原始 PRD 收敛为一份可验证/);
+    assert.match(planPromptSnapshot, /`sourcePrdMarkdown` 为主事实来源/);
+    assert.match(planPromptSnapshot, /不要为了“确认一下”再次反复读取 `artifacts\.sourcePrd`/);
     assert.match(planRepairPromptSnapshot, /计划修复阶段代理/);
     assert.match(planRepairPromptSnapshot, /validationFailures/);
     assert.match(generatePromptSnapshot, /当前输入中的 `planSpec` 是唯一事实来源/);
@@ -624,6 +690,30 @@ test("generateApplication relocates host artifacts that were mistakenly written 
   }
 });
 
+test("generateApplication accepts REST APIs split by method under the same route path", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-rest-split-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator: new RestSplitApiTextGenerator(),
+    });
+
+    const planValidationSnapshot = await readFile(
+      path.join(result.outputDirectory, ".deepagents/plan-validation.json"),
+      "utf8",
+    );
+
+    assert.match(planValidationSnapshot, /"valid": true/);
+    assert.doesNotMatch(planValidationSnapshot, /重复的 path/);
+    assert.doesNotMatch(planValidationSnapshot, /重复的 path\+method/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("full-stack template starter copies scaffold files into the output root", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-starter-"));
 
@@ -737,13 +827,19 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planPromptSource, /artifacts\.planSpec/);
   assert.match(planPromptSource, /必须严格符合输入里的 `planSpecSchema`/);
   assert.match(planPromptSource, /不能写应用源码/);
+  assert.match(planPromptSource, /禁止执行：调用任何子代理/);
   assert.match(planPromptSource, /必须先调用一次 `write_todos`/);
   assert.match(planPromptSource, /必须持续更新 todo 状态/);
   assert.match(planPromptSource, /`\/\.deepagents\/source-prd\.md`/);
+  assert.match(planPromptSource, /`sourcePrdMarkdown` 为主事实来源/);
+  assert.match(planPromptSource, /只有在 `sourcePrdMarkdown` 缺失、截断或明显不可用时，才允许读取 `artifacts\.sourcePrd`/);
+  assert.match(planPromptSource, /严禁对同一文件、同一区间做重复读取循环/);
+  assert.match(planPromptSource, /对当前尚不存在的 `artifacts\.analysis`、`artifacts\.generatedSpec`、`artifacts\.planSpec`，应直接创建/);
   assert.match(planPromptSource, /`\/\.deepagents\/prd-analysis\.md`/);
   assert.match(planPromptSource, /把 `\/\.deepagents\/\.\.\.` 改成 `\/deepagents\/\.\.\.`/);
   assert.match(generatePromptSource, /`planSpec` 是唯一事实来源/);
   assert.match(generatePromptSource, /不能重新分析原始 PRD/);
+  assert.match(generatePromptSource, /禁止执行：调用任何子代理/);
   assert.match(generatePromptSource, /implementedPages/);
   assert.match(generatePromptSource, /必须先调用一次 `write_todos`/);
   assert.match(generatePromptSource, /必须持续更新 todo 状态/);
@@ -753,9 +849,11 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /`\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /把 `\/app-builder-report\.md` 改成 `\/app\/app-builder-report\.md`/);
   assert.match(planRepairPromptSource, /validationFailures/);
+  assert.match(planRepairPromptSource, /禁止执行：调用任何子代理/);
   assert.match(planRepairPromptSource, /只补齐缺失或错误部分/);
   assert.match(planRepairPromptSource, /`\/\.deepagents\/source-prd\.md`/);
   assert.match(generateRepairPromptSource, /validationFailures/);
+  assert.match(generateRepairPromptSource, /禁止执行：调用任何子代理/);
   assert.match(generateRepairPromptSource, /只补齐缺失实现或错误接线/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/generation-validation\.json`/);
   assert.match(generateRepairPromptSource, /`\/app-builder-report\.md`/);

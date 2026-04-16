@@ -161,7 +161,7 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
     elapsedMs: 65_000,
     logs: [
       "[12:34:56] [FLOW] 进入计划阶段，开始流式生成。",
-      "[12:34:57] [READ] 读取文件：.deepagents/source-prd.md",
+      "[12:34:57] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）",
       "[12:34:58] [CHECK] 正在校验计划阶段产出物。",
     ],
   }, 120));
@@ -180,7 +180,8 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /当前动作：正在整理分析稿。/);
   assert.match(output, /详细日志：/);
   assert.match(output, /\[12:34:56\] \[FLOW\] 进入计划阶段/);
-  assert.match(output, /\[12:34:57\] \[READ\] 读取文件：\.deepagents\/source-prd\.md/);
+  assert.match(output, /\[12:34:57\] \[READ\]/);
+  assert.match(output, /读取文件：\.deepagents\/source-prd\.md（1-1000行）/);
   assert.match(output, /\[12:34:58\] \[CHECK\] 正在校验计划阶段产出物/);
 });
 
@@ -226,18 +227,48 @@ test("summarizeDeepAgentsAction exposes concrete tool events", () => {
     summarizeDeepAgentsAction("tools", {
       event: "on_tool_start",
       name: "read_file",
-      input: "{\"file_path\":\".deepagents/source-prd.md\"}",
+      input: "{\"file_path\":\".deepagents/source-prd.md\",\"offset\":0,\"limit\":1000}",
     }),
-    "读取文件：.deepagents/source-prd.md",
+    "读取文件：.deepagents/source-prd.md（1-1000行）",
   );
 
   assert.equal(
     summarizeDeepAgentsAction("tools", {
       event: "on_tool_end",
       name: "write_todos",
-      output: {},
+      input: JSON.stringify({
+        todos: [
+          { content: "读取原始 PRD", status: "in_progress" },
+          { content: "编写分析稿", status: "pending" },
+        ],
+      }),
     }),
-    "更新 todo 完成。",
+    "读取原始 PRD工作开始。",
+  );
+
+  assert.equal(
+    summarizeDeepAgentsAction("tools", {
+      event: "on_tool_end",
+      name: "write_todos",
+      input: JSON.stringify({
+        todos: [
+          { content: "读取原始 PRD", status: "completed" },
+          { content: "编写分析稿", status: "in_progress" },
+        ],
+      }),
+    }),
+    "读取原始 PRD工作完成。",
+  );
+});
+
+test("summarizeDeepAgentsAction marks whole-file reads explicitly", () => {
+  assert.equal(
+    summarizeDeepAgentsAction("tools", {
+      event: "on_tool_start",
+      name: "read_file",
+      input: "{\"file_path\":\".deepagents/plan-system-prompt.md\"}",
+    }),
+    "读取文件：.deepagents/plan-system-prompt.md（全量）",
   );
 });
 

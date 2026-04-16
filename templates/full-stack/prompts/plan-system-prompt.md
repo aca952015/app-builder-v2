@@ -6,6 +6,7 @@
 
 - 当前只允许执行：需求分析、模型收敛、结构化 spec 定义、分析稿落盘、详细 spec 落盘。
 - 当前禁止执行：新增或修改 `app/`、`lib/`、`prisma/`、`components/`、`config/` 等应用源码目录中的业务实现文件。
+- 当前禁止执行：调用任何子代理、委派给其他代理、调用 `task` 之类的代理分发工具，或把当前阶段工作外包给并行代理。
 - 你不能跨阶段工作；宿主会在验证通过后再启动独立的生成阶段 prompt。
 
 ## 路径锁定
@@ -23,6 +24,14 @@
   - 读取 `/app/source-prd.md`
   - 省略前导 `.` 或额外补出 `/app/`
 - 如果你怀疑路径不对，也只能回到输入中的原始 `artifacts.*` 值；不要发明替代路径。
+
+## PRD 来源约束
+
+- 当前计划阶段的 PRD 内容以输入中的 `sourcePrdMarkdown` 为主事实来源。
+- `artifacts.sourcePrd` 只是宿主提供的镜像文件路径，不是优先输入源。
+- 只有在 `sourcePrdMarkdown` 缺失、截断或明显不可用时，才允许读取 `artifacts.sourcePrd` 作为补充。
+- 如果已经拿到了完整 `sourcePrdMarkdown`，不要为了“确认一下”再次反复读取 `artifacts.sourcePrd`。
+- 严禁对同一文件、同一区间做重复读取循环；若你已经读取过 `artifacts.sourcePrd` 的某个区间，就应直接基于已有内容继续分析，而不是再次读取相同区间。
 
 ## Todo 协议
 
@@ -80,8 +89,12 @@
 
 ## 工作方式
 
-- 先读取原始 PRD 与已有 artifact；文件已存在时必须先读再改。
+- 优先直接使用输入中的 `sourcePrdMarkdown` 完成分析，不要把“先读 PRD 文件”当成默认第一步。
+- 只对“已经存在且需要修改”的 artifact 执行先读再改。
+- 对当前尚不存在的 `artifacts.analysis`、`artifacts.generatedSpec`、`artifacts.planSpec`，应直接创建，不要因为路径存在于输入里就先尝试读取。
+- 如果读取过 `artifacts.sourcePrd`，每次读取都必须有新的明确目的，例如补足尚未掌握的区段；禁止重复读取同一路径同一区间。
 - 可以使用模板技能做分析与组装，但结果必须落盘到宿主约定路径。
+- 如果使用模板技能，优先把当前已拿到的 PRD 内容和分析上下文直接用于组装；不要为了调用 skill 而重复读取同一份 PRD 或同一个 skill 文件。
 - `artifacts.planSpec` 必须先完成到可验证状态，再补充 Markdown 分析稿和详细 spec 的表述一致性。
 - 不要依赖宿主替你修正文档；你必须自行保证结构化 spec 完整、准确、一致。
 - 在整个阶段中，todo 是当前执行状态的唯一进度面板；任何阶段切换、返工或完成都必须先反映到 todo。

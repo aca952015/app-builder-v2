@@ -80,6 +80,7 @@ function collectPlanSpecConsistencyIssues(planSpec: PlanSpec): string[] {
   const resourceRouteSegments = new Set<string>();
   const pageRoutes = new Set<string>();
   const apiPaths = new Set<string>();
+  const apiOperations = new Set<string>();
 
   for (const resource of planSpec.resources) {
     if (resourceRouteSegments.has(resource.routeSegment)) {
@@ -100,10 +101,15 @@ function collectPlanSpecConsistencyIssues(planSpec: PlanSpec): string[] {
   }
 
   for (const api of planSpec.apis) {
-    if (apiPaths.has(api.path)) {
-      issues.push(`apis 中存在重复的 path：${api.path}`);
-    }
     apiPaths.add(api.path);
+
+    for (const method of api.methods) {
+      const operationKey = `${api.path}#${method}`;
+      if (apiOperations.has(operationKey)) {
+        issues.push(`apis 中存在重复的 path+method：${method} ${api.path}`);
+      }
+      apiOperations.add(operationKey);
+    }
 
     if (!resourceNames.has(api.resourceName)) {
       issues.push(`接口 ${api.path} 引用了未定义资源 ${api.resourceName}`);

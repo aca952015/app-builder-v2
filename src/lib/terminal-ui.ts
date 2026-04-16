@@ -218,7 +218,7 @@ async function monitorArtifactItems(state: TodoBoardState): Promise<ArtifactItem
     }
 
     if (artifact.label.startsWith("app/api/**") && planSpec) {
-      const apiPaths = planSpec.apis.map((api) => normalizeRelativePath(api.path));
+      const apiPaths = Array.from(new Set(planSpec.apis.map((api) => normalizeRelativePath(api.path))));
       const completed = await countExistingFiles(state.outputDirectory, apiPaths);
       monitoredArtifacts.push({
         label: decorateProgressLabel("app/api/**", completed, apiPaths.length),
@@ -332,18 +332,18 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
   }
   lines.push("");
   lines.push(buildActionLine(state));
-  if (state.logs && state.logs.length > 0) {
-    lines.push("");
-    lines.push(formatLogHeader());
-    for (const logLine of getVisibleLogs(state.logs)) {
-      lines.push(`  ${logLine}`);
-    }
-  }
   if (state.artifacts.length > 0) {
     lines.push("");
     lines.push(formatArtifactHeader());
     for (const artifact of state.artifacts) {
       lines.push(`  ${renderArtifactStatus(artifact.status)} ${artifact.label}`);
+    }
+  }
+  if (state.logs && state.logs.length > 0) {
+    lines.push("");
+    lines.push(formatLogHeader());
+    for (const logLine of getVisibleLogs(state.logs)) {
+      lines.push(`  ${logLine}`);
     }
   }
   return lines;
@@ -364,9 +364,10 @@ function borderColorForStage(stage: TodoBoardState["stage"]): "cyan" | "green" {
   return stage === "计划阶段" ? "cyan" : "green";
 }
 
-function artifactColorForStatus(status: ArtifactStatus): "gray" | "yellow" | "blue" | "green" {
+function artifactColorForStatus(status: ArtifactStatus): "gray" | "yellow" | "blue" | "green" | "greenBright" {
   switch (status) {
     case "verified":
+      return "greenBright";
     case "generated":
       return "green";
     case "validating":
@@ -572,67 +573,6 @@ function createTodoBoardElement(state: TodoBoardState) {
                   buildActionLine(state),
                 ),
               ),
-              React.createElement(
-                Box,
-                {
-                  key: "logs-box",
-                  flexDirection: "column",
-                  width: "100%",
-                  marginTop: 1,
-                  borderStyle: "round",
-                  borderColor: "gray",
-                  paddingX: 1,
-                },
-                [
-                  React.createElement(
-                    Text,
-                    {
-                      key: "logs-title",
-                      bold: true,
-                    },
-                    formatLogHeader(),
-                  ),
-                  ...getVisibleLogs(state.logs ?? []).map((logLine, index) =>
-                    React.createElement(
-                      Box,
-                      {
-                        key: `log-${index}`,
-                        flexDirection: "row",
-                        flexWrap: "wrap",
-                      },
-                      (() => {
-                        const parsed = parseWorkflowLogLine(logLine);
-                        return [
-                          React.createElement(
-                            Text,
-                            {
-                              key: `log-time-${index}`,
-                              color: "gray",
-                            },
-                            parsed.timestamp ? `[${parsed.timestamp}] ` : "",
-                          ),
-                          React.createElement(
-                            Text,
-                            {
-                              key: `log-prefix-${index}`,
-                              color: parsed.prefixColor,
-                            },
-                            `${parsed.prefix} `,
-                          ),
-                          React.createElement(
-                            Text,
-                            {
-                              key: `log-message-${index}`,
-                              color: "white",
-                            },
-                            parsed.message,
-                          ),
-                        ];
-                      })(),
-                    )
-                  ),
-                ],
-              ),
             ],
           ),
           React.createElement(
@@ -662,6 +602,67 @@ function createTodoBoardElement(state: TodoBoardState) {
                 )
               ),
             ],
+          ),
+        ],
+      ),
+      React.createElement(
+        Box,
+        {
+          key: "logs-box",
+          flexDirection: "column",
+          width: "100%",
+          marginTop: 1,
+          borderStyle: "round",
+          borderColor: "gray",
+          paddingX: 1,
+        },
+        [
+          React.createElement(
+            Text,
+            {
+              key: "logs-title",
+              bold: true,
+            },
+            formatLogHeader(),
+          ),
+          ...getVisibleLogs(state.logs ?? []).map((logLine, index) =>
+            React.createElement(
+              Box,
+              {
+                key: `log-${index}`,
+                flexDirection: "row",
+                flexWrap: "wrap",
+              },
+              (() => {
+                const parsed = parseWorkflowLogLine(logLine);
+                return [
+                  React.createElement(
+                    Text,
+                    {
+                      key: `log-time-${index}`,
+                      color: "gray",
+                    },
+                    parsed.timestamp ? `[${parsed.timestamp}] ` : "",
+                  ),
+                  React.createElement(
+                    Text,
+                    {
+                      key: `log-prefix-${index}`,
+                      color: parsed.prefixColor,
+                    },
+                    `${parsed.prefix} `,
+                  ),
+                  React.createElement(
+                    Text,
+                    {
+                      key: `log-message-${index}`,
+                      color: "white",
+                    },
+                    parsed.message,
+                  ),
+                ];
+              })(),
+            )
           ),
         ],
       ),
