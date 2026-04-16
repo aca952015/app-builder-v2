@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { type PlanSpec } from "../src/lib/plan-spec.js";
 import { generateApplication } from "../src/lib/generator.js";
+import { buildPlanProjectPayload, buildPlanRepairPayload } from "../src/lib/text-generator.js";
 import { copyStarterScaffold, loadTemplatePack } from "../src/lib/template-pack.js";
 import { GeneratedAppValidator, NormalizedSpec, TextGenerator, TextGeneratorRuntime } from "../src/lib/types.js";
 
@@ -97,6 +98,47 @@ function buildPlanSpec(): PlanSpec {
 
 function uniqueApiPaths(planSpec: PlanSpec): string[] {
   return Array.from(new Set(planSpec.apis.map((api) => api.path)));
+}
+
+function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGeneratorRuntime {
+  return {
+    sessionId: "test-session",
+    outputDirectory: "/virtual-workspace",
+    deepagentsDirectory: "/virtual-workspace/.deepagents",
+    deepagentsAgentsPath: "/virtual-workspace/.deepagents/AGENTS.md",
+    deepagentsLogPath: "/virtual-workspace/.deepagents/trace.log",
+    deepagentsErrorLogPath: "/virtual-workspace/.deepagents/error.log",
+    deepagentsRuntimeValidationLogPath: "/virtual-workspace/.deepagents/runtime-validation.log",
+    deepagentsConfigPath: "/virtual-workspace/.deepagents/config.json",
+    deepagentsPlanPromptSnapshotPath: "/virtual-workspace/.deepagents/plan-system-prompt.md",
+    deepagentsPlanRepairPromptSnapshotPath: "/virtual-workspace/.deepagents/plan-repair-system-prompt.md",
+    deepagentsGeneratePromptSnapshotPath: "/virtual-workspace/.deepagents/generate-system-prompt.md",
+    deepagentsGenerateRepairPromptSnapshotPath: "/virtual-workspace/.deepagents/generate-repair-system-prompt.md",
+    templateId: "full-stack",
+    templateName: "Full Stack",
+    templateVersion: "1.0.0",
+    templateDirectory: "/virtual-workspace/.deepagents/template",
+    templatePlanPromptPath: "/virtual-workspace/.deepagents/template/prompts/plan-system-prompt.md",
+    templatePlanRepairPromptPath: "/virtual-workspace/.deepagents/template/prompts/plan-repair-system-prompt.md",
+    templateGeneratePromptPath: "/virtual-workspace/.deepagents/template/prompts/generate-system-prompt.md",
+    templateGenerateRepairPromptPath: "/virtual-workspace/.deepagents/template/prompts/generate-repair-system-prompt.md",
+    sourcePrdSnapshotPath: "/virtual-workspace/.deepagents/source-prd.md",
+    deepagentsAnalysisPath: "/virtual-workspace/.deepagents/prd-analysis.md",
+    deepagentsDetailedSpecPath: "/virtual-workspace/.deepagents/generated-spec.md",
+    deepagentsPlanSpecPath: "/virtual-workspace/.deepagents/plan-spec.json",
+    deepagentsPlanValidationPath: "/virtual-workspace/.deepagents/plan-validation.json",
+    deepagentsGenerationValidationPath: "/virtual-workspace/.deepagents/generation-validation.json",
+    planAttempt: 1,
+    maxPlanRetries: 2,
+    generateAttempt: 1,
+    maxGenerateRetries: 2,
+    retryReasons: [],
+    templateRuntimeValidation: {
+      copyEnvExample: true,
+      steps: [],
+    },
+    ...overrides,
+  };
 }
 
 function routeToAdminPagePath(route: string): string {
@@ -1057,6 +1099,10 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
       path.join(result.outputDirectory, ".deepagents/template.json"),
       "utf8",
     );
+    const sessionAgents = await readFile(
+      path.join(result.outputDirectory, ".deepagents/AGENTS.md"),
+      "utf8",
+    );
     const planPromptSnapshot = await readFile(
       path.join(result.outputDirectory, ".deepagents/plan-system-prompt.md"),
       "utf8",
@@ -1131,20 +1177,27 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(stagedTemplateManifest, /"planRepair": "prompts\/plan-repair-system-prompt\.md"/);
     assert.match(stagedTemplateManifest, /"generate": "prompts\/generate-system-prompt\.md"/);
     assert.match(stagedTemplateManifest, /"generateRepair": "prompts\/generate-repair-system-prompt\.md"/);
+    assert.match(sessionAgents, /# Host Session Policy/);
+    assert.match(sessionAgents, /acceptanceChecks\.target/);
     assert.match(planPromptSnapshot, /artifacts\.planSpec/);
+    assert.match(planPromptSnapshot, /# Host Session Policy/);
+    assert.match(planPromptSnapshot, /Current stage: Plan Stage/);
     assert.match(planPromptSnapshot, /唯一职责是把原始 PRD 收敛为一份可验证/);
     assert.match(planPromptSnapshot, /`sourcePrdMarkdown` 为主事实来源/);
     assert.match(planPromptSnapshot, /不要为了“确认一下”再次反复读取 `artifacts\.sourcePrd`/);
     assert.match(planRepairPromptSnapshot, /计划修复阶段代理/);
     assert.match(planRepairPromptSnapshot, /validationFailures/);
+    assert.match(planRepairPromptSnapshot, /Current stage: Plan Repair Stage/);
     assert.match(generatePromptSnapshot, /当前输入中的 `planSpec` 是唯一事实来源/);
     assert.match(generatePromptSnapshot, /implementedResources/);
+    assert.match(generatePromptSnapshot, /Current stage: Generate Stage/);
     assert.match(generatePromptSnapshot, /pnpm install/);
     assert.match(generatePromptSnapshot, /pnpm db:init/);
     assert.match(generatePromptSnapshot, /pnpm dev/);
     assert.match(generateRepairPromptSnapshot, /生成修复阶段代理/);
     assert.match(generateRepairPromptSnapshot, /validationFailures/);
     assert.match(generateRepairPromptSnapshot, /runtimeValidationLog/);
+    assert.match(generateRepairPromptSnapshot, /Current stage: Generate Repair Stage/);
     assert.match(sourcePrdSnapshot, /# Field Ops Planner/);
     assert.match(analysisSnapshot, /# Stub 需求分析报告/);
     assert.match(generatedSpecSnapshot, /# Stub 实施详细设计规格书/);
@@ -1527,6 +1580,71 @@ test("generated app architecture reference matches the TailAdmin starter skeleto
   assert.match(architectureSource, /route groups/);
 });
 
+test("planning payload passes plan-spec schema validation as a blocking hard constraint to the agent", () => {
+  const runtime = buildTestRuntime();
+  const spec: NormalizedSpec = {
+    appName: "Field Ops Planner",
+    slug: "field-ops-planner",
+    summary: "Plan payload hard-constraint test.",
+    roles: ["dispatcher"],
+    entities: [],
+    screens: [],
+    flows: [],
+    businessRules: [],
+    warnings: [],
+    defaultsApplied: [],
+    sourceMarkdown: "# PRD",
+  };
+
+  const payload = buildPlanProjectPayload(spec, runtime) as {
+    hardConstraints: {
+      planSpecSchemaValidation: {
+        artifactKey: string;
+        artifactPath: string;
+        blocking: boolean;
+        required: boolean;
+        mustValidateBeforeResponse: boolean;
+        rules: string[];
+      };
+    };
+    planSpecSchema: unknown;
+  };
+
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactKey, "artifacts.planSpec");
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactPath, "/.deepagents/plan-spec.json");
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.blocking, true);
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.required, true);
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
+  assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /空字符串/);
+  assert.ok(payload.planSpecSchema);
+});
+
+test("plan-repair payload preserves the blocking hard constraint for plan-spec schema validation", () => {
+  const payload = buildPlanRepairPayload(buildTestRuntime({
+    planAttempt: 2,
+    retryReasons: ["artifacts.planSpec 鏍￠獙澶辫触锛歱ages.0.resourceName"],
+  })) as {
+    hardConstraints: {
+      planSpecSchemaValidation: {
+        artifactKey: string;
+        artifactPath: string;
+        blocking: boolean;
+        required: boolean;
+        mustValidateBeforeResponse: boolean;
+        rules: string[];
+      };
+    };
+    planSpecSchema: unknown;
+  };
+
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactKey, "artifacts.planSpec");
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactPath, "/.deepagents/plan-spec.json");
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.blocking, true);
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.required, true);
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
+  assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /非空字符串/);
+  assert.ok(payload.planSpecSchema);
+});
 test("split prompts enforce plan-spec gating and plan-spec-only generation", async () => {
   const planPromptSource = await readFile(
     path.resolve(process.cwd(), "templates/full-stack/prompts/plan-system-prompt.md"),
@@ -1557,6 +1675,8 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planPromptSource, /严禁对同一文件、同一区间做重复读取循环/);
   assert.match(planPromptSource, /对当前尚不存在的 `artifacts\.analysis`、`artifacts\.generatedSpec`、`artifacts\.planSpec`，应直接创建/);
   assert.match(planPromptSource, /`\/\.deepagents\/prd-analysis\.md`/);
+  assert.match(planPromptSource, /`hardConstraints\.planSpecSchemaValidation`/);
+  assert.match(planPromptSource, /空字符串/);
   assert.match(planPromptSource, /把 `\/\.deepagents\/\.\.\.` 改成 `\/deepagents\/\.\.\.`/);
   assert.match(generatePromptSource, /`planSpec` 是唯一事实来源/);
   assert.match(generatePromptSource, /不能重新分析原始 PRD/);
@@ -1574,6 +1694,8 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /把 `\/app-builder-report\.md` 改成 `\/app\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /页面实现必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
   assert.match(planRepairPromptSource, /validationFailures/);
+  assert.match(planRepairPromptSource, /`hardConstraints\.planSpecSchemaValidation`/);
+  assert.match(planRepairPromptSource, /空字符串/);
   assert.match(planRepairPromptSource, /禁止执行：调用任何子代理/);
   assert.match(planRepairPromptSource, /只补齐缺失或错误部分/);
   assert.match(planRepairPromptSource, /`\/\.deepagents\/source-prd\.md`/);

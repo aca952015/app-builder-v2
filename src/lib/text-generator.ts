@@ -7,6 +7,7 @@ import { toolStrategy } from "langchain";
 import { z } from "zod";
 
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
+import { buildSessionPolicyDocument, composeStageSystemPrompt, type SessionPolicyStage } from "./session-policy.js";
 import { resolveTemplateFilePath } from "./template-pack.js";
 import {
   appendWorkflowLog,
@@ -70,8 +71,65 @@ async function loadDeepagentsModule() {
   }
 }
 
-async function loadSystemPrompt(systemPromptPath: string): Promise<string> {
-  return await fs.readFile(systemPromptPath, "utf8");
+async function loadSystemPrompt(
+  runtime: Pick<TextGeneratorRuntime, "deepagentsAgentsPath">,
+  systemPromptPath: string,
+  stage: SessionPolicyStage,
+): Promise<string> {
+  const [templatePrompt, sessionPolicy] = await Promise.all([
+    fs.readFile(systemPromptPath, "utf8"),
+    fs.readFile(runtime.deepagentsAgentsPath, "utf8").catch(() => buildSessionPolicyDocument()),
+  ]);
+  return composeStageSystemPrompt(stage, templatePrompt, sessionPolicy);
+}
+
+export async function materializeSessionPromptSnapshots(
+  runtime: Pick<
+    TextGeneratorRuntime,
+    | "deepagentsAgentsPath"
+    | "templatePlanPromptPath"
+    | "templatePlanRepairPromptPath"
+    | "templateGeneratePromptPath"
+    | "templateGenerateRepairPromptPath"
+    | "deepagentsPlanPromptSnapshotPath"
+    | "deepagentsPlanRepairPromptSnapshotPath"
+    | "deepagentsGeneratePromptSnapshotPath"
+    | "deepagentsGenerateRepairPromptSnapshotPath"
+  >,
+): Promise<void> {
+  const promptPairs: Array<{
+    sourcePath: string;
+    snapshotPath: string;
+    stage: SessionPolicyStage;
+  }> = [
+    {
+      sourcePath: runtime.templatePlanPromptPath,
+      snapshotPath: runtime.deepagentsPlanPromptSnapshotPath,
+      stage: "plan",
+    },
+    {
+      sourcePath: runtime.templatePlanRepairPromptPath,
+      snapshotPath: runtime.deepagentsPlanRepairPromptSnapshotPath,
+      stage: "plan_repair",
+    },
+    {
+      sourcePath: runtime.templateGeneratePromptPath,
+      snapshotPath: runtime.deepagentsGeneratePromptSnapshotPath,
+      stage: "generate",
+    },
+    {
+      sourcePath: runtime.templateGenerateRepairPromptPath,
+      snapshotPath: runtime.deepagentsGenerateRepairPromptSnapshotPath,
+      stage: "generate_repair",
+    },
+  ];
+
+  await Promise.all(
+    promptPairs.map(async (promptPair) => {
+      const prompt = await loadSystemPrompt(runtime, promptPair.sourcePath, promptPair.stage);
+      await fs.writeFile(promptPair.snapshotPath, prompt, "utf8");
+    }),
+  );
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -89,6 +147,98 @@ export function toVirtualWorkspacePath(outputDirectory: string, targetPath: stri
     return "/";
   }
   return relativePath.startsWith("/") ? relativePath : `/${relativePath}`;
+}
+
+export function buildPlanSpecHardConstraints(
+  runtime: Pick<TextGeneratorRuntime, "outputDirectory" | "deepagentsPlanSpecPath">,
+): Record<string, unknown> {
+  return {
+    planSpecSchemaValidation: {
+      artifactKey: "artifacts.planSpec",
+      artifactPath: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+      blocking: true,
+      required: true,
+      mustValidateBeforeResponse: true,
+      schema: z.toJSONSchema(planSpecSchema),
+      rules: [
+        "artifacts.planSpec 必须是合法 JSON。",
+        "artifacts.planSpec 必须通过这里提供的 schema 校验后，才允许结束当前阶段并返回结构化响应。",
+        "可选字符串字段如果没有值，必须省略，不能写成空字符串。",
+        "必填字符串字段必须提供非空字符串。",
+      ],
+    },
+  };
+}
+
+export function buildPlanProjectPayload(
+  spec: NormalizedSpec,
+  runtime: TextGeneratorRuntime,
+): Record<string, unknown> {
+  return {
+    stage: "璁″垝闃舵",
+    appName: spec.appName,
+    summary: spec.summary,
+    roles: spec.roles,
+    entities: spec.entities,
+    screens: spec.screens,
+    flows: spec.flows,
+    businessRules: spec.businessRules,
+    sourcePrdMarkdown: spec.sourceMarkdown,
+    template: {
+      id: runtime.templateId,
+      name: runtime.templateName,
+      version: runtime.templateVersion,
+      directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
+    },
+    planPolicy: {
+      planSpecVersion: 1,
+      requireStructuredModelDefinitions: true,
+      attempt: runtime.planAttempt ?? 1,
+      maxRetries: runtime.maxPlanRetries ?? 0,
+      repairMode: false,
+      retryReasons: runtime.retryReasons ?? [],
+    },
+    artifacts: {
+      sourcePrd: toVirtualWorkspacePath(runtime.outputDirectory, runtime.sourcePrdSnapshotPath),
+      analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+      generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
+      planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+      planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+      generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
+      errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
+    },
+    planSpecSchema: z.toJSONSchema(planSpecSchema),
+    hardConstraints: buildPlanSpecHardConstraints(runtime),
+  };
+}
+
+export function buildPlanRepairPayload(runtime: TextGeneratorRuntime): Record<string, unknown> {
+  return {
+    stage: "璁″垝淇闃舵",
+    template: {
+      id: runtime.templateId,
+      name: runtime.templateName,
+      version: runtime.templateVersion,
+      directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
+    },
+    planRepairPolicy: {
+      planSpecVersion: 1,
+      requireStructuredModelDefinitions: true,
+      attempt: runtime.planAttempt ?? 1,
+      maxRepairs: runtime.maxPlanRetries ?? 0,
+      validationFailures: runtime.retryReasons ?? [],
+    },
+    artifacts: {
+      sourcePrd: toVirtualWorkspacePath(runtime.outputDirectory, runtime.sourcePrdSnapshotPath),
+      analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+      generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
+      planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+      planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+      errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
+    },
+    planSpecSchema: z.toJSONSchema(planSpecSchema),
+    hardConstraints: buildPlanSpecHardConstraints(runtime),
+  };
 }
 
 export function resolveDeepagentsStreamModes(
@@ -835,13 +985,14 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       promptSnapshotPath: string;
       responseSchema: z.ZodType<T>;
       payload: Record<string, unknown>;
+      stage: SessionPolicyStage;
       timeoutLabel: string;
     },
   ): Promise<T> {
     const deepagents = await loadDeepagentsModule();
     const createDeepAgent = deepagents.createDeepAgent;
     const resolvedModel = await resolveModel(this.model);
-    const systemPrompt = await loadSystemPrompt(options.promptPath);
+    const systemPrompt = await loadSystemPrompt(runtime, options.promptPath, options.stage);
     const skillsDirectory = path.join(runtime.templateDirectory, "skills");
 
     await fs.writeFile(options.promptSnapshotPath, systemPrompt, "utf8");
@@ -895,42 +1046,9 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         promptPath: planPromptPath,
         promptSnapshotPath: runtime.deepagentsPlanPromptSnapshotPath,
         responseSchema: planResultSchema,
+        stage: "plan",
         timeoutLabel: "deepagents planning",
-        payload: {
-          stage: "计划阶段",
-          appName: spec.appName,
-          summary: spec.summary,
-          roles: spec.roles,
-          entities: spec.entities,
-          screens: spec.screens,
-          flows: spec.flows,
-          businessRules: spec.businessRules,
-          sourcePrdMarkdown: spec.sourceMarkdown,
-          template: {
-            id: runtime.templateId,
-            name: runtime.templateName,
-            version: runtime.templateVersion,
-            directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
-          },
-          planPolicy: {
-            planSpecVersion: 1,
-            requireStructuredModelDefinitions: true,
-            attempt: runtime.planAttempt ?? 1,
-            maxRetries: runtime.maxPlanRetries ?? 0,
-            repairMode: false,
-            retryReasons: runtime.retryReasons ?? [],
-          },
-          artifacts: {
-            sourcePrd: toVirtualWorkspacePath(runtime.outputDirectory, runtime.sourcePrdSnapshotPath),
-            analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
-            generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
-            planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
-            planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
-            generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
-            errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
-          },
-          planSpecSchema: z.toJSONSchema(planSpecSchema),
-        },
+        payload: buildPlanProjectPayload(spec, runtime),
       });
     } catch (error) {
       await writeErrorLog(runtime.deepagentsErrorLogPath, error);
@@ -948,32 +1066,9 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         promptPath: planRepairPromptPath,
         promptSnapshotPath: runtime.deepagentsPlanRepairPromptSnapshotPath,
         responseSchema: planResultSchema,
+        stage: "plan_repair",
         timeoutLabel: "deepagents plan repair",
-        payload: {
-          stage: "计划修复阶段",
-          template: {
-            id: runtime.templateId,
-            name: runtime.templateName,
-            version: runtime.templateVersion,
-            directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
-          },
-          planRepairPolicy: {
-            planSpecVersion: 1,
-            requireStructuredModelDefinitions: true,
-            attempt: runtime.planAttempt ?? 1,
-            maxRepairs: runtime.maxPlanRetries ?? 0,
-            validationFailures: runtime.retryReasons ?? [],
-          },
-          artifacts: {
-            sourcePrd: toVirtualWorkspacePath(runtime.outputDirectory, runtime.sourcePrdSnapshotPath),
-            analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
-            generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
-            planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
-            planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
-            errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
-          },
-          planSpecSchema: z.toJSONSchema(planSpecSchema),
-        },
+        payload: buildPlanRepairPayload(runtime),
       });
     } catch (error) {
       await writeErrorLog(runtime.deepagentsErrorLogPath, error);
@@ -991,6 +1086,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         promptPath: generatePromptPath,
         promptSnapshotPath: runtime.deepagentsGeneratePromptSnapshotPath,
         responseSchema: generatedProjectSchema,
+        stage: "generate",
         timeoutLabel: "deepagents generation",
         payload: {
           stage: "生成阶段",
@@ -1037,6 +1133,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         promptPath: generateRepairPromptPath,
         promptSnapshotPath: runtime.deepagentsGenerateRepairPromptSnapshotPath,
         responseSchema: generatedProjectSchema,
+        stage: "generate_repair",
         timeoutLabel: "deepagents generation repair",
         payload: {
           stage: "生成修复阶段",

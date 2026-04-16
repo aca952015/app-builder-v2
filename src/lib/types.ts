@@ -85,6 +85,19 @@ export type GenerationValidationStep = {
   detail: string;
 };
 
+export type TemplateRuntimeValidationStep = {
+  name: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  kind?: "command" | "dev-server";
+};
+
+export type TemplateRuntimeValidation = {
+  copyEnvExample?: boolean;
+  steps: TemplateRuntimeValidationStep[];
+};
+
 export type GeneratedAppValidator = {
   validate(outputDirectory: string, runtime: TextGeneratorRuntime): Promise<{
     reasons: string[];
@@ -152,6 +165,7 @@ export type TemplatePack = {
   referencesDirectory?: string;
   skillsDirectory?: string;
   starterDirectory?: string;
+  runtimeValidation: TemplateRuntimeValidation;
   hash: string;
 };
 
@@ -161,6 +175,7 @@ export type TemplateLock = {
   version: string;
   description?: string;
   projectRenderer: string;
+  runtimeValidation: TemplateRuntimeValidation;
   hash: string;
   stagedAt: string;
   workspaceTemplateDirectory: string;
@@ -176,6 +191,7 @@ export type OutputWorkspace = {
   sessionId: string;
   outputDirectory: string;
   deepagentsDirectory: string;
+  deepagentsAgentsPath: string;
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
   deepagentsRuntimeValidationLogPath: string;
@@ -198,6 +214,7 @@ export type TextGeneratorRuntime = {
   sessionId: string;
   outputDirectory: string;
   deepagentsDirectory: string;
+  deepagentsAgentsPath: string;
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
   deepagentsRuntimeValidationLogPath: string;
@@ -225,6 +242,7 @@ export type TextGeneratorRuntime = {
   generateAttempt?: number;
   maxGenerateRetries?: number;
   retryReasons?: string[];
+  templateRuntimeValidation: TemplateRuntimeValidation;
 };
 
 export type TextGenerator = {

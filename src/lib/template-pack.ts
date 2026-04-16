@@ -3,7 +3,22 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { OutputWorkspace, TemplateLock, TemplatePack } from "./types.js";
+import {
+  OutputWorkspace,
+  TemplateLock,
+  TemplatePack,
+  TemplateRuntimeValidation,
+  TemplateRuntimeValidationStep,
+} from "./types.js";
+
+const defaultRuntimeValidation: TemplateRuntimeValidation = {
+  copyEnvExample: true,
+  steps: [
+    { name: "pnpm install", command: "pnpm", args: ["install"] },
+    { name: "pnpm db:init", command: "pnpm", args: ["db:init"] },
+    { name: "pnpm dev", command: "pnpm", args: ["dev"], kind: "dev-server" },
+  ],
+};
 
 function moduleDirectory(): string {
   return path.dirname(fileURLToPath(import.meta.url));
@@ -75,12 +90,76 @@ type TemplateManifest = {
   referencesDir?: string;
   skillsDir?: string;
   starterDir?: string;
+  runtimeValidation?: TemplateRuntimeValidation;
 };
 
 function assertNonEmptyString(value: unknown, fieldName: string): asserts value is string {
   if (typeof value !== "string" || value.trim() === "") {
     throw new Error(`Invalid template manifest field "${fieldName}".`);
   }
+}
+
+function parseRuntimeValidationStep(raw: unknown, index: number): TemplateRuntimeValidationStep {
+  if (!raw || typeof raw !== "object") {
+    throw new Error(`Template runtimeValidation.steps[${index}] must be an object.`);
+  }
+
+  const step = raw as Record<string, unknown>;
+  assertNonEmptyString(step.name, `runtimeValidation.steps[${index}].name`);
+  assertNonEmptyString(step.command, `runtimeValidation.steps[${index}].command`);
+
+  if (!Array.isArray(step.args) || step.args.some((arg) => typeof arg !== "string")) {
+    throw new Error(`Template runtimeValidation.steps[${index}].args must be an array of strings.`);
+  }
+
+  let env: Record<string, string> | undefined;
+  if (step.env !== undefined) {
+    if (!step.env || typeof step.env !== "object" || Array.isArray(step.env)) {
+      throw new Error(`Template runtimeValidation.steps[${index}].env must be an object.`);
+    }
+
+    env = {};
+    for (const [key, value] of Object.entries(step.env as Record<string, unknown>)) {
+      if (typeof value !== "string") {
+        throw new Error(`Template runtimeValidation.steps[${index}].env.${key} must be a string.`);
+      }
+      env[key] = value;
+    }
+  }
+
+  if (step.kind !== undefined && step.kind !== "command" && step.kind !== "dev-server") {
+    throw new Error(
+      `Template runtimeValidation.steps[${index}].kind must be "command" or "dev-server".`,
+    );
+  }
+
+  return {
+    name: step.name,
+    command: step.command,
+    args: step.args,
+    ...(env ? { env } : {}),
+    ...(step.kind ? { kind: step.kind } : {}),
+  };
+}
+
+function parseRuntimeValidation(raw: unknown): TemplateRuntimeValidation {
+  if (raw === undefined) {
+    return JSON.parse(JSON.stringify(defaultRuntimeValidation)) as TemplateRuntimeValidation;
+  }
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error('Template manifest field "runtimeValidation" must be an object.');
+  }
+
+  const validation = raw as Record<string, unknown>;
+  if (!Array.isArray(validation.steps) || validation.steps.length === 0) {
+    throw new Error('Template manifest field "runtimeValidation.steps" must be a non-empty array.');
+  }
+
+  return {
+    ...(typeof validation.copyEnvExample === "boolean" ? { copyEnvExample: validation.copyEnvExample } : {}),
+    steps: validation.steps.map((step, index) => parseRuntimeValidationStep(step, index)),
+  };
 }
 
 function parseTemplateManifest(raw: unknown): TemplateManifest {
@@ -115,6 +194,7 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
       generate: prompts.generate,
       generateRepair: prompts.generateRepair,
     },
+    runtimeValidation: parseRuntimeValidation(manifest.runtimeValidation),
   };
 
   if (typeof manifest.description === "string" && manifest.description.trim() !== "") {
@@ -215,6 +295,7 @@ export async function loadTemplatePack(templateId = "full-stack"): Promise<Templ
     ...(manifest.referencesDir ? { referencesDirectory: path.join(directory, manifest.referencesDir) } : {}),
     ...(manifest.skillsDir ? { skillsDirectory: path.join(directory, manifest.skillsDir) } : {}),
     ...(manifest.starterDir ? { starterDirectory: path.join(directory, manifest.starterDir) } : {}),
+    runtimeValidation: manifest.runtimeValidation ?? defaultRuntimeValidation,
     hash: await hashDirectory(directory),
   };
 }
@@ -274,6 +355,7 @@ export async function stageTemplatePack(
     name: template.name,
     version: template.version,
     projectRenderer: template.projectRenderer,
+    runtimeValidation: template.runtimeValidation,
     hash: template.hash,
     stagedAt: new Date().toISOString(),
     workspaceTemplateDirectory: path.relative(workspace.outputDirectory, workspace.deepagentsDirectory).split(path.sep).join("/"),

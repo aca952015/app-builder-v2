@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { ensureEmptyOutputDirectory } from "./project-writer.js";
+import { buildSessionPolicyDocument } from "./session-policy.js";
 import { OutputWorkspace } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -39,11 +40,14 @@ export async function prepareOutputWorkspace(options: {
 
   const deepagentsDirectory = path.join(outputDirectory, ".deepagents");
   await fs.mkdir(deepagentsDirectory, { recursive: true });
+  const deepagentsAgentsPath = path.join(deepagentsDirectory, "AGENTS.md");
+  await fs.writeFile(deepagentsAgentsPath, `${buildSessionPolicyDocument()}\n`, "utf8");
 
   return {
     sessionId,
     outputDirectory,
     deepagentsDirectory,
+    deepagentsAgentsPath,
     deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
     deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),

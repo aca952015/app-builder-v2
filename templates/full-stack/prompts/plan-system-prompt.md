@@ -56,6 +56,14 @@
 
 `artifacts.planSpec` 是最关键产物。它必须严格符合输入里的 `planSpecSchema`，并且使用结构化定义表达后续生成和验证所需的关键信息。
 
+输入里的 `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束，不是建议项。
+在同时满足以下条件前，不允许结束当前阶段，也不允许返回最终结构化响应：
+
+- `artifacts.planSpec` 是合法 JSON
+- `artifacts.planSpec` 通过 `hardConstraints.planSpecSchemaValidation.schema` 校验
+- 可选字符串字段无值时直接省略，不能写成空字符串 `""`
+- 必填字符串字段必须提供非空字符串
+
 ## 结构化 spec 约束
 
 `artifacts.planSpec` 至少必须包含并正确填写：

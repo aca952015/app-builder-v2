@@ -11,7 +11,7 @@ import { prepareOutputWorkspace, writeDeepagentsConfig } from "./output-workspac
 import { parsePrd } from "./prd-parser.js";
 import { normalizeSpec } from "./spec-normalizer.js";
 import { copyStarterScaffold, loadTemplatePack, stageTemplatePack } from "./template-pack.js";
-import { DeepAgentsTextGenerator } from "./text-generator.js";
+import { DeepAgentsTextGenerator, materializeSessionPromptSnapshots } from "./text-generator.js";
 import {
   appendWorkflowLog,
   closeWorkflowBoard,
@@ -28,6 +28,8 @@ import {
   GenerationResult,
   PlanResult,
   SessionValidationResult,
+  type TemplateRuntimeValidation,
+  type TemplateRuntimeValidationStep,
   TextGenerator,
   TextGeneratorRuntime,
   ValidationPhase,
@@ -38,6 +40,17 @@ const MAX_GENERATION_REPAIRS = 2;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段";
+
+function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
+  return {
+    copyEnvExample: true,
+    steps: [
+      { name: "pnpm install", command: "pnpm", args: ["install"] },
+      { name: "pnpm db:init", command: "pnpm", args: ["db:init"] },
+      { name: "pnpm dev", command: "pnpm", args: ["dev"], kind: "dev-server" },
+    ],
+  };
+}
 
 class PassthroughGeneratedAppValidator implements GeneratedAppValidator {
   async validate(): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
@@ -335,6 +348,88 @@ async function runDevValidationStep(outputDirectory: string, logPath: string): P
   });
 }
 
+async function runConfiguredDevValidationStep(options: {
+  outputDirectory: string;
+  logPath: string;
+  command: string;
+  args: string[];
+  env?: NodeJS.ProcessEnv;
+  name: string;
+}): Promise<GenerationValidationStep> {
+  const port = await reserveFreePort();
+  const child = spawn(options.command, options.args, {
+    cwd: options.outputDirectory,
+    env: {
+      ...process.env,
+      ...options.env,
+      HOSTNAME: "127.0.0.1",
+      PORT: String(port),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let output = "";
+  let finished = false;
+
+  await appendRuntimeValidationLog(options.logPath, [
+    `=== ${options.name} ===`,
+    `$ PORT=${port} HOSTNAME=127.0.0.1 ${[options.command, ...options.args].join(" ")}`,
+    "",
+  ]);
+
+  const onChunk = (chunk: Buffer) => {
+    const text = chunk.toString("utf8");
+    output += text;
+    void fs.appendFile(options.logPath, text, "utf8");
+  };
+
+  child.stdout.on("data", onChunk);
+  child.stderr.on("data", onChunk);
+
+  const finish = async (step: GenerationValidationStep): Promise<GenerationValidationStep> => {
+    if (finished) {
+      return step;
+    }
+    finished = true;
+    await terminateChildProcess(child);
+    await appendRuntimeValidationLog(options.logPath, [
+      "",
+      step.ok ? `[ok] ${step.detail}` : `[error] ${step.detail}`,
+      "",
+    ]);
+    return step;
+  };
+
+  const timeoutAt = Date.now() + DEFAULT_DEV_SERVER_READY_TIMEOUT_MS;
+  while (!finished && Date.now() < timeoutAt) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      const exitCode = child.exitCode;
+      const signal = child.signalCode;
+      return await finish({
+        name: options.name,
+        ok: false,
+        detail: `Dev server exited early (exitCode=${exitCode ?? "null"} signal=${signal ?? "null"}). Summary: ${summarizeCommandOutput(output)}`,
+      });
+    }
+
+    if (await pingDevServer(port)) {
+      return await finish({
+        name: options.name,
+        ok: true,
+        detail: `Dev server responded at http://127.0.0.1:${port}.`,
+      });
+    }
+
+    await sleep(1_000);
+  }
+
+  return await finish({
+    name: options.name,
+    ok: false,
+    detail: `Timed out waiting for the dev server. Summary: ${summarizeCommandOutput(output)}`,
+  });
+}
+
 class ShellGeneratedAppValidator implements GeneratedAppValidator {
   async validate(outputDirectory: string, runtime: TextGeneratorRuntime): Promise<{
     reasons: string[];
@@ -343,12 +438,53 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
     await fs.writeFile(runtime.deepagentsRuntimeValidationLogPath, "", "utf8");
 
     const steps: GenerationValidationStep[] = [];
+    const runtimeValidation = runtime.templateRuntimeValidation ?? defaultTemplateRuntimeValidation();
 
-    const envStep = await ensureEnvFile(outputDirectory, runtime.deepagentsRuntimeValidationLogPath);
-    steps.push(envStep);
-    if (!envStep.ok) {
+    if (runtimeValidation.copyEnvExample !== false) {
+      const envStep = await ensureEnvFile(outputDirectory, runtime.deepagentsRuntimeValidationLogPath);
+      steps.push(envStep);
+      if (!envStep.ok) {
+        return {
+          reasons: [`Generation runtime validation failed: mv .env.example .env did not pass. ${envStep.detail} See .deepagents/runtime-validation.log.`],
+          steps,
+        };
+      }
+    }
+
+    const isDefaultValidation = JSON.stringify(runtimeValidation) === JSON.stringify(defaultTemplateRuntimeValidation());
+    if (!isDefaultValidation) {
+      for (const validationStep of runtimeValidation.steps) {
+        const result =
+          validationStep.kind === "dev-server"
+          ? {
+              step: await runConfiguredDevValidationStep({
+                outputDirectory,
+                logPath: runtime.deepagentsRuntimeValidationLogPath,
+                command: validationStep.command,
+                args: validationStep.args,
+                name: validationStep.name,
+                ...(validationStep.env ? { env: validationStep.env } : {}),
+              }),
+            }
+          : await runCommandStep({
+              name: validationStep.name,
+              command: validationStep.command,
+              args: validationStep.args,
+              cwd: outputDirectory,
+              logPath: runtime.deepagentsRuntimeValidationLogPath,
+              ...(validationStep.env ? { env: validationStep.env } : {}),
+            });
+        steps.push(result.step);
+        if (!result.step.ok) {
+          return {
+            reasons: [`Generation runtime validation failed: ${validationStep.name} did not pass. ${result.step.detail} See .deepagents/runtime-validation.log.`],
+            steps,
+          };
+        }
+      }
+
       return {
-        reasons: [`生成阶段运行验证失败：mv .env.example .env 未通过。${envStep.detail} 详见 .deepagents/runtime-validation.log。`],
+        reasons: [],
         steps,
       };
     }
@@ -1154,6 +1290,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
   let templateId = "unknown";
   let templateName = "unknown";
   let templateVersion = "unknown";
+  let templateRuntimeValidation = defaultTemplateRuntimeValidation();
 
   const configContents = await readIfExists(configPath);
   if (configContents) {
@@ -1163,6 +1300,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
           id?: unknown;
           name?: unknown;
           version?: unknown;
+          runtimeValidation?: unknown;
         };
       };
       if (typeof parsed.template?.id === "string" && parsed.template.id.trim() !== "") {
@@ -1174,6 +1312,54 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
       if (typeof parsed.template?.version === "string" && parsed.template.version.trim() !== "") {
         templateVersion = parsed.template.version;
       }
+      if (parsed.template?.runtimeValidation && typeof parsed.template.runtimeValidation === "object") {
+        const runtimeValidationCandidate = parsed.template.runtimeValidation as Partial<TemplateRuntimeValidation>;
+        if (Array.isArray(runtimeValidationCandidate.steps)) {
+          const steps = runtimeValidationCandidate.steps.flatMap((step): TemplateRuntimeValidationStep[] => {
+            if (!step || typeof step !== "object") {
+              return [];
+            }
+
+            const candidate = step as Partial<TemplateRuntimeValidationStep>;
+            if (
+              typeof candidate.name !== "string" ||
+              typeof candidate.command !== "string" ||
+              !Array.isArray(candidate.args) ||
+              candidate.args.some((arg) => typeof arg !== "string")
+            ) {
+              return [];
+            }
+
+            const nextStep: TemplateRuntimeValidationStep = {
+              name: candidate.name,
+              command: candidate.command,
+              args: candidate.args,
+            };
+            if (candidate.kind === "command" || candidate.kind === "dev-server") {
+              nextStep.kind = candidate.kind;
+            }
+            if (candidate.env && typeof candidate.env === "object" && !Array.isArray(candidate.env)) {
+              const envEntries = Object.entries(candidate.env).filter((entry): entry is [string, string] => (
+                typeof entry[1] === "string"
+              ));
+              if (envEntries.length > 0) {
+                nextStep.env = Object.fromEntries(envEntries);
+              }
+            }
+            return [nextStep];
+          });
+
+          if (steps.length > 0) {
+            templateRuntimeValidation = {
+              copyEnvExample:
+                typeof runtimeValidationCandidate.copyEnvExample === "boolean"
+                  ? runtimeValidationCandidate.copyEnvExample
+                  : true,
+              steps,
+            };
+          }
+        }
+      }
     } catch {
       // Ignore malformed config here; phase validation will report durable artifact failures separately.
     }
@@ -1183,6 +1369,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     sessionId,
     outputDirectory,
     deepagentsDirectory,
+    deepagentsAgentsPath: path.join(deepagentsDirectory, "AGENTS.md"),
     deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
     deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
@@ -1207,6 +1394,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
     maxPlanRetries: MAX_PLAN_REPAIRS,
     maxGenerateRetries: MAX_GENERATION_REPAIRS,
+    templateRuntimeValidation,
   };
 }
 
@@ -1616,6 +1804,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       sessionId: workspace.sessionId,
       outputDirectory: workspace.outputDirectory,
       deepagentsDirectory: workspace.deepagentsDirectory,
+      deepagentsAgentsPath: workspace.deepagentsAgentsPath,
       deepagentsLogPath: workspace.deepagentsLogPath,
       deepagentsErrorLogPath: workspace.deepagentsErrorLogPath,
       deepagentsRuntimeValidationLogPath: workspace.deepagentsRuntimeValidationLogPath,
@@ -1640,8 +1829,11 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       deepagentsGenerationValidationPath: workspace.deepagentsGenerationValidationPath,
       maxPlanRetries: MAX_PLAN_REPAIRS,
       maxGenerateRetries: MAX_GENERATION_REPAIRS,
+      templateRuntimeValidation: template.runtimeValidation,
       ...overrides,
     });
+
+    await materializeSessionPromptSnapshots(createRuntime());
 
     let approvedPlan: PlanSpec | null = null;
     let planRetryReasons: string[] = [];

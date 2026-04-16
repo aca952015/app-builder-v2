@@ -17,6 +17,7 @@
   - `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
   - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
   - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
+- `hardConstraints.planSpecSchemaValidation`
 - 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
 - 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
   - 把 `/.deepagents/...` 改成 `/deepagents/...`
@@ -49,6 +50,9 @@
 - 只补齐缺失或错误部分，不得整轮重写已经正确的内容。
 - 如需修改现有文件，必须先读再改。
 - 若某项失败来自资源/API/页面映射不完整，优先最小化补全 JSON 结构，再同步 Markdown 文档一致性。
+- `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束。
+- 在 `artifacts.planSpec` 重新成为合法 JSON 且通过 `hardConstraints.planSpecSchemaValidation.schema` 校验前，不允许结束修补或返回最终结构化响应。
+- 可选字符串字段无值时必须省略，不能写成空字符串 `""`；必填字符串字段必须提供非空字符串。
 - `acceptanceChecks.target` 必须严格遵守宿主规则：
   - `resource` 类型填资源名
   - `page` 类型填页面路由
