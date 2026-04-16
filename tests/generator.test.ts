@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { type PlanSpec } from "../src/lib/plan-spec.js";
-import { generateApplication } from "../src/lib/generator.js";
+import { generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
 import { buildPlanProjectPayload, buildPlanRepairPayload } from "../src/lib/text-generator.js";
 import { copyStarterScaffold, loadTemplatePack } from "../src/lib/template-pack.js";
 import { GeneratedAppValidator, NormalizedSpec, TextGenerator, TextGeneratorRuntime } from "../src/lib/types.js";
@@ -147,6 +147,29 @@ function routeToAdminPagePath(route: string): string {
     ? path.join("app", "(admin)", cleanRoute, "page.tsx")
     : path.join("app", "(admin)", "page.tsx");
 }
+
+test("resolveSpawnCommand finds Windows command shims through PATHEXT", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows-only command shim resolution");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-spawn-resolve-"));
+
+  try {
+    const shimPath = path.join(tempRoot, "pnpm.cmd");
+    await writeFile(shimPath, "@echo off\r\necho pnpm shim\r\n", "utf8");
+
+    const resolved = await resolveSpawnCommand("pnpm", {
+      PATH: tempRoot,
+      PATHEXT: ".CMD;.EXE",
+    });
+
+    assert.equal(resolved.toLowerCase(), shimPath.toLowerCase());
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
 
 async function writeImplementedProjectFiles(options: {
   outputDirectory: string;

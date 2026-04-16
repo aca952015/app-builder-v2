@@ -78,6 +78,78 @@ async function appendRuntimeValidationLog(logPath: string, lines: string[]): Pro
   await fs.appendFile(logPath, `${lines.join("\n")}\n`, "utf8");
 }
 
+function readEnvCaseInsensitive(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const direct = env[key];
+  if (typeof direct === "string" && direct !== "") {
+    return direct;
+  }
+
+  const matchedKey = Object.keys(env).find((entry) => entry.toLowerCase() === key.toLowerCase());
+  if (!matchedKey) {
+    return undefined;
+  }
+
+  const value = env[matchedKey];
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+export async function resolveSpawnCommand(
+  command: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  if (process.platform !== "win32") {
+    return command;
+  }
+
+  if (path.extname(command) !== "") {
+    return command;
+  }
+
+  const pathExt = readEnvCaseInsensitive(env, "PATHEXT");
+  const extensions = (pathExt ? pathExt.split(";") : [".COM", ".EXE", ".BAT", ".CMD"])
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  const commandHasPathSeparator = /[\\/]/.test(command);
+  const searchDirectories = commandHasPathSeparator
+    ? [""]
+    : (readEnvCaseInsensitive(env, "PATH") ?? "")
+        .split(path.delimiter)
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+
+  for (const directory of searchDirectories) {
+    const basePath = directory ? path.join(directory, command) : command;
+    for (const extension of extensions) {
+      const candidate = `${basePath}${extension}`;
+      if (await pathExists(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return command;
+}
+
+async function spawnValidationCommand(options: {
+  command: string;
+  args: string[];
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<ChildProcess> {
+  const combinedEnv = {
+    ...process.env,
+    ...options.env,
+  };
+  const resolvedCommand = await resolveSpawnCommand(options.command, combinedEnv);
+
+  return spawn(resolvedCommand, options.args, {
+    cwd: options.cwd,
+    env: combinedEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
 async function terminateChildProcess(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) {
     return;
@@ -109,15 +181,6 @@ async function runCommandStep(options: {
   timeoutMs?: number;
   logPath: string;
 }): Promise<{ step: GenerationValidationStep; output: string }> {
-  const child = spawn(options.command, options.args, {
-    cwd: options.cwd,
-    env: {
-      ...process.env,
-      ...options.env,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
   let output = "";
   let timedOut = false;
 
@@ -127,14 +190,33 @@ async function runCommandStep(options: {
     "",
   ]);
 
+  let child: ChildProcess;
+  try {
+    child = await spawnValidationCommand(options);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    await appendRuntimeValidationLog(options.logPath, [
+      `[error] Failed to start command. ${detail}`,
+      "",
+    ]);
+    return {
+      step: {
+        name: options.name,
+        ok: false,
+        detail: `Failed to start command. ${detail}`,
+      },
+      output,
+    };
+  }
+
   const onChunk = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
     output += text;
     void fs.appendFile(options.logPath, text, "utf8");
   };
 
-  child.stdout.on("data", onChunk);
-  child.stderr.on("data", onChunk);
+  child.stdout!.on("data", onChunk);
+  child.stderr!.on("data", onChunk);
 
   const timeout = setTimeout(() => {
     timedOut = true;
@@ -276,16 +358,6 @@ async function pingDevServer(port: number): Promise<boolean> {
 
 async function runDevValidationStep(outputDirectory: string, logPath: string): Promise<GenerationValidationStep> {
   const port = await reserveFreePort();
-  const child = spawn("pnpm", ["dev"], {
-    cwd: outputDirectory,
-    env: {
-      ...process.env,
-      HOSTNAME: "127.0.0.1",
-      PORT: String(port),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
   let output = "";
   let finished = false;
 
@@ -295,14 +367,38 @@ async function runDevValidationStep(outputDirectory: string, logPath: string): P
     "",
   ]);
 
+  let child: ChildProcess;
+  try {
+    child = await spawnValidationCommand({
+      command: "pnpm",
+      args: ["dev"],
+      cwd: outputDirectory,
+      env: {
+        HOSTNAME: "127.0.0.1",
+        PORT: String(port),
+      },
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    await appendRuntimeValidationLog(logPath, [
+      `[error] Failed to start command. ${detail}`,
+      "",
+    ]);
+    return {
+      name: "pnpm dev",
+      ok: false,
+      detail: `Failed to start command. ${detail}`,
+    };
+  }
+
   const onChunk = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
     output += text;
     void fs.appendFile(logPath, text, "utf8");
   };
 
-  child.stdout.on("data", onChunk);
-  child.stderr.on("data", onChunk);
+  child.stdout!.on("data", onChunk);
+  child.stderr!.on("data", onChunk);
 
   const finish = async (step: GenerationValidationStep): Promise<GenerationValidationStep> => {
     if (finished) {
@@ -357,17 +453,6 @@ async function runConfiguredDevValidationStep(options: {
   name: string;
 }): Promise<GenerationValidationStep> {
   const port = await reserveFreePort();
-  const child = spawn(options.command, options.args, {
-    cwd: options.outputDirectory,
-    env: {
-      ...process.env,
-      ...options.env,
-      HOSTNAME: "127.0.0.1",
-      PORT: String(port),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
   let output = "";
   let finished = false;
 
@@ -377,14 +462,39 @@ async function runConfiguredDevValidationStep(options: {
     "",
   ]);
 
+  let child: ChildProcess;
+  try {
+    child = await spawnValidationCommand({
+      command: options.command,
+      args: options.args,
+      cwd: options.outputDirectory,
+      env: {
+        ...options.env,
+        HOSTNAME: "127.0.0.1",
+        PORT: String(port),
+      },
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    await appendRuntimeValidationLog(options.logPath, [
+      `[error] Failed to start command. ${detail}`,
+      "",
+    ]);
+    return {
+      name: options.name,
+      ok: false,
+      detail: `Failed to start command. ${detail}`,
+    };
+  }
+
   const onChunk = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
     output += text;
     void fs.appendFile(options.logPath, text, "utf8");
   };
 
-  child.stdout.on("data", onChunk);
-  child.stderr.on("data", onChunk);
+  child.stdout!.on("data", onChunk);
+  child.stderr!.on("data", onChunk);
 
   const finish = async (step: GenerationValidationStep): Promise<GenerationValidationStep> => {
     if (finished) {
