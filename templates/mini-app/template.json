@@ -21,6 +21,11 @@
         "args": ["install"]
       },
       {
+        "name": "pnpm typecheck",
+        "command": "pnpm",
+        "args": ["typecheck"]
+      },
+      {
         "name": "pnpm dev",
         "command": "pnpm",
         "args": ["dev"],

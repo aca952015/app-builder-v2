@@ -11,7 +11,7 @@
 
 - 页面修复必须继续以 `planSpec.pages[*].route` 为准
 - API 修复必须继续以 `planSpec.apis[*].path` 为准
-- 如果失败项来自运行验证，必须结合 `artifacts.runtimeValidationLog` 的真实输出来修
+- 如果失败项来自运行验证，必须结合 `artifacts.runtimeValidationLog` 的真实输出修复，并确保输入里的 `template.runtimeValidation` 步骤可以通过
 - 继续保持 mini-app 的轻量结构，不要为修一个错误引入整套 full-stack 基础设施
 
 ## 完成条件

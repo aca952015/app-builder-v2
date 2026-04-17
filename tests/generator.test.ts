@@ -501,6 +501,22 @@ function buildInconsistentPlanSpec(): PlanSpec {
         requestShape: "GenerateReportInput",
         responseShape: "Report",
       },
+      {
+        name: "searchCity",
+        resourceName: "Report",
+        path: "/app/api/search-city/route.ts",
+        methods: ["GET"],
+        requestShape: "SearchCityQuery",
+        responseShape: "CityOption[]",
+      },
+      {
+        name: "manageHistory",
+        resourceName: "Report",
+        path: "/app/api/manage-history/route.ts",
+        methods: ["GET"],
+        requestShape: "HistoryQuery",
+        responseShape: "HistoryRecord[]",
+      },
     ],
     flows: [
       {
@@ -533,6 +549,18 @@ function buildInconsistentPlanSpec(): PlanSpec {
         description: "必须实现报表列表接口。",
         type: "api",
         target: "/app/api/reports/route.ts",
+      },
+      {
+        id: "api-search-city",
+        description: "必须提供城市搜索接口。",
+        type: "api",
+        target: "searchCity",
+      },
+      {
+        id: "api-manage-history",
+        description: "必须提供历史管理接口。",
+        type: "api",
+        target: "manageHistory",
       },
       {
         id: "flow-reports",
@@ -641,6 +669,99 @@ class StructuredResponseRecoveryTextGenerator implements TextGenerator {
 
   async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
     throw new Error("generateRepairProject should not be called in StructuredResponseRecoveryTextGenerator");
+  }
+}
+
+class GenerateStructuredResponseRecoveryTextGenerator implements TextGenerator {
+  generationRepairAttempts = 0;
+
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildPlanSpec();
+    await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+
+    return {
+      summary: "计划阶段成功。",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<never> {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Generated Report\n\nRecovered after missing structured response.\n",
+    });
+    throw new Error("deepagents generation did not return a valid structured response.");
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
+    this.generationRepairAttempts += 1;
+    throw new Error("generateRepairProject should not be called in GenerateStructuredResponseRecoveryTextGenerator");
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in GenerateStructuredResponseRecoveryTextGenerator");
+  }
+}
+
+class GenerateRepairStructuredResponseRecoveryTextGenerator implements TextGenerator {
+  generationRepairAttempts = 0;
+
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildPlanSpec();
+    await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+
+    return {
+      summary: "计划阶段成功。",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(_planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    await writeFile(
+      path.join(runtime.outputDirectory, "app-builder-report.md"),
+      "# Generation Report\n\nMissing planned outputs.\n",
+      "utf8",
+    );
+
+    return {
+      summary: "第一次生成没有覆盖全部计划定义。",
+      filesWritten: ["app-builder-report.md"],
+      implementedResources: [],
+      implementedPages: [],
+      implementedApis: [],
+      notes: [],
+    };
+  }
+
+  async generateRepairProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<never> {
+    this.generationRepairAttempts += 1;
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Generation Report\n\nRecovered during generate repair.\n",
+    });
+    throw new Error("deepagents generation repair did not return a valid structured response.");
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in GenerateRepairStructuredResponseRecoveryTextGenerator");
   }
 }
 
@@ -1214,9 +1335,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(generatePromptSnapshot, /当前输入中的 `planSpec` 是唯一事实来源/);
     assert.match(generatePromptSnapshot, /implementedResources/);
     assert.match(generatePromptSnapshot, /Current stage: Generate Stage/);
-    assert.match(generatePromptSnapshot, /pnpm install/);
-    assert.match(generatePromptSnapshot, /pnpm db:init/);
-    assert.match(generatePromptSnapshot, /pnpm dev/);
+    assert.match(generatePromptSnapshot, /template\.runtimeValidation/);
     assert.match(generateRepairPromptSnapshot, /生成修复阶段代理/);
     assert.match(generateRepairPromptSnapshot, /validationFailures/);
     assert.match(generateRepairPromptSnapshot, /runtimeValidationLog/);
@@ -1308,7 +1427,11 @@ test("generateApplication normalizes common plan-spec consistency errors before 
     assert.match(normalizedPlanSpec, /"resourceName": "Report"/);
     assert.match(normalizedPlanSpec, /"target": "\/"/);
     assert.match(normalizedPlanSpec, /"target": "\/reports"/);
+    assert.match(normalizedPlanSpec, /"target": "\/app\/api\/search-city\/route\.ts"/);
+    assert.match(normalizedPlanSpec, /"target": "\/app\/api\/manage-history\/route\.ts"/);
     assert.doesNotMatch(normalizedPlanSpec, /"target": "Security"/);
+    assert.doesNotMatch(normalizedPlanSpec, /"target": "searchCity"/);
+    assert.doesNotMatch(normalizedPlanSpec, /"target": "manageHistory"/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -1338,6 +1461,62 @@ test("generateApplication recovers when plan repair writes valid artifacts but m
     assert.equal(generator.planRepairAttempts, 1);
     assert.match(planValidation, /"valid": true/);
     assert.match(generationValidation, /"valid": true/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication recovers when generate phase writes valid artifacts but misses the structured response", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-recover-generate-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new GenerateStructuredResponseRecoveryTextGenerator();
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+    });
+
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.equal(generator.generationRepairAttempts, 0);
+    assert.match(generationValidation, /"valid": true/);
+    assert.match(
+      await readFile(path.join(result.outputDirectory, "app-builder-report.md"), "utf8"),
+      /Recovered after missing structured response/,
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication recovers when generate repair writes valid artifacts but misses the structured response", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-recover-generate-repair-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new GenerateRepairStructuredResponseRecoveryTextGenerator();
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+    });
+
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.equal(generator.generationRepairAttempts, 1);
+    assert.match(generationValidation, /"valid": true/);
+    assert.match(
+      await readFile(path.join(result.outputDirectory, "app-builder-report.md"), "utf8"),
+      /Recovered during generate repair/,
+    );
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -1713,7 +1892,7 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /`\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /持久化、鉴权或启动契约/);
   assert.match(generatePromptSource, /schema、seed、脚本、认证\/会话和默认入口数据/);
-  assert.match(generatePromptSource, /先准备 `\.env`，再执行 `pnpm install`、`pnpm db:init`、`pnpm dev`/);
+  assert.match(generatePromptSource, /按输入里的 `template\.runtimeValidation` 执行运行验证/);
   assert.match(generatePromptSource, /把 `\/app-builder-report\.md` 改成 `\/app\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /页面实现必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
   assert.match(planRepairPromptSource, /validationFailures/);

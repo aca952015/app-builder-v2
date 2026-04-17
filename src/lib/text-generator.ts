@@ -189,6 +189,7 @@ export function buildPlanProjectPayload(
       name: runtime.templateName,
       version: runtime.templateVersion,
       directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
+      runtimeValidation: runtime.templateRuntimeValidation,
     },
     planPolicy: {
       planSpecVersion: 1,
@@ -220,6 +221,7 @@ export function buildPlanRepairPayload(runtime: TextGeneratorRuntime): Record<st
       name: runtime.templateName,
       version: runtime.templateVersion,
       directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
+      runtimeValidation: runtime.templateRuntimeValidation,
     },
     planRepairPolicy: {
       planSpecVersion: 1,
@@ -761,6 +763,7 @@ async function updateTodoBoard(
     todos: trace.todos,
     artifacts: createArtifactItemsForStage(trace.stage, "generating"),
     narrative: trace.lastNarrative,
+    ...(runtime ? { sessionId: runtime.sessionId } : {}),
     ...(runtime ? { outputDirectory: runtime.outputDirectory } : {}),
   });
 }
@@ -911,6 +914,7 @@ async function streamDeepAgentWithLogs(
     todos: trace.todos,
     artifacts: createArtifactItemsForStage(trace.stage, "generating"),
     narrative: trace.lastNarrative,
+    sessionId: runtime.sessionId,
     outputDirectory: runtime.outputDirectory,
   });
 
@@ -946,6 +950,7 @@ async function streamDeepAgentWithLogs(
     todos: trace.todos,
     artifacts: createArtifactItemsForStage(trace.stage, "generating"),
     narrative: trace.lastNarrative,
+    sessionId: runtime.sessionId,
     outputDirectory: runtime.outputDirectory,
   });
 
@@ -1096,6 +1101,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             name: runtime.templateName,
             version: runtime.templateVersion,
             directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
+            runtimeValidation: runtime.templateRuntimeValidation,
           },
           generationPolicy: {
             dataMode: "rest_api",
@@ -1143,6 +1149,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             name: runtime.templateName,
             version: runtime.templateVersion,
             directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
+            runtimeValidation: runtime.templateRuntimeValidation,
           },
           generationRepairPolicy: {
             dataMode: "rest_api",

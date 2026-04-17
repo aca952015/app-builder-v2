@@ -46,7 +46,7 @@
 ## 修补规则
 
 - 以 `validationFailures` 和 `artifacts.generationValidation` 中的失败项为唯一修补目标。
-- 如果失败项来自宿主运行验证，你必须结合 `artifacts.runtimeValidationLog` 中的真实命令输出修复问题，目标是让宿主重新执行“先准备 `.env`，再执行 `pnpm install`、`pnpm db:init`、`pnpm dev`”时可以通过。
+- 如果失败项来自宿主运行验证，你必须结合 `artifacts.runtimeValidationLog` 中的真实命令输出修复问题，目标是让宿主重新执行输入里的 `template.runtimeValidation` 步骤时可以通过；若 `copyEnvExample` 未禁用，也要兼容宿主先准备 `.env`。
 - 如果失败根因来自 starter 自带的持久化、鉴权或启动契约被局部改坏，你必须沿依赖链同步修补所有受影响的 schema、seed、脚本、认证/会话和默认入口数据，直到整条链路重新一致。
 - 只补齐缺失实现或错误接线，不得整轮重做已经正确的代码。
 - 如需修改现有文件，必须先读再改。

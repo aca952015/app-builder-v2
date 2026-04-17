@@ -4,6 +4,10 @@ import { parseArgs } from "node:util";
 import { generateApplication, validateSessionPhase } from "./generator.js";
 import { GenerateAppOptions, GeneratedAppValidator, TextGenerator, ValidationPhase } from "./types.js";
 
+function formatValidationStepLine(step: { name: string; ok: boolean; detail: string }): string {
+  return `- ${step.ok ? "OK" : "FAIL"} ${step.name}: ${step.detail}`;
+}
+
 type CliDeps = {
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
@@ -77,6 +81,12 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     stdout.log(`Workflow: ${result.workflowPhase}`);
     if (result.resumedFromPhase) {
       stdout.log(`Resumed from: ${result.resumedFromPhase}`);
+    }
+    if (result.phase === "generate" && result.steps && result.steps.length > 0) {
+      stdout.log("Validation steps:");
+      for (const step of result.steps) {
+        stdout.log(formatValidationStepLine(step));
+      }
     }
 
     if (!result.valid) {

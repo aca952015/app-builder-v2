@@ -6,4 +6,5 @@ Commands:
 
 1. Copy `.env.example` to `.env`
 2. Run `pnpm install`
-3. Run `pnpm dev`
+3. Run `pnpm typecheck`
+4. Run `pnpm dev`

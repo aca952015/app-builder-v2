@@ -25,9 +25,6 @@
 
 ## 运行验证目标
 
-宿主随后会准备 `.env`，再执行：
+宿主随后会按输入里的 `template.runtimeValidation` 执行运行验证；若 `copyEnvExample` 未禁用，还会先准备 `.env`。
 
-- `pnpm install`
-- `pnpm dev`
-
-你生成的代码必须让这两步可通过。
+你生成的代码必须让这些步骤可通过。

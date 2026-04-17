@@ -26,6 +26,7 @@ export type TodoBoardState = {
   todos: TodoItem[];
   artifacts: ArtifactItem[];
   narrative: string;
+  sessionId?: string;
   elapsedMs?: number;
   outputDirectory?: string;
   logs?: string[];
@@ -119,6 +120,15 @@ export function formatElapsedTime(elapsedMs: number): string {
   const seconds = totalSeconds % 60;
 
   return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
+}
+
+function formatShortSessionId(sessionId?: string): string | null {
+  const trimmed = sessionId?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  return trimmed.split("-")[0] ?? trimmed;
 }
 
 function getVisibleLogs(logs: string[], limit = 8): string[] {
@@ -321,9 +331,12 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
     return [buildActionLine(state)];
   }
 
+  const sessionLabel = formatShortSessionId(state.sessionId);
   const lines = [
     formatWorkflowStageLine(state.stage),
-    `总耗时：${formatElapsedTime(state.elapsedMs ?? 0)}`,
+    [sessionLabel ? `会话：${sessionLabel}` : null, `总耗时：${formatElapsedTime(state.elapsedMs ?? 0)}`]
+      .filter(Boolean)
+      .join("  "),
     "",
     buildTodoHeader(state),
   ];
@@ -449,6 +462,7 @@ export function createArtifactItemsForStage(stage: WorkflowStage, status: Artifa
 
 function createTodoBoardElement(state: TodoBoardState) {
   const borderColor = borderColorForStage(state.stage);
+  const sessionLabel = formatShortSessionId(state.sessionId);
 
   return React.createElement(
     Box,
@@ -514,12 +528,34 @@ function createTodoBoardElement(state: TodoBoardState) {
             }),
           ),
           React.createElement(
-            Text,
+            Box,
             {
-              key: "elapsed",
-              color: "green",
+              key: "meta",
+              flexDirection: "row",
+              gap: 2,
             },
-            `总耗时：${formatElapsedTime(state.elapsedMs ?? 0)}`,
+            [
+              ...(sessionLabel
+                ? [
+                    React.createElement(
+                      Text,
+                      {
+                        key: "session-id",
+                        color: "gray",
+                      },
+                      `会话：${sessionLabel}`,
+                    ),
+                  ]
+                : []),
+              React.createElement(
+                Text,
+                {
+                  key: "elapsed",
+                  color: "green",
+                },
+                `总耗时：${formatElapsedTime(state.elapsedMs ?? 0)}`,
+              ),
+            ],
           ),
         ],
       ),

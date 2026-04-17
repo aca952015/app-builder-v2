@@ -555,93 +555,87 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
       steps.push(envStep);
       if (!envStep.ok) {
         return {
-          reasons: [`Generation runtime validation failed: mv .env.example .env did not pass. ${envStep.detail} See .deepagents/runtime-validation.log.`],
+          reasons: [`生成阶段运行验证失败：${envStep.name} 未通过。${envStep.detail} 详见 .deepagents/runtime-validation.log。`],
           steps,
         };
       }
     }
 
-    const isDefaultValidation = JSON.stringify(runtimeValidation) === JSON.stringify(defaultTemplateRuntimeValidation());
-    if (!isDefaultValidation) {
-      for (const validationStep of runtimeValidation.steps) {
-        const result =
-          validationStep.kind === "dev-server"
-          ? {
-              step: await runConfiguredDevValidationStep({
-                outputDirectory,
-                logPath: runtime.deepagentsRuntimeValidationLogPath,
-                command: validationStep.command,
-                args: validationStep.args,
-                name: validationStep.name,
-                ...(validationStep.env ? { env: validationStep.env } : {}),
-              }),
-            }
-          : await runCommandStep({
-              name: validationStep.name,
+    for (const validationStep of runtimeValidation.steps) {
+      const step =
+        validationStep.kind === "dev-server"
+          ? await runConfiguredDevValidationStep({
+              outputDirectory,
+              logPath: runtime.deepagentsRuntimeValidationLogPath,
               command: validationStep.command,
               args: validationStep.args,
-              cwd: outputDirectory,
-              logPath: runtime.deepagentsRuntimeValidationLogPath,
+              name: validationStep.name,
               ...(validationStep.env ? { env: validationStep.env } : {}),
-            });
-        steps.push(result.step);
-        if (!result.step.ok) {
-          return {
-            reasons: [`Generation runtime validation failed: ${validationStep.name} did not pass. ${result.step.detail} See .deepagents/runtime-validation.log.`],
-            steps,
-          };
-        }
+            })
+          : (
+              await runCommandStep({
+                name: validationStep.name,
+                command: validationStep.command,
+                args: validationStep.args,
+                cwd: outputDirectory,
+                logPath: runtime.deepagentsRuntimeValidationLogPath,
+                ...(validationStep.env ? { env: validationStep.env } : {}),
+              })
+            ).step;
+      steps.push(step);
+      if (!step.ok) {
+        return {
+          reasons: [`生成阶段运行验证失败：${validationStep.name} 未通过。${step.detail} 详见 .deepagents/runtime-validation.log。`],
+          steps,
+        };
       }
-
-      return {
-        reasons: [],
-        steps,
-      };
-    }
-
-    const installResult = await runCommandStep({
-      name: "pnpm install",
-      command: "pnpm",
-      args: ["install"],
-      cwd: outputDirectory,
-      logPath: runtime.deepagentsRuntimeValidationLogPath,
-    });
-    steps.push(installResult.step);
-    if (!installResult.step.ok) {
-      return {
-        reasons: [`生成阶段运行验证失败：pnpm install 未通过。${installResult.step.detail} 详见 .deepagents/runtime-validation.log。`],
-        steps,
-      };
-    }
-
-    const dbInitResult = await runCommandStep({
-      name: "pnpm db:init",
-      command: "pnpm",
-      args: ["db:init"],
-      cwd: outputDirectory,
-      logPath: runtime.deepagentsRuntimeValidationLogPath,
-    });
-    steps.push(dbInitResult.step);
-    if (!dbInitResult.step.ok) {
-      return {
-        reasons: [`生成阶段运行验证失败：pnpm db:init 未通过。${dbInitResult.step.detail} 详见 .deepagents/runtime-validation.log。`],
-        steps,
-      };
-    }
-
-    const devStep = await runDevValidationStep(outputDirectory, runtime.deepagentsRuntimeValidationLogPath);
-    steps.push(devStep);
-    if (!devStep.ok) {
-      return {
-        reasons: [`生成阶段运行验证失败：pnpm dev 未通过。${devStep.detail} 详见 .deepagents/runtime-validation.log。`],
-        steps,
-      };
     }
 
     return {
       reasons: [],
       steps,
     };
+  }
+}
+
+type PersistedGenerationValidation = {
+  valid: boolean;
+  reasons: string[];
+  steps: GenerationValidationStep[];
+};
+
+async function readPersistedGenerationValidation(validationPath: string): Promise<PersistedGenerationValidation | null> {
+  const contents = await readIfExists(validationPath);
+  if (!contents || contents.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(contents) as Partial<PersistedGenerationValidation>;
+    return {
+      valid: parsed.valid === true,
+      reasons: Array.isArray(parsed.reasons)
+        ? parsed.reasons.filter((reason): reason is string => typeof reason === "string")
+        : [],
+      steps: Array.isArray(parsed.steps)
+        ? parsed.steps.flatMap((step): GenerationValidationStep[] => {
+            if (!step || typeof step !== "object") {
+              return [];
+            }
+            const candidate = step as Partial<GenerationValidationStep>;
+            if (typeof candidate.name !== "string" || typeof candidate.ok !== "boolean" || typeof candidate.detail !== "string") {
+              return [];
+            }
+            return [{
+              name: candidate.name,
+              ok: candidate.ok,
+              detail: candidate.detail,
+            }];
+          })
+        : [],
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -970,6 +964,46 @@ function resolvePageAcceptanceTarget(
   return null;
 }
 
+function normalizeApiPathToken(apiPath: string): string {
+  return normalizePlanSpecToken(
+    apiPath
+      .replace(/^\/app\/api\//, "")
+      .replace(/\/route\.ts$/, "")
+      .replace(/\//g, "-"),
+  );
+}
+
+function resolveApiAcceptanceTarget(
+  target: string,
+  apis: PlanSpec["apis"],
+): string | null {
+  if (apis.some((api) => api.path === target)) {
+    return target;
+  }
+
+  const normalizedTarget = normalizePlanSpecToken(target);
+  if (!normalizedTarget) {
+    return null;
+  }
+
+  const byName = apis.filter((api) => normalizePlanSpecToken(api.name) === normalizedTarget);
+  if (byName.length === 1) {
+    return byName[0]!.path;
+  }
+
+  const byPath = apis.filter((api) => normalizeApiPathToken(api.path) === normalizedTarget);
+  if (byPath.length === 1) {
+    return byPath[0]!.path;
+  }
+
+  const byResource = apis.filter((api) => normalizePlanSpecToken(api.resourceName) === normalizedTarget);
+  if (byResource.length === 1) {
+    return byResource[0]!.path;
+  }
+
+  return null;
+}
+
 function isCrossCuttingAcceptanceCheck(check: PlanSpec["acceptanceChecks"][number]): boolean {
   const haystack = normalizePlanSpecToken(`${check.target} ${check.description}`);
   return [
@@ -1031,6 +1065,15 @@ function normalizePlanSpecForHostValidation(planSpec: PlanSpec): {
       const resolvedTarget = resolvePageAcceptanceTarget(check.target, nextPlanSpec.pages);
       if (resolvedTarget && resolvedTarget !== check.target) {
         notes.push(`宿主将验收项 ${check.id} 的页面目标从 ${check.target} 归一化为 ${resolvedTarget}。`);
+        return [{ ...check, target: resolvedTarget }];
+      }
+      return [check];
+    }
+
+    if (check.type === "api") {
+      const resolvedTarget = resolveApiAcceptanceTarget(check.target, nextPlanSpec.apis);
+      if (resolvedTarget && resolvedTarget !== check.target) {
+        notes.push(`宿主将验收项 ${check.id} 的接口目标从 ${check.target} 归一化为 ${resolvedTarget}。`);
         return [{ ...check, target: resolvedTarget }];
       }
       return [check];
@@ -1128,6 +1171,53 @@ async function synthesizeRecoveredPlanResult(
     summary: "结构化响应缺失，宿主已基于已落盘计划产物恢复结果。",
     artifactsWritten,
     planSpecVersion: 1,
+    notes: ["host-recovered-from-missing-structured-response"],
+  };
+}
+
+async function synthesizeRecoveredGeneratedResult(
+  runtime: TextGeneratorRuntime,
+  planSpec: PlanSpec,
+  error: unknown,
+): Promise<GeneratedProject | null> {
+  if (!isMissingStructuredResponseError(error)) {
+    return null;
+  }
+
+  const [filesWritten, reportContents, coverage] = await Promise.all([
+    collectGeneratedFiles(runtime.outputDirectory),
+    readIfExists(path.join(runtime.outputDirectory, "app-builder-report.md")),
+    collectGeneratedCoverage(runtime.outputDirectory, planSpec),
+  ]);
+
+  const hasGeneratedSignal =
+    Boolean(reportContents && reportContents.trim().length > 0) ||
+    coverage.missingApiPaths.length < planSpec.apis.length ||
+    coverage.missingPageRoutes.length < planSpec.pages.length ||
+    coverage.missingResources.length < planSpec.resources.length;
+
+  if (!hasGeneratedSignal || filesWritten.length === 0) {
+    return null;
+  }
+
+  await appendWorkflowLog("[host] 生成阶段结构化响应缺失，改为基于已落盘 artifact 尝试恢复。");
+
+  return {
+    summary: "结构化响应缺失，宿主已基于已落盘生成产物恢复结果。",
+    filesWritten,
+    implementedResources: planSpec.resources
+      .filter((resource) => !coverage.missingResources.includes(resource.name))
+      .map((resource) => resource.name),
+    implementedPages: planSpec.pages
+      .filter((page) => !coverage.missingPageRoutes.includes(page.route))
+      .map((page) => page.route),
+    implementedApis: Array.from(
+      new Set(
+        planSpec.apis
+          .map((api) => api.path)
+          .filter((apiPath) => !coverage.missingApiPaths.includes(apiPath)),
+      ),
+    ),
     notes: ["host-recovered-from-missing-structured-response"],
   };
 }
@@ -1558,13 +1648,23 @@ async function continueGenerateFlow(options: {
       generateAttempt: 1,
       retryReasons: [],
     });
-    const generatedProject = await options.generator.generateProject(options.approvedPlan, initialRuntime);
+    let generatedProject: GeneratedProject;
+    try {
+      generatedProject = await options.generator.generateProject(options.approvedPlan, initialRuntime);
+    } catch (error) {
+      const recovered = await synthesizeRecoveredGeneratedResult(initialRuntime, options.approvedPlan, error);
+      if (!recovered) {
+        throw error;
+      }
+      generatedProject = recovered;
+    }
     await appendWorkflowLog("[host] 生成阶段流式输出完成，开始宿主校验。");
     await updateWorkflowBoard({
       stage: "生成阶段",
       todos: createStepItemsForLifecycle("生成阶段", "validating"),
       artifacts: createArtifactItemsForStage("生成阶段", "validating"),
       narrative: "正在验证生成阶段交付物。",
+      sessionId: options.runtime.sessionId,
       outputDirectory: options.runtime.outputDirectory,
     });
     const validation = await validateGeneratedArtifacts(
@@ -1581,6 +1681,7 @@ async function continueGenerateFlow(options: {
         todos: createStepItemsForLifecycle("生成阶段", "verified"),
         artifacts: createArtifactItemsForStage("生成阶段", "verified"),
         narrative: "生成阶段交付物已验证，全部通过。",
+        sessionId: options.runtime.sessionId,
         outputDirectory: options.runtime.outputDirectory,
       });
       await updateWorkflowState(options.runtime.deepagentsConfigPath, "complete", ["plan", "generate"]);
@@ -1608,13 +1709,23 @@ async function continueGenerateFlow(options: {
       generateAttempt: existingRepairAttempts + repairIndex + 2,
       retryReasons: generationRetryReasons,
     });
-    const repairedProject = await options.generator.generateRepairProject(options.approvedPlan, repairRuntime);
+    let repairedProject: GeneratedProject;
+    try {
+      repairedProject = await options.generator.generateRepairProject(options.approvedPlan, repairRuntime);
+    } catch (error) {
+      const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, options.approvedPlan, error);
+      if (!recovered) {
+        throw error;
+      }
+      repairedProject = recovered;
+    }
     await appendWorkflowLog("[host] 生成修复输出完成，开始复核。");
     await updateWorkflowBoard({
       stage: "生成阶段",
       todos: createStepItemsForLifecycle("生成阶段", "validating"),
       artifacts: createArtifactItemsForStage("生成阶段", "validating"),
       narrative: "正在复核修复后的生成交付物。",
+      sessionId: options.runtime.sessionId,
       outputDirectory: options.runtime.outputDirectory,
     });
     const validation = await validateGeneratedArtifacts(
@@ -1631,6 +1742,7 @@ async function continueGenerateFlow(options: {
         todos: createStepItemsForLifecycle("生成阶段", "verified"),
         artifacts: createArtifactItemsForStage("生成阶段", "verified"),
         narrative: "生成阶段交付物已验证，全部通过。",
+        sessionId: options.runtime.sessionId,
         outputDirectory: options.runtime.outputDirectory,
       });
       await updateWorkflowState(options.runtime.deepagentsConfigPath, "complete", ["plan", "generate"]);
@@ -1678,6 +1790,7 @@ async function continuePlanRepairFlow(options: {
       todos: createStepItemsForLifecycle("计划阶段", "validating"),
       artifacts: createArtifactItemsForStage("计划阶段", "validating"),
       narrative: "正在复核修复后的计划产出物。",
+      sessionId: options.runtime.sessionId,
       outputDirectory: options.runtime.outputDirectory,
     });
     const validation = await validatePlanArtifacts(repairRuntime, repairResult);
@@ -1689,6 +1802,7 @@ async function continuePlanRepairFlow(options: {
         todos: createStepItemsForLifecycle("计划阶段", "verified"),
         artifacts: createArtifactItemsForStage("计划阶段", "verified"),
         narrative: "计划阶段产出物已验证，通过生成门禁。",
+        sessionId: options.runtime.sessionId,
         outputDirectory: options.runtime.outputDirectory,
       });
       break;
@@ -1751,6 +1865,7 @@ export async function validateSessionPhase(options: {
         outputDirectory: runtime.outputDirectory,
         valid: true,
         reasons: [],
+        steps: [],
         validationPath: runtime.deepagentsPlanValidationPath,
         runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
         workflowPhase: "complete",
@@ -1764,6 +1879,7 @@ export async function validateSessionPhase(options: {
       outputDirectory: runtime.outputDirectory,
       valid: true,
       reasons: [],
+      steps: [],
       validationPath: runtime.deepagentsPlanValidationPath,
       runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
       workflowPhase: "plan",
@@ -1826,6 +1942,7 @@ export async function validateSessionPhase(options: {
       outputDirectory: runtime.outputDirectory,
       valid: true,
       reasons: [],
+      steps: (await readPersistedGenerationValidation(runtime.deepagentsGenerationValidationPath))?.steps ?? steps,
       validationPath: runtime.deepagentsGenerationValidationPath,
       runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
       workflowPhase: "complete",
@@ -1839,6 +1956,7 @@ export async function validateSessionPhase(options: {
     outputDirectory: runtime.outputDirectory,
     valid: true,
     reasons: [],
+    steps,
     validationPath: runtime.deepagentsGenerationValidationPath,
     runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
     workflowPhase: "generate",
@@ -1969,6 +2087,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         todos: createStepItemsForLifecycle("计划阶段", "validating"),
         artifacts: createArtifactItemsForStage("计划阶段", "validating"),
         narrative: "正在验证计划阶段产出物。",
+        sessionId: workspace.sessionId,
         outputDirectory: workspace.outputDirectory,
       });
       const validation = await validatePlanArtifacts(initialRuntime, planResult);
@@ -1980,6 +2099,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           todos: createStepItemsForLifecycle("计划阶段", "verified"),
           artifacts: createArtifactItemsForStage("计划阶段", "verified"),
           narrative: "计划阶段产出物已验证，通过生成门禁。",
+          sessionId: workspace.sessionId,
           outputDirectory: workspace.outputDirectory,
         });
       } else {
@@ -2013,6 +2133,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         todos: createStepItemsForLifecycle("计划阶段", "validating"),
         artifacts: createArtifactItemsForStage("计划阶段", "validating"),
         narrative: "正在复核修复后的计划产出物。",
+        sessionId: workspace.sessionId,
         outputDirectory: workspace.outputDirectory,
       });
       const validation = await validatePlanArtifacts(repairRuntime, repairResult);
@@ -2024,6 +2145,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           todos: createStepItemsForLifecycle("计划阶段", "verified"),
           artifacts: createArtifactItemsForStage("计划阶段", "verified"),
           narrative: "计划阶段产出物已验证，通过生成门禁。",
+          sessionId: workspace.sessionId,
           outputDirectory: workspace.outputDirectory,
         });
         break;
@@ -2046,13 +2168,23 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         generateAttempt: 1,
         retryReasons: [],
       });
-      const generatedProject = await generator.generateProject(approvedPlan, initialRuntime);
+      let generatedProject: GeneratedProject;
+      try {
+        generatedProject = await generator.generateProject(approvedPlan, initialRuntime);
+      } catch (error) {
+        const recovered = await synthesizeRecoveredGeneratedResult(initialRuntime, approvedPlan, error);
+        if (!recovered) {
+          throw error;
+        }
+        generatedProject = recovered;
+      }
       await appendWorkflowLog("[host] 生成阶段流式输出完成，开始宿主校验。");
       await updateWorkflowBoard({
         stage: "生成阶段",
         todos: createStepItemsForLifecycle("生成阶段", "validating"),
         artifacts: createArtifactItemsForStage("生成阶段", "validating"),
         narrative: "正在验证生成阶段交付物。",
+        sessionId: workspace.sessionId,
         outputDirectory: workspace.outputDirectory,
       });
       const validation = await validateGeneratedArtifacts(
@@ -2070,6 +2202,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           todos: createStepItemsForLifecycle("生成阶段", "verified"),
           artifacts: createArtifactItemsForStage("生成阶段", "verified"),
           narrative: "生成阶段交付物已验证，全部通过。",
+          sessionId: workspace.sessionId,
           outputDirectory: workspace.outputDirectory,
         });
       } else {
@@ -2087,13 +2220,23 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         generateAttempt: repairIndex + 2,
         retryReasons: generationRetryReasons,
       });
-      const repairedProject = await generator.generateRepairProject(approvedPlan, repairRuntime);
+      let repairedProject: GeneratedProject;
+      try {
+        repairedProject = await generator.generateRepairProject(approvedPlan, repairRuntime);
+      } catch (error) {
+        const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, approvedPlan, error);
+        if (!recovered) {
+          throw error;
+        }
+        repairedProject = recovered;
+      }
       await appendWorkflowLog("[host] 生成修复输出完成，开始复核。");
       await updateWorkflowBoard({
         stage: "生成阶段",
         todos: createStepItemsForLifecycle("生成阶段", "validating"),
         artifacts: createArtifactItemsForStage("生成阶段", "validating"),
         narrative: "正在复核修复后的生成交付物。",
+        sessionId: workspace.sessionId,
         outputDirectory: workspace.outputDirectory,
       });
       const validation = await validateGeneratedArtifacts(
@@ -2111,6 +2254,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           todos: createStepItemsForLifecycle("生成阶段", "verified"),
           artifacts: createArtifactItemsForStage("生成阶段", "verified"),
           narrative: "生成阶段交付物已验证，全部通过。",
+          sessionId: workspace.sessionId,
           outputDirectory: workspace.outputDirectory,
         });
         break;

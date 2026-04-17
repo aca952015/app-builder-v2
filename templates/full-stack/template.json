@@ -10,6 +10,32 @@
     "generate": "prompts/generate-system-prompt.md",
     "generateRepair": "prompts/generate-repair-system-prompt.md"
   },
+  "runtimeValidation": {
+    "copyEnvExample": true,
+    "steps": [
+      {
+        "name": "pnpm install",
+        "command": "pnpm",
+        "args": ["install"]
+      },
+      {
+        "name": "pnpm db:init",
+        "command": "pnpm",
+        "args": ["db:init"]
+      },
+      {
+        "name": "pnpm typecheck",
+        "command": "pnpm",
+        "args": ["typecheck"]
+      },
+      {
+        "name": "pnpm dev",
+        "command": "pnpm",
+        "args": ["dev"],
+        "kind": "dev-server"
+      }
+    ]
+  },
   "referencesDir": "references",
   "skillsDir": "skills",
   "starterDir": "starter"

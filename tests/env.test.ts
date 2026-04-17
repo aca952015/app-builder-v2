@@ -151,6 +151,7 @@ test("createArtifactItemsForStage returns key artifacts for each workflow stage"
 test("renderTodoBoardToString preserves todo progress and current action in Ink mode", () => {
   const output = stripAnsi(renderTodoBoardToString({
     stage: "计划阶段",
+    sessionId: "12345678-90ab-cdef-1234-567890abcdef",
     todos: [
       { content: "读取 PRD 与模板上下文", status: "completed" },
       { content: "整理分析稿与详细 spec", status: "in_progress" },
@@ -168,6 +169,7 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
 
   assert.match(output, /计划阶段/);
   assert.match(output, /计划阶段 -> 生成阶段 -> 完成阶段/);
+  assert.match(output, /会话：12345678/);
   assert.match(output, /总耗时：00:01:05/);
   assert.match(output, /执行步骤（1\/3）：/);
   assert.match(output, /读取 PRD 与模板上下文/);

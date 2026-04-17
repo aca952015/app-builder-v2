@@ -56,7 +56,7 @@
 - 对已存在文件默认执行“先读再改”；只有 `planSpec` 明确需要的新文件才新增。
 - 如果你改动了 starter 自带的持久化、鉴权或启动契约，必须把所有受该契约影响的 schema、seed、脚本、认证/会话和默认入口数据视为同一变更面，逐一读取并同步修改；禁止只改其中一部分就结束。
 - 如果 `planSpec` 没有明确要求改变某个 starter 基础契约，优先保持兼容并在既有契约上扩展，而不是重写或漂移它的依赖链。
-- 宿主会在生成阶段结束后继续执行运行验证：先准备 `.env`，再执行 `pnpm install`、`pnpm db:init`、`pnpm dev`。你生成的代码、脚本、Prisma 配置和环境文件必须让这四步可以连续通过。
+- 宿主会在生成阶段结束后按输入里的 `template.runtimeValidation` 执行运行验证；若 `copyEnvExample` 未禁用，还会先准备 `.env`。你生成的代码、脚本、Prisma 配置和环境文件必须让这些步骤连续通过。
 - 不要生成依赖外部 CDN 的实现，不要使用 `eval()`、`new Function()`、`document.write()`。
 - 在整个阶段中，todo 是当前执行状态的唯一进度面板；任何返工、补写或完成都必须先反映到 todo。
 
@@ -98,5 +98,5 @@
 - 所有 `planSpec.apis` 都已实现
 - `app-builder-report.md` 已落盘
 - 若本轮改动触及 starter 基础契约，其依赖链上的 schema、seed、脚本、认证/会话和默认入口数据必须保持同步一致
-- 产物必须足以通过宿主随后执行的 `.env` 准备、`pnpm install`、`pnpm db:init`、`pnpm dev` 运行验证
+- 产物必须足以通过宿主随后按 `template.runtimeValidation` 执行的运行验证
 - 最终只返回一份结构化响应

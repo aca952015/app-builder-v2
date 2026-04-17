@@ -8,7 +8,8 @@ fills in product-specific content.
 1. Copy `.env.example` to `.env`
 2. Run `pnpm install`
 3. Run `pnpm db:init`
-4. Run `pnpm dev`
+4. Run `pnpm typecheck`
+5. Run `pnpm dev`
 
 The default local database is SQLite at `prisma/dev.db`.
 

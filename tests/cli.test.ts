@@ -342,6 +342,11 @@ test("runCli validate can validate an existing generate session by session id", 
     assert.equal(stderrLines.length, 0);
     assert.match(stdoutLines.join("\n"), new RegExp(`Session: ${result.sessionId}`));
     assert.match(stdoutLines.join("\n"), /Phase: generate/);
+    assert.match(stdoutLines.join("\n"), /Validation steps:/);
+    assert.match(stdoutLines.join("\n"), /OK mv \.env\.example \.env: 执行成功。/);
+    assert.match(stdoutLines.join("\n"), /OK pnpm install: 执行成功。/);
+    assert.match(stdoutLines.join("\n"), /OK pnpm db:init: 执行成功。/);
+    assert.match(stdoutLines.join("\n"), /OK pnpm dev: 执行成功。/);
     assert.match(stdoutLines.join("\n"), /Validation passed\./);
     assert.match(
       await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
@@ -386,6 +391,8 @@ test("runCli validate resumes generate repair instead of exiting on validation f
     assert.equal(stderrLines.length, 0);
     assert.match(stdoutLines.join("\n"), /Workflow: complete/);
     assert.match(stdoutLines.join("\n"), /Resumed from: generate_repair/);
+    assert.match(stdoutLines.join("\n"), /Validation steps:/);
+    assert.match(stdoutLines.join("\n"), /OK pnpm dev: 执行成功。/);
     assert.match(stdoutLines.join("\n"), /Validation recovered and workflow resumed\./);
     assert.match(
       await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),

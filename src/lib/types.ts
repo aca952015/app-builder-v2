@@ -114,6 +114,7 @@ export type SessionValidationResult = {
   outputDirectory: string;
   valid: boolean;
   reasons: string[];
+  steps?: GenerationValidationStep[];
   validationPath: string;
   runtimeValidationLogPath?: string;
   workflowPhase: WorkflowPhase;
