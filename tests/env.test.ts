@@ -96,6 +96,10 @@ test("formatWorkflowStageLine highlights the active stage in the pipeline", () =
     formatWorkflowStageLine("生成阶段"),
     "计划阶段 -> [生成阶段] -> 完成阶段",
   );
+  assert.equal(
+    formatWorkflowStageLine("完成阶段"),
+    "计划阶段 -> 生成阶段 -> [完成阶段]",
+  );
 });
 
 test("formatElapsedTime renders hh:mm:ss", () => {
@@ -132,6 +136,23 @@ test("createArtifactItemsForStage returns key artifacts for each workflow stage"
 
   assert.deepEqual(
     createArtifactItemsForStage("生成阶段", "verified").map((item) => ({
+      label: item.label,
+      status: item.status,
+    })),
+    [
+      { label: ".deepagents/prd-analysis.md", status: "verified" },
+      { label: ".deepagents/generated-spec.md", status: "verified" },
+      { label: ".deepagents/plan-spec.json", status: "verified" },
+      { label: ".deepagents/plan-validation.json", status: "verified" },
+      { label: "app/api/**", status: "verified" },
+      { label: "app/** 页面与布局", status: "verified" },
+      { label: "app-builder-report.md", status: "verified" },
+      { label: ".deepagents/generation-validation.json", status: "verified" },
+    ],
+  );
+
+  assert.deepEqual(
+    createArtifactItemsForStage("完成阶段", "verified").map((item) => ({
       label: item.label,
       status: item.status,
     })),
@@ -185,6 +206,26 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /\[12:34:57\] \[READ\]/);
   assert.match(output, /读取文件：\.deepagents\/source-prd\.md（1-1000行）/);
   assert.match(output, /\[12:34:58\] \[CHECK\] 正在校验计划阶段产出物/);
+});
+
+test("renderTodoBoardToString can render the completion stage", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "完成阶段",
+    sessionId: "12345678-90ab-cdef-1234-567890abcdef",
+    todos: [
+      { content: "读取已验证的 planSpec 与 starter", status: "completed" },
+      { content: "实现资源模型与 REST API", status: "completed" },
+      { content: "补齐页面接线与交付文件", status: "completed" },
+      { content: "等待宿主校验生成阶段产物", status: "completed" },
+    ],
+    artifacts: createArtifactItemsForStage("完成阶段", "verified"),
+    narrative: "全部阶段已完成。",
+    elapsedMs: 65_000,
+  }, 120));
+
+  assert.match(output, /计划阶段 -> 生成阶段 -> 完成阶段/);
+  assert.match(output, /当前动作：全部阶段已完成。/);
+  assert.doesNotMatch(output, /\[待生成\]/);
 });
 
 test("formatDeepAgentsTraceEntry renders readable tool call details without console board text", () => {

@@ -7,6 +7,7 @@ import {
   OutputWorkspace,
   TemplateLock,
   TemplatePack,
+  TemplateRepairRetries,
   TemplateRuntimeValidation,
   TemplateRuntimeValidationStep,
 } from "./types.js";
@@ -18,6 +19,11 @@ const defaultRuntimeValidation: TemplateRuntimeValidation = {
     { name: "pnpm db:init", command: "pnpm", args: ["db:init"] },
     { name: "pnpm dev", command: "pnpm", args: ["dev"], kind: "dev-server" },
   ],
+};
+
+const defaultRepairRetries: TemplateRepairRetries = {
+  plan: 2,
+  generate: 2,
 };
 
 function moduleDirectory(): string {
@@ -90,6 +96,7 @@ type TemplateManifest = {
   referencesDir?: string;
   skillsDir?: string;
   starterDir?: string;
+  repairRetries?: TemplateRepairRetries;
   runtimeValidation?: TemplateRuntimeValidation;
 };
 
@@ -162,6 +169,29 @@ function parseRuntimeValidation(raw: unknown): TemplateRuntimeValidation {
   };
 }
 
+function parseRepairRetries(raw: unknown): TemplateRepairRetries {
+  if (raw === undefined) {
+    return { ...defaultRepairRetries };
+  }
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error('Template manifest field "repairRetries" must be an object.');
+  }
+
+  const candidate = raw as Record<string, unknown>;
+  if (!Number.isInteger(candidate.plan) || Number(candidate.plan) < 0) {
+    throw new Error('Template manifest field "repairRetries.plan" must be a non-negative integer.');
+  }
+  if (!Number.isInteger(candidate.generate) || Number(candidate.generate) < 0) {
+    throw new Error('Template manifest field "repairRetries.generate" must be a non-negative integer.');
+  }
+
+  return {
+    plan: Number(candidate.plan),
+    generate: Number(candidate.generate),
+  };
+}
+
 function parseTemplateManifest(raw: unknown): TemplateManifest {
   if (!raw || typeof raw !== "object") {
     throw new Error("Template manifest must be an object.");
@@ -194,6 +224,7 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
       generate: prompts.generate,
       generateRepair: prompts.generateRepair,
     },
+    repairRetries: parseRepairRetries(manifest.repairRetries),
     runtimeValidation: parseRuntimeValidation(manifest.runtimeValidation),
   };
 
@@ -295,6 +326,7 @@ export async function loadTemplatePack(templateId = "full-stack"): Promise<Templ
     ...(manifest.referencesDir ? { referencesDirectory: path.join(directory, manifest.referencesDir) } : {}),
     ...(manifest.skillsDir ? { skillsDirectory: path.join(directory, manifest.skillsDir) } : {}),
     ...(manifest.starterDir ? { starterDirectory: path.join(directory, manifest.starterDir) } : {}),
+    repairRetries: manifest.repairRetries ?? { ...defaultRepairRetries },
     runtimeValidation: manifest.runtimeValidation ?? defaultRuntimeValidation,
     hash: await hashDirectory(directory),
   };
@@ -355,6 +387,7 @@ export async function stageTemplatePack(
     name: template.name,
     version: template.version,
     projectRenderer: template.projectRenderer,
+    repairRetries: template.repairRetries,
     runtimeValidation: template.runtimeValidation,
     hash: template.hash,
     stagedAt: new Date().toISOString(),

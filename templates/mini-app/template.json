@@ -10,6 +10,10 @@
     "generate": "prompts/generate-system-prompt.md",
     "generateRepair": "prompts/generate-repair-system-prompt.md"
   },
+  "repairRetries": {
+    "plan": 5,
+    "generate": 5
+  },
   "referencesDir": "references",
   "starterDir": "starter",
   "runtimeValidation": {

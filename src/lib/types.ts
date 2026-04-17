@@ -98,6 +98,11 @@ export type TemplateRuntimeValidation = {
   steps: TemplateRuntimeValidationStep[];
 };
 
+export type TemplateRepairRetries = {
+  plan: number;
+  generate: number;
+};
+
 export type GeneratedAppValidator = {
   validate(outputDirectory: string, runtime: TextGeneratorRuntime): Promise<{
     reasons: string[];
@@ -166,6 +171,7 @@ export type TemplatePack = {
   referencesDirectory?: string;
   skillsDirectory?: string;
   starterDirectory?: string;
+  repairRetries: TemplateRepairRetries;
   runtimeValidation: TemplateRuntimeValidation;
   hash: string;
 };
@@ -176,6 +182,7 @@ export type TemplateLock = {
   version: string;
   description?: string;
   projectRenderer: string;
+  repairRetries: TemplateRepairRetries;
   runtimeValidation: TemplateRuntimeValidation;
   hash: string;
   stagedAt: string;

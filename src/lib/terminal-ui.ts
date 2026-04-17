@@ -6,10 +6,10 @@ import { Box, Text, render, renderToString, type Instance } from "ink";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 
-export type WorkflowStage = "计划阶段" | "生成阶段";
+export type WorkflowStage = "计划阶段" | "生成阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export type ArtifactStatus = "pending" | "generating" | "generated" | "validating" | "verified";
-export type WorkflowStageMarker = WorkflowStage | "完成阶段";
+export type WorkflowStageMarker = WorkflowStage;
 
 export type TodoItem = {
   content: string;
@@ -450,11 +450,12 @@ export function createArtifactItemsForStage(stage: WorkflowStage, status: Artifa
     { label: ".deepagents/plan-validation.json", status: stage === "计划阶段" ? status : "verified" },
   ];
 
+  const generationArtifactStatus = stage === "计划阶段" ? "pending" : stage === "完成阶段" ? "verified" : status;
   const generationArtifacts: ArtifactItem[] = [
-    { label: "app/api/**", status: stage === "生成阶段" ? status : "pending" },
-    { label: "app/** 页面与布局", status: stage === "生成阶段" ? status : "pending" },
-    { label: "app-builder-report.md", status: stage === "生成阶段" ? status : "pending" },
-    { label: ".deepagents/generation-validation.json", status: stage === "生成阶段" ? status : "pending" },
+    { label: "app/api/**", status: generationArtifactStatus },
+    { label: "app/** 页面与布局", status: generationArtifactStatus },
+    { label: "app-builder-report.md", status: generationArtifactStatus },
+    { label: ".deepagents/generation-validation.json", status: generationArtifactStatus },
   ];
 
   return [...planArtifacts, ...generationArtifacts];

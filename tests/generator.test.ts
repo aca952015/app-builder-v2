@@ -1317,10 +1317,14 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(templateLock, /"planRepair": "prompts\/plan-repair-system-prompt\.md"/);
     assert.match(templateLock, /"generate": "prompts\/generate-system-prompt\.md"/);
     assert.match(templateLock, /"generateRepair": "prompts\/generate-repair-system-prompt\.md"/);
+    assert.match(templateLock, /"repairRetries": \{/);
+    assert.match(templateLock, /"plan": 2/);
+    assert.match(templateLock, /"generate": 2/);
     assert.match(stagedTemplateManifest, /"plan": "prompts\/plan-system-prompt\.md"/);
     assert.match(stagedTemplateManifest, /"planRepair": "prompts\/plan-repair-system-prompt\.md"/);
     assert.match(stagedTemplateManifest, /"generate": "prompts\/generate-system-prompt\.md"/);
     assert.match(stagedTemplateManifest, /"generateRepair": "prompts\/generate-repair-system-prompt\.md"/);
+    assert.match(stagedTemplateManifest, /"repairRetries": \{/);
     assert.match(sessionAgents, /# Host Session Policy/);
     assert.match(sessionAgents, /acceptanceChecks\.target/);
     assert.match(planPromptSnapshot, /artifacts\.planSpec/);
@@ -1354,6 +1358,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(runtimeValidationLog, /=== pnpm install ===/);
     assert.match(runtimeValidationLog, /=== pnpm dev ===/);
     assert.match(deepagentsConfig, /"runtimeValidationLog": "\.deepagents\/runtime-validation\.log"/);
+    assert.match(deepagentsConfig, /"repairRetries": \{/);
     assert.doesNotMatch(deepagentsConfig, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.doesNotMatch(stagedReference, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.equal(result.files.some((file) => file.startsWith(".git/")), false);

@@ -28,6 +28,7 @@ import {
   GenerationResult,
   PlanResult,
   SessionValidationResult,
+  type TemplateRepairRetries,
   type TemplateRuntimeValidation,
   type TemplateRuntimeValidationStep,
   TextGenerator,
@@ -35,8 +36,6 @@ import {
   ValidationPhase,
 } from "./types.js";
 
-const MAX_PLAN_REPAIRS = 2;
-const MAX_GENERATION_REPAIRS = 2;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段";
@@ -1247,6 +1246,17 @@ async function updateWorkflowState(
   await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
+async function showCompletedWorkflowBoard(sessionId: string, outputDirectory: string): Promise<void> {
+  await updateWorkflowBoard({
+    stage: "完成阶段",
+    todos: createStepItemsForLifecycle("完成阶段", "verified"),
+    artifacts: createArtifactItemsForStage("完成阶段", "verified"),
+    narrative: "全部阶段已完成。",
+    sessionId,
+    outputDirectory,
+  });
+}
+
 async function collectPersistedPlanValidation(runtime: TextGeneratorRuntime): Promise<{
   reasons: string[];
   planSpec: PlanSpec | null;
@@ -1490,6 +1500,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
   let templateId = "unknown";
   let templateName = "unknown";
   let templateVersion = "unknown";
+  let templateRepairRetries = defaultTemplateRepairRetries();
   let templateRuntimeValidation = defaultTemplateRuntimeValidation();
 
   const configContents = await readIfExists(configPath);
@@ -1500,6 +1511,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
           id?: unknown;
           name?: unknown;
           version?: unknown;
+          repairRetries?: unknown;
           runtimeValidation?: unknown;
         };
       };
@@ -1511,6 +1523,20 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
       }
       if (typeof parsed.template?.version === "string" && parsed.template.version.trim() !== "") {
         templateVersion = parsed.template.version;
+      }
+      if (parsed.template?.repairRetries && typeof parsed.template.repairRetries === "object") {
+        const repairRetriesCandidate = parsed.template.repairRetries as Partial<TemplateRepairRetries>;
+        if (
+          Number.isInteger(repairRetriesCandidate.plan) &&
+          Number(repairRetriesCandidate.plan) >= 0 &&
+          Number.isInteger(repairRetriesCandidate.generate) &&
+          Number(repairRetriesCandidate.generate) >= 0
+        ) {
+          templateRepairRetries = {
+            plan: Number(repairRetriesCandidate.plan),
+            generate: Number(repairRetriesCandidate.generate),
+          };
+        }
       }
       if (parsed.template?.runtimeValidation && typeof parsed.template.runtimeValidation === "object") {
         const runtimeValidationCandidate = parsed.template.runtimeValidation as Partial<TemplateRuntimeValidation>;
@@ -1592,8 +1618,8 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     deepagentsPlanSpecPath: path.join(deepagentsDirectory, "plan-spec.json"),
     deepagentsPlanValidationPath: path.join(deepagentsDirectory, "plan-validation.json"),
     deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
-    maxPlanRetries: MAX_PLAN_REPAIRS,
-    maxGenerateRetries: MAX_GENERATION_REPAIRS,
+    maxPlanRetries: templateRepairRetries.plan,
+    maxGenerateRetries: templateRepairRetries.generate,
     templateRuntimeValidation,
   };
 }
@@ -1640,6 +1666,7 @@ async function continueGenerateFlow(options: {
   initialRetryReasons: string[];
 }): Promise<void> {
   let generationRetryReasons = [...options.initialRetryReasons];
+  const maxGenerationRepairs = options.runtime.maxGenerateRetries ?? 0;
 
   if (generationRetryReasons.length === 0) {
     await updateWorkflowState(options.runtime.deepagentsConfigPath, "generate", ["plan"]);
@@ -1685,6 +1712,7 @@ async function continueGenerateFlow(options: {
         outputDirectory: options.runtime.outputDirectory,
       });
       await updateWorkflowState(options.runtime.deepagentsConfigPath, "complete", ["plan", "generate"]);
+      await showCompletedWorkflowBoard(options.runtime.sessionId, options.runtime.outputDirectory);
       await appendWorkflowLog("[host] 全部阶段完成，准备汇总输出。");
       return;
     }
@@ -1695,7 +1723,7 @@ async function continueGenerateFlow(options: {
 
   const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "生成修复阶段");
 
-  for (let repairIndex = 0; generationRetryReasons.length > 0 && repairIndex < MAX_GENERATION_REPAIRS; repairIndex += 1) {
+  for (let repairIndex = 0; generationRetryReasons.length > 0 && repairIndex < maxGenerationRepairs; repairIndex += 1) {
     await updateWorkflowState(options.runtime.deepagentsConfigPath, "generate_repair", ["plan"]);
     await appendRetryNote(
       options.runtime.deepagentsErrorLogPath,
@@ -1767,9 +1795,10 @@ async function continuePlanRepairFlow(options: {
 }): Promise<void> {
   let approvedPlan: PlanSpec | null = null;
   let planRetryReasons = [...options.initialRetryReasons];
+  const maxPlanRepairs = options.runtime.maxPlanRetries ?? 0;
   const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "计划修复阶段");
 
-  for (let repairIndex = 0; !approvedPlan && repairIndex < MAX_PLAN_REPAIRS; repairIndex += 1) {
+  for (let repairIndex = 0; !approvedPlan && repairIndex < maxPlanRepairs; repairIndex += 1) {
     await updateWorkflowState(options.runtime.deepagentsConfigPath, "plan_repair", []);
     await appendRetryNote(
       options.runtime.deepagentsErrorLogPath,
@@ -1950,6 +1979,8 @@ export async function validateSessionPhase(options: {
     };
   }
 
+  await updateWorkflowState(runtime.deepagentsConfigPath, "complete", ["plan", "generate"]);
+
   return {
     sessionId: runtime.sessionId,
     phase: options.phase,
@@ -1959,7 +1990,14 @@ export async function validateSessionPhase(options: {
     steps,
     validationPath: runtime.deepagentsGenerationValidationPath,
     runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
-    workflowPhase: "generate",
+    workflowPhase: "complete",
+  };
+}
+
+function defaultTemplateRepairRetries(): TemplateRepairRetries {
+  return {
+    plan: 2,
+    generate: 2,
   };
 }
 
@@ -2055,11 +2093,13 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       deepagentsPlanSpecPath: workspace.deepagentsPlanSpecPath,
       deepagentsPlanValidationPath: workspace.deepagentsPlanValidationPath,
       deepagentsGenerationValidationPath: workspace.deepagentsGenerationValidationPath,
-      maxPlanRetries: MAX_PLAN_REPAIRS,
-      maxGenerateRetries: MAX_GENERATION_REPAIRS,
+      maxPlanRetries: template.repairRetries.plan,
+      maxGenerateRetries: template.repairRetries.generate,
       templateRuntimeValidation: template.runtimeValidation,
       ...overrides,
     });
+    const maxPlanRepairs = template.repairRetries.plan;
+    const maxGenerationRepairs = template.repairRetries.generate;
 
     await materializeSessionPromptSnapshots(createRuntime());
 
@@ -2108,7 +2148,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       }
     }
 
-    for (let repairIndex = 0; !approvedPlan && repairIndex < MAX_PLAN_REPAIRS; repairIndex += 1) {
+    for (let repairIndex = 0; !approvedPlan && repairIndex < maxPlanRepairs; repairIndex += 1) {
       await updateWorkflowState(workspace.deepagentsConfigPath, "plan_repair", []);
       await appendRetryNote(workspace.deepagentsErrorLogPath, repairIndex + 1, "计划修复阶段", planRetryReasons);
       await appendWorkflowLog(`[host] 启动计划修复轮次 ${repairIndex + 1}。`);
@@ -2211,7 +2251,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       }
     }
 
-    for (let repairIndex = 0; generationRetryReasons.length > 0 && repairIndex < MAX_GENERATION_REPAIRS; repairIndex += 1) {
+    for (let repairIndex = 0; generationRetryReasons.length > 0 && repairIndex < maxGenerationRepairs; repairIndex += 1) {
       await updateWorkflowState(workspace.deepagentsConfigPath, "generate_repair", ["plan"]);
       await appendRetryNote(workspace.deepagentsErrorLogPath, repairIndex + 1, "生成修复阶段", generationRetryReasons);
       await appendWorkflowLog(`[host] 启动生成修复轮次 ${repairIndex + 1}。`);
@@ -2269,6 +2309,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
     }
 
     await updateWorkflowState(workspace.deepagentsConfigPath, "complete", ["plan", "generate"]);
+    await showCompletedWorkflowBoard(workspace.sessionId, workspace.outputDirectory);
     await appendWorkflowLog("[host] 全部阶段完成，准备汇总输出。");
 
     const outputDirectory = workspace.outputDirectory;
