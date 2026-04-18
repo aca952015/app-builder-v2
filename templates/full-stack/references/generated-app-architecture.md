@@ -4,10 +4,10 @@
 
 ## 技术栈
 
-- Next.js 15 App Router
+- Next.js 16 App Router
 - React 19
-- TypeScript
-- Prisma 6
+- TypeScript 6
+- Prisma 7
 - SQLite
 - Tailwind CSS v4
 - TailAdmin 风格的管理台壳层
@@ -141,6 +141,7 @@ app-builder-report.md
 - 健康检查接口
 - 固定返回 `{ ok: true }`
 - 后续业务 API 应在保留它的同时扩展到 `app/api/...`
+- 只要 API 涉及数据库查询、写入或事务，统一通过 `lib/prisma.ts` 导出的 Prisma Client 实现数据访问；不要在 route handler 中改用其他 ORM、原生 sqlite 驱动或手写独立数据库连接层
 
 ## 布局壳与 UI 架构
 
@@ -216,6 +217,8 @@ app-builder-report.md
 ### `prisma/schema.prisma`
 
 - 当前 starter 使用 SQLite
+- datasource 通过 `.env.example` 中的 `DATABASE_URL="file:./dev.db"` 指向本地 SQLite 文件
+- 当前 starter 只通过 Prisma 访问 SQLite，不直接使用原生 sqlite 驱动；因此依赖里不需要额外安装 `sqlite3`、`better-sqlite3` 之类包
 - 预置 `User` 模型：
   - `id`
   - `email`
@@ -245,6 +248,7 @@ app-builder-report.md
 - 保留 `config/sidebar-menu.json` 作为导航事实来源
 - 在现有 TailAdmin 卡片、表格、表单、间距和主题类之上扩展业务界面
 - 保留 Prisma + SQLite + session 基础设施，按 `planSpec` 扩展业务模型和 API
+- 业务 API 的持久化、查询、关联读取和事务逻辑默认使用 Prisma 表达，并复用 `lib/prisma.ts` 单例出口，而不是额外引入新的数据访问栈
 - 把占位 dashboard、settings、登录文案替换为业务内容时，优先复用现有页面骨架
 
 ## 生成阶段不应做的事

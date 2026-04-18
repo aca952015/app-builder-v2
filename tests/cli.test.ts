@@ -410,6 +410,88 @@ test("runCli validate resolves a unique short session id prefix", async () => {
   }
 });
 
+test("runCli validate auto-detects the generate phase when the session is already past planning", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-auto-generate-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+    const result = await generateApplication({
+      specPath,
+      generator: new CliTestGenerator(),
+      validator: new SuccessfulCliValidator(),
+    });
+
+    await runCli(
+      ["validate", result.sessionId],
+      {
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), /Phase: generate/);
+    assert.match(stdoutLines.join("\n"), /Workflow: complete/);
+    assert.match(stdoutLines.join("\n"), /Validation passed\./);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runCli accepts -g and -v as generate and validate aliases", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-short-aliases-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+
+    await runCli(
+      ["-g", specPath],
+      {
+        generator: new CliTestGenerator(),
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    const sessionLine = stdoutLines.find((line) => line.startsWith("Session: "));
+    assert.ok(sessionLine);
+    const sessionId = sessionLine.replace("Session: ", "");
+
+    await runCli(
+      ["-v", sessionId],
+      {
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), /Generated Field Ops Planner at/);
+    assert.match(stdoutLines.join("\n"), /Phase: generate/);
+    assert.match(stdoutLines.join("\n"), /Validation passed\./);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("runCli validate rejects an ambiguous short session id prefix", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-ambiguous-id-"));
   const stdoutLines: string[] = [];
@@ -608,6 +690,51 @@ test("runCli validate resumes plan repair and continues the main workflow", asyn
       await readFile(path.join(outputDirectory, ".deepagents/config.json"), "utf8"),
       /"phase": "complete"/,
     );
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runCli validate auto-detects the plan phase for a broken planning session", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-auto-plan-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+  const repairingGenerator = new CliPlanRepairingGenerator();
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+
+    await assert.rejects(
+      () =>
+        generateApplication({
+          specPath,
+          generator: new BrokenPlanSessionGenerator(),
+        }),
+      /planRepairProject should not be called/,
+    );
+
+    const sessionId = await getOnlySessionId(tempRoot);
+
+    await runCli(
+      ["validate", sessionId],
+      {
+        generator: repairingGenerator,
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(repairingGenerator.planRepairAttempts, 1);
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), /Phase: plan/);
+    assert.match(stdoutLines.join("\n"), /Resumed from: plan_repair/);
+    assert.match(stdoutLines.join("\n"), /Validation recovered and workflow resumed\./);
   } finally {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });

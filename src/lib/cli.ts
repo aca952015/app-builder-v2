@@ -19,7 +19,9 @@ type CliDeps = {
 function helpText(): string {
   return `Usage:
   app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--force]
-  app-builder validate <session-id> --phase <plan|generate>
+  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--force]
+  app-builder validate <session-id> [--phase <plan|generate|auto>]
+  app-builder -v <session-id> [--phase <plan|generate|auto>]
 
 Environment:
   OPENAI_API_KEY    Required unless a custom generator is injected
@@ -39,7 +41,12 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     return;
   }
 
-  const command = argv[0];
+  const commandToken = argv[0];
+  const command =
+    commandToken === "-g" ? "generate"
+      : commandToken === "-v" ? "validate"
+      : commandToken;
+
   if (command !== "generate" && command !== "validate") {
     throw new Error(`Unknown command "${command}".\n\n${helpText()}`);
   }
@@ -59,13 +66,15 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     }
 
     const phaseValue = parsed.values.phase;
-    if (phaseValue !== "plan" && phaseValue !== "generate") {
-      throw new Error('The --phase option is required and must be either "plan" or "generate".');
+    if (phaseValue !== undefined && phaseValue !== "plan" && phaseValue !== "generate" && phaseValue !== "auto") {
+      throw new Error('The --phase option must be one of "plan", "generate", or "auto".');
     }
 
     const result = await validateSessionPhase({
       sessionId,
-      phase: phaseValue satisfies ValidationPhase,
+      ...(phaseValue === "plan" || phaseValue === "generate"
+        ? { phase: phaseValue satisfies ValidationPhase }
+        : {}),
       cwd,
       ...(deps.generator ? { generator: deps.generator } : {}),
       ...(deps.validator ? { validator: deps.validator } : {}),

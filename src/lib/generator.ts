@@ -7,6 +7,7 @@ import { promises as fs } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
+import { routeToPageFileCandidates } from "./app-router.js";
 import { prepareOutputWorkspace, writeDeepagentsConfig } from "./output-workspace.js";
 import { parsePrd } from "./prd-parser.js";
 import { normalizeSpec } from "./spec-normalizer.js";
@@ -35,6 +36,7 @@ import {
   TextGenerator,
   TextGeneratorRuntime,
   ValidationPhase,
+  WorkflowPhase,
 } from "./types.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
@@ -662,24 +664,6 @@ async function pathExists(filePath: string): Promise<boolean> {
 
 function normalizeRelativePath(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/^\/+/, "");
-}
-
-function routeToPageFileCandidates(route: string): string[] {
-  const cleanRoute = route.replace(/^\/+|\/+$/g, "");
-  if (!cleanRoute) {
-    return [
-      "app/page.tsx",
-      "app/(admin)/page.tsx",
-      "app/(full-width-pages)/page.tsx",
-    ];
-  }
-
-  const routePagePath = path.posix.join("app", cleanRoute, "page.tsx");
-  return [
-    routePagePath,
-    path.posix.join("app", "(admin)", cleanRoute, "page.tsx"),
-    path.posix.join("app", "(full-width-pages)", cleanRoute, "page.tsx"),
-  ];
 }
 
 function uniqueValues(values: string[]): string[] {
@@ -1980,15 +1964,16 @@ async function continuePlanRepairFlow(options: {
 
 export async function validateSessionPhase(options: {
   sessionId: string;
-  phase: ValidationPhase;
+  phase?: ValidationPhase;
   cwd?: string;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
 }): Promise<SessionValidationResult> {
   const runtime = await createRuntimeForSession(options.sessionId, options.cwd);
+  const phase = await resolveValidationPhase(runtime, options.phase);
   const validator = options.validator ?? new ShellGeneratedAppValidator();
 
-  if (options.phase === "plan") {
+  if (phase === "plan") {
     const validation = await collectPersistedPlanValidation(runtime);
     await writePlanValidationResult(runtime.deepagentsPlanValidationPath, {
       valid: validation.reasons.length === 0,
@@ -2012,7 +1997,7 @@ export async function validateSessionPhase(options: {
 
       return {
         sessionId: runtime.sessionId,
-        phase: options.phase,
+        phase,
         outputDirectory: runtime.outputDirectory,
         valid: true,
         reasons: [],
@@ -2026,7 +2011,7 @@ export async function validateSessionPhase(options: {
 
     return {
       sessionId: runtime.sessionId,
-      phase: options.phase,
+      phase,
       outputDirectory: runtime.outputDirectory,
       valid: true,
       reasons: [],
@@ -2089,12 +2074,12 @@ export async function validateSessionPhase(options: {
       await closeWorkflowBoard();
     }
 
-    return {
-      sessionId: runtime.sessionId,
-      phase: options.phase,
-      outputDirectory: runtime.outputDirectory,
-      valid: true,
-      reasons: [],
+      return {
+        sessionId: runtime.sessionId,
+        phase,
+        outputDirectory: runtime.outputDirectory,
+        valid: true,
+        reasons: [],
       steps: (await readPersistedGenerationValidation(runtime.deepagentsGenerationValidationPath))?.steps ?? steps,
       validationPath: runtime.deepagentsGenerationValidationPath,
       runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
@@ -2107,7 +2092,7 @@ export async function validateSessionPhase(options: {
 
   return {
     sessionId: runtime.sessionId,
-    phase: options.phase,
+    phase,
     outputDirectory: runtime.outputDirectory,
     valid: true,
     reasons: [],
@@ -2116,6 +2101,90 @@ export async function validateSessionPhase(options: {
     runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
     workflowPhase: "complete",
   };
+}
+
+async function resolveValidationPhase(
+  runtime: TextGeneratorRuntime,
+  requestedPhase?: ValidationPhase,
+): Promise<ValidationPhase> {
+  if (requestedPhase) {
+    return requestedPhase;
+  }
+
+  const persistedPhase = await readPersistedWorkflowPhase(runtime.deepagentsConfigPath);
+  if (persistedPhase === "plan" || persistedPhase === "plan_repair") {
+    return "plan";
+  }
+
+  if (persistedPhase === "generate" || persistedPhase === "generate_repair" || persistedPhase === "complete") {
+    return "generate";
+  }
+
+  const planValidation = await readPersistedPlanValidation(runtime.deepagentsPlanValidationPath);
+  if (!planValidation?.valid) {
+    return "plan";
+  }
+
+  const generationValidation = await readPersistedGenerationValidation(runtime.deepagentsGenerationValidationPath);
+  if (generationValidation) {
+    return "generate";
+  }
+
+  const reportContents = await readIfExists(path.join(runtime.outputDirectory, "app-builder-report.md"));
+  if (reportContents && reportContents.trim().length > 0) {
+    return "generate";
+  }
+
+  return "plan";
+}
+
+async function readPersistedWorkflowPhase(configPath: string): Promise<WorkflowPhase | null> {
+  const contents = await readIfExists(configPath);
+  if (!contents) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(contents) as {
+      workflow?: {
+        phase?: unknown;
+      };
+    };
+    const phase = parsed.workflow?.phase;
+    return phase === "plan" ||
+      phase === "plan_repair" ||
+      phase === "generate" ||
+      phase === "generate_repair" ||
+      phase === "complete"
+      ? phase
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readPersistedPlanValidation(
+  validationPath: string,
+): Promise<{ valid: boolean; reasons: string[]; planSpecVersion?: number } | null> {
+  const contents = await readIfExists(validationPath);
+  if (!contents) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(contents) as {
+      valid?: unknown;
+      reasons?: unknown;
+      planSpecVersion?: unknown;
+    };
+    return {
+      valid: parsed.valid === true,
+      reasons: Array.isArray(parsed.reasons) ? parsed.reasons.filter((value): value is string => typeof value === "string") : [],
+      ...(typeof parsed.planSpecVersion === "number" ? { planSpecVersion: parsed.planSpecVersion } : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function defaultTemplateRepairRetries(): TemplateRepairRetries {

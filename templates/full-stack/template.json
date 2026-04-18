@@ -2,7 +2,7 @@
   "id": "full-stack",
   "name": "Full-Stack",
   "version": "1.0.0",
-  "description": "A deepagents template pack for generating a Next.js + Prisma + PostgreSQL full-stack application.",
+  "description": "A deepagents template pack for generating a Next.js + Prisma + SQLite full-stack application.",
   "projectRenderer": "full-stack",
   "repairRetries": {
     "plan": 5,

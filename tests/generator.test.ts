@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:f
 import os from "node:os";
 import path from "node:path";
 
+import { routeToAdminPagePath, routeToPageFileCandidates } from "../src/lib/app-router.js";
 import { type PlanSpec } from "../src/lib/plan-spec.js";
 import { generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
 import { buildPlanProjectPayload, buildPlanRepairPayload } from "../src/lib/text-generator.js";
@@ -187,6 +188,122 @@ function buildIndirectSupportPlanSpec(): PlanSpec {
   };
 }
 
+function buildColonRoutePlanSpec(): PlanSpec {
+  return {
+    version: 1,
+    appName: "Alarm Guard",
+    summary: "使用 Next App Router 动态路由展示报警详情和工单详情。",
+    resources: [
+      {
+        name: "Alarm",
+        pluralName: "Alarms",
+        routeSegment: "alarms",
+        description: "报警记录。",
+        usage: "indirect",
+        fields: [
+          { name: "source_Path", label: "源路径", type: "string", required: true, source: "prd" },
+        ],
+        relations: [],
+      },
+      {
+        name: "WorkOrder",
+        pluralName: "WorkOrders",
+        routeSegment: "workorders",
+        description: "工单记录。",
+        fields: [
+          { name: "id", label: "ID", type: "number", required: true, source: "prd" },
+        ],
+        relations: [],
+      },
+    ],
+    pages: [
+      {
+        name: "报警列表",
+        route: "/alarms",
+        kind: "list",
+        resourceName: "Alarm",
+        purpose: "查看报警列表。",
+      },
+      {
+        name: "报警详情",
+        route: "/alarms/:source_Path",
+        kind: "detail",
+        resourceName: "Alarm",
+        purpose: "查看单条报警详情。",
+      },
+      {
+        name: "工单列表",
+        route: "/workorders",
+        kind: "list",
+        resourceName: "WorkOrder",
+        purpose: "查看工单列表。",
+      },
+      {
+        name: "工单详情",
+        route: "/workorders/:id",
+        kind: "detail",
+        resourceName: "WorkOrder",
+        purpose: "查看单条工单详情。",
+      },
+    ],
+    apis: [
+      {
+        name: "WorkOrderCollection",
+        resourceName: "WorkOrder",
+        path: "/app/api/workorders/route.ts",
+        methods: ["GET"],
+        requestShape: "分页查询参数。",
+        responseShape: "工单列表。",
+      },
+    ],
+    flows: [
+      {
+        name: "查看详情",
+        steps: ["打开报警列表", "进入报警详情", "进入工单详情"],
+      },
+    ],
+    assumptions: ["动态详情页使用 Next App Router 的 [param] 目录结构落盘。"],
+    acceptanceChecks: [
+      {
+        id: "page-alarm-list",
+        description: "必须实现报警列表页。",
+        type: "page",
+        target: "/alarms",
+      },
+      {
+        id: "page-alarm-detail",
+        description: "必须实现报警详情页。",
+        type: "page",
+        target: "/alarms/:source_Path",
+      },
+      {
+        id: "page-workorder-list",
+        description: "必须实现工单列表页。",
+        type: "page",
+        target: "/workorders",
+      },
+      {
+        id: "page-workorder-detail",
+        description: "必须实现工单详情页。",
+        type: "page",
+        target: "/workorders/:id",
+      },
+      {
+        id: "api-workorder-list",
+        description: "必须实现工单列表接口。",
+        type: "api",
+        target: "/app/api/workorders/route.ts",
+      },
+      {
+        id: "flow-detail",
+        description: "必须覆盖查看详情流程。",
+        type: "flow",
+        target: "查看详情",
+      },
+    ],
+  };
+}
+
 function uniqueApiPaths(planSpec: PlanSpec): string[] {
   return Array.from(new Set(planSpec.apis.map((api) => api.path)));
 }
@@ -238,13 +355,6 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
   };
 }
 
-function routeToAdminPagePath(route: string): string {
-  const cleanRoute = route.replace(/^\/+|\/+$/g, "");
-  return cleanRoute
-    ? path.join("app", "(admin)", cleanRoute, "page.tsx")
-    : path.join("app", "(admin)", "page.tsx");
-}
-
 test("resolveSpawnCommand finds Windows command shims through PATHEXT", async (context) => {
   if (process.platform !== "win32") {
     context.skip("Windows-only command shim resolution");
@@ -266,6 +376,25 @@ test("resolveSpawnCommand finds Windows command shims through PATHEXT", async (c
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("routeToPageFileCandidates normalizes common dynamic route syntaxes to Next App Router paths", () => {
+  assert.deepEqual(routeToPageFileCandidates("/workorders/:id"), [
+    "app/workorders/[id]/page.tsx",
+    "app/(admin)/workorders/[id]/page.tsx",
+    "app/(full-width-pages)/workorders/[id]/page.tsx",
+  ]);
+  assert.deepEqual(routeToPageFileCandidates("/alarms/[source_Path]"), [
+    "app/alarms/[source_Path]/page.tsx",
+    "app/(admin)/alarms/[source_Path]/page.tsx",
+    "app/(full-width-pages)/alarms/[source_Path]/page.tsx",
+  ]);
+  assert.deepEqual(routeToPageFileCandidates("/files/:path+"), [
+    "app/files/[...path]/page.tsx",
+    "app/(admin)/files/[...path]/page.tsx",
+    "app/(full-width-pages)/files/[...path]/page.tsx",
+  ]);
+  assert.equal(routeToAdminPagePath("/alarms/:source_Path"), "app/(admin)/alarms/[source_Path]/page.tsx");
 });
 
 async function writeImplementedProjectFiles(options: {
@@ -510,6 +639,52 @@ class IndirectResourceTextGenerator implements TextGenerator {
 
   async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
     throw new Error("generateRepairProject should not be called in IndirectResourceTextGenerator");
+  }
+}
+
+class ColonRouteTextGenerator implements TextGenerator {
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildColonRoutePlanSpec();
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# 动态路由分析稿\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# 动态路由详细规格\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+
+    return {
+      summary: "已写入使用冒号路由语义的计划产物。",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Colon Route Report\n\nGenerated with Next dynamic segments.\n",
+    });
+
+    return {
+      summary: "已生成动态详情页。",
+      filesWritten: ["app-builder-report.md"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in ColonRouteTextGenerator");
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("generateRepairProject should not be called in ColonRouteTextGenerator");
   }
 }
 
@@ -1783,6 +1958,31 @@ test("generateApplication ignores dedicated page/api coverage for indirect resou
   }
 });
 
+test("generateApplication accepts colon-style page routes when files are written with Next dynamic segments", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-colon-route-pages-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator: new ColonRouteTextGenerator(),
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.match(generationValidation, /"valid": true/);
+    assert.doesNotMatch(generationValidation, /\/alarms\/:source_Path/);
+    assert.doesNotMatch(generationValidation, /\/workorders\/:id/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication allows API-only support resources during plan validation", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-api-only-resource-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -1877,6 +2077,7 @@ test("full-stack template starter copies scaffold files into the output root", a
     const template = await loadTemplatePack("full-stack");
     const copied = await copyStarterScaffold(template, tempRoot);
 
+    assert.match(template.description ?? "", /SQLite/);
     assert.equal(template.phases.plan.effort, "high");
     assert.equal(template.phases.generate.effort, "medium");
     assert.equal(template.phases.generateRepair.effort, "high");

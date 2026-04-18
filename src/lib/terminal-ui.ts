@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import { Box, Text, render, renderToString, type Instance } from "ink";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
+import { routeToPageFileCandidates } from "./app-router.js";
 
 export type WorkflowStage = "计划阶段" | "生成阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -180,24 +181,6 @@ async function loadPlanSpecFromOutput(outputDirectory: string): Promise<PlanSpec
   } catch {
     return null;
   }
-}
-
-function routeToPageFileCandidates(route: string): string[] {
-  const cleanRoute = route.replace(/^\/+|\/+$/g, "");
-  if (!cleanRoute) {
-    return [
-      "app/page.tsx",
-      "app/(admin)/page.tsx",
-      "app/(full-width-pages)/page.tsx",
-    ];
-  }
-
-  const routePagePath = path.posix.join("app", cleanRoute, "page.tsx");
-  return [
-    routePagePath,
-    path.posix.join("app", "(admin)", cleanRoute, "page.tsx"),
-    path.posix.join("app", "(full-width-pages)", cleanRoute, "page.tsx"),
-  ];
 }
 
 async function countExistingFiles(outputDirectory: string, candidates: string[]): Promise<number> {
