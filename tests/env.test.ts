@@ -7,6 +7,7 @@ import path from "node:path";
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
   createArtifactItemsForStage,
+  createStepItemsForLifecycle,
   estimateRenderedRows,
   formatDeepAgentsTraceEntry,
   formatTodoHeader,
@@ -169,6 +170,18 @@ test("createArtifactItemsForStage returns key artifacts for each workflow stage"
   );
 });
 
+test("createStepItemsForLifecycle returns a verified completion checklist for the complete stage", () => {
+  assert.deepEqual(
+    createStepItemsForLifecycle("完成阶段", "verified"),
+    [
+      { content: "计划阶段产物已通过宿主校验", status: "completed" },
+      { content: "生成阶段产物已通过宿主校验", status: "completed" },
+      { content: "验证记录与交付报告已确认落盘", status: "completed" },
+      { content: "工作流状态已切换为 complete", status: "completed" },
+    ],
+  );
+});
+
 test("renderTodoBoardToString preserves todo progress and current action in Ink mode", () => {
   const output = stripAnsi(renderTodoBoardToString({
     stage: "计划阶段",
@@ -201,11 +214,56 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /app-builder-report\.md/);
   assert.match(output, /\[待生成\]/);
   assert.match(output, /当前动作：正在整理分析稿。/);
-  assert.match(output, /详细日志：/);
+  assert.match(output, /执行日志/);
+  assert.match(output, /修复进展/);
+  assert.match(output, /暂无修复进展/);
   assert.match(output, /\[12:34:56\] \[FLOW\] 进入计划阶段/);
   assert.match(output, /\[12:34:57\] \[READ\]/);
   assert.match(output, /读取文件：\.deepagents\/source-prd\.md（1-1000行）/);
   assert.match(output, /\[12:34:58\] \[CHECK\] 正在校验计划阶段产出物/);
+});
+
+test("renderTodoBoardToString splits execution logs and repair progress into two sections", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "生成阶段",
+    sessionId: "12345678-90ab-cdef-1234-567890abcdef",
+    todos: [
+      { content: "读取已验证的 planSpec 与 starter", status: "completed" },
+      { content: "实现资源模型与 REST API", status: "completed" },
+      { content: "补齐页面接线与交付文件", status: "in_progress" },
+      { content: "等待宿主校验生成阶段产物", status: "pending" },
+    ],
+    artifacts: createArtifactItemsForStage("生成阶段", "validating"),
+    narrative: "正在复核修复后的生成交付物。",
+    elapsedMs: 80_000,
+    logs: [
+      "[12:35:01] [FLOW] 生成阶段流式输出完成，开始宿主校验。",
+      "[12:35:02] [FIX] 生成阶段校验失败，待修复问题 2 条。",
+      "[12:35:02] [FIX] 待修复错误 1/2: app/api/orders/route.ts 缺少 POST handler",
+      "[12:35:02] [FIX] 待修复错误 2/2: 生成阶段未完成：app/orders/page.tsx 未接入 create action",
+      "[12:35:02] [FIX] 待修复验证步骤 1/1: pnpm db:init 未通过。",
+      "[12:35:02] [FIX] 待修复验证内容 pnpm db:init 1/2: Prisma schema 校验失败。",
+      "[12:35:02] [FIX] 待修复验证内容 pnpm db:init 2/2: Unknown field `status` for model `WorkOrder`.",
+      "[12:35:03] [FIX] 启动生成修复轮次 1。",
+      "[12:35:04] [READ] 读取文件：app/api/orders/route.ts（1-200行）",
+      "[12:35:05] [FIX] 生成修复输出完成，开始复核。",
+    ],
+  }, 140));
+
+  assert.match(output, /执行日志/);
+  assert.match(output, /修复进展/);
+  assert.match(output, /\[12:35:01\] \[FLOW\] 生成阶段流式输出完成/);
+  assert.match(output, /\[12:35:04\] \[READ\]/);
+  assert.match(output, /读取文件：app\/api\/orders\/route\.ts/);
+  assert.match(output, /待修复错误 2\/2: 生成阶段未完成：app\/orders\/page\.tsx 未接入/);
+  assert.match(output, /create action/);
+  assert.match(output, /待修复验证步骤 1\/1: pnpm db:init 未通过/);
+  assert.match(output, /待修复验证内容 pnpm db:init 1\/2: Prisma schema 校验失败/);
+  assert.match(output, /待修复验证内容 pnpm db:init 2\/2: Unknown field `status` for/);
+  assert.match(output, /model `WorkOrder`\./);
+  assert.match(output, /\[12:35:03\] \[FIX\] 启动生成修复轮次 1/);
+  assert.match(output, /\[12:35:05\] \[FIX\] 生成修复输出完成，开始复核/);
+  assert.doesNotMatch(output, /暂无修复进展/);
 });
 
 test("renderTodoBoardToString can render the completion stage", () => {
@@ -213,10 +271,10 @@ test("renderTodoBoardToString can render the completion stage", () => {
     stage: "完成阶段",
     sessionId: "12345678-90ab-cdef-1234-567890abcdef",
     todos: [
-      { content: "读取已验证的 planSpec 与 starter", status: "completed" },
-      { content: "实现资源模型与 REST API", status: "completed" },
-      { content: "补齐页面接线与交付文件", status: "completed" },
-      { content: "等待宿主校验生成阶段产物", status: "completed" },
+      { content: "计划阶段产物已通过宿主校验", status: "completed" },
+      { content: "生成阶段产物已通过宿主校验", status: "completed" },
+      { content: "验证记录与交付报告已确认落盘", status: "completed" },
+      { content: "工作流状态已切换为 complete", status: "completed" },
     ],
     artifacts: createArtifactItemsForStage("完成阶段", "verified"),
     narrative: "全部阶段已完成。",
@@ -225,6 +283,9 @@ test("renderTodoBoardToString can render the completion stage", () => {
 
   assert.match(output, /计划阶段 -> 生成阶段 -> 完成阶段/);
   assert.match(output, /当前动作：全部阶段已完成。/);
+  assert.match(output, /计划阶段产物已通过宿主校验/);
+  assert.match(output, /生成阶段产物已通过宿主校验/);
+  assert.match(output, /工作流状态已切换为 complete/);
   assert.doesNotMatch(output, /\[待生成\]/);
 });
 

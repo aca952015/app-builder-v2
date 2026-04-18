@@ -4,6 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  TemplatePhaseConfig,
+  TemplatePhaseEffort,
+  TemplatePhaseMap,
   OutputWorkspace,
   TemplateLock,
   TemplatePack,
@@ -87,12 +90,7 @@ type TemplateManifest = {
   version: string;
   description?: string;
   projectRenderer: string;
-  prompts: {
-    plan: string;
-    planRepair: string;
-    generate: string;
-    generateRepair: string;
-  };
+  phases: TemplatePhaseMap;
   referencesDir?: string;
   skillsDir?: string;
   starterDir?: string;
@@ -192,6 +190,42 @@ function parseRepairRetries(raw: unknown): TemplateRepairRetries {
   };
 }
 
+function parseTemplatePhaseConfig(raw: unknown, fieldName: string): TemplatePhaseConfig {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`Template manifest field "${fieldName}" must be an object.`);
+  }
+
+  const candidate = raw as Record<string, unknown>;
+  assertNonEmptyString(candidate.prompt, `${fieldName}.prompt`);
+  if (
+    candidate.effort !== undefined &&
+    candidate.effort !== "low" &&
+    candidate.effort !== "medium" &&
+    candidate.effort !== "high"
+  ) {
+    throw new Error(`Template manifest field "${fieldName}.effort" must be "low", "medium", or "high".`);
+  }
+
+  return {
+    prompt: candidate.prompt,
+    ...(candidate.effort ? { effort: candidate.effort as TemplatePhaseEffort } : {}),
+  };
+}
+
+function parseTemplatePhases(raw: unknown): TemplatePhaseMap {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error('Template manifest field "phases" must be an object.');
+  }
+
+  const phases = raw as Record<string, unknown>;
+  return {
+    plan: parseTemplatePhaseConfig(phases.plan, "phases.plan"),
+    planRepair: parseTemplatePhaseConfig(phases.planRepair, "phases.planRepair"),
+    generate: parseTemplatePhaseConfig(phases.generate, "phases.generate"),
+    generateRepair: parseTemplatePhaseConfig(phases.generateRepair, "phases.generateRepair"),
+  };
+}
+
 function parseTemplateManifest(raw: unknown): TemplateManifest {
   if (!raw || typeof raw !== "object") {
     throw new Error("Template manifest must be an object.");
@@ -203,27 +237,12 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
   assertNonEmptyString(manifest.version, "version");
   assertNonEmptyString(manifest.projectRenderer, "projectRenderer");
 
-  if (!manifest.prompts || typeof manifest.prompts !== "object") {
-    throw new Error('Template manifest field "prompts" is required.');
-  }
-
-  const prompts = manifest.prompts as Record<string, unknown>;
-  assertNonEmptyString(prompts.plan, "prompts.plan");
-  assertNonEmptyString(prompts.planRepair, "prompts.planRepair");
-  assertNonEmptyString(prompts.generate, "prompts.generate");
-  assertNonEmptyString(prompts.generateRepair, "prompts.generateRepair");
-
   const parsed: TemplateManifest = {
     id: manifest.id,
     name: manifest.name,
     version: manifest.version,
     projectRenderer: manifest.projectRenderer,
-    prompts: {
-      plan: prompts.plan,
-      planRepair: prompts.planRepair,
-      generate: prompts.generate,
-      generateRepair: prompts.generateRepair,
-    },
+    phases: parseTemplatePhases(manifest.phases),
     repairRetries: parseRepairRetries(manifest.repairRetries),
     runtimeValidation: parseRuntimeValidation(manifest.runtimeValidation),
   };
@@ -298,14 +317,14 @@ export async function loadTemplatePack(templateId = "full-stack"): Promise<Templ
 
   const manifestContents = await fs.readFile(manifestPath, "utf8");
   const manifest = parseTemplateManifest(JSON.parse(manifestContents));
-  const planPromptPath = path.join(directory, manifest.prompts.plan);
-  const planRepairPromptPath = path.join(directory, manifest.prompts.planRepair);
-  const generatePromptPath = path.join(directory, manifest.prompts.generate);
-  const generateRepairPromptPath = path.join(directory, manifest.prompts.generateRepair);
-  await ensureFileExists(planPromptPath, "prompts.plan");
-  await ensureFileExists(planRepairPromptPath, "prompts.planRepair");
-  await ensureFileExists(generatePromptPath, "prompts.generate");
-  await ensureFileExists(generateRepairPromptPath, "prompts.generateRepair");
+  const planPromptPath = path.join(directory, manifest.phases.plan.prompt!);
+  const planRepairPromptPath = path.join(directory, manifest.phases.planRepair.prompt!);
+  const generatePromptPath = path.join(directory, manifest.phases.generate.prompt!);
+  const generateRepairPromptPath = path.join(directory, manifest.phases.generateRepair.prompt!);
+  await ensureFileExists(planPromptPath, "phases.plan.prompt");
+  await ensureFileExists(planRepairPromptPath, "phases.planRepair.prompt");
+  await ensureFileExists(generatePromptPath, "phases.generate.prompt");
+  await ensureFileExists(generateRepairPromptPath, "phases.generateRepair.prompt");
 
   return {
     id: manifest.id,
@@ -315,18 +334,19 @@ export async function loadTemplatePack(templateId = "full-stack"): Promise<Templ
     manifestPath,
     projectRenderer: manifest.projectRenderer,
     planPromptPath,
-    planPromptRelativePath: manifest.prompts.plan,
+    planPromptRelativePath: manifest.phases.plan.prompt!,
     planRepairPromptPath,
-    planRepairPromptRelativePath: manifest.prompts.planRepair,
+    planRepairPromptRelativePath: manifest.phases.planRepair.prompt!,
     generatePromptPath,
-    generatePromptRelativePath: manifest.prompts.generate,
+    generatePromptRelativePath: manifest.phases.generate.prompt!,
     generateRepairPromptPath,
-    generateRepairPromptRelativePath: manifest.prompts.generateRepair,
+    generateRepairPromptRelativePath: manifest.phases.generateRepair.prompt!,
     ...(manifest.description ? { description: manifest.description } : {}),
     ...(manifest.referencesDir ? { referencesDirectory: path.join(directory, manifest.referencesDir) } : {}),
     ...(manifest.skillsDir ? { skillsDirectory: path.join(directory, manifest.skillsDir) } : {}),
     ...(manifest.starterDir ? { starterDirectory: path.join(directory, manifest.starterDir) } : {}),
     repairRetries: manifest.repairRetries ?? { ...defaultRepairRetries },
+    phases: manifest.phases,
     runtimeValidation: manifest.runtimeValidation ?? defaultRuntimeValidation,
     hash: await hashDirectory(directory),
   };
@@ -388,16 +408,11 @@ export async function stageTemplatePack(
     version: template.version,
     projectRenderer: template.projectRenderer,
     repairRetries: template.repairRetries,
+    phases: template.phases,
     runtimeValidation: template.runtimeValidation,
     hash: template.hash,
     stagedAt: new Date().toISOString(),
     workspaceTemplateDirectory: path.relative(workspace.outputDirectory, workspace.deepagentsDirectory).split(path.sep).join("/"),
-    prompts: {
-      plan: template.planPromptRelativePath,
-      planRepair: template.planRepairPromptRelativePath,
-      generate: template.generatePromptRelativePath,
-      generateRepair: template.generateRepairPromptRelativePath,
-    },
     ...(template.description ? { description: template.description } : {}),
   };
 

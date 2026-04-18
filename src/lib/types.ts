@@ -98,6 +98,17 @@ export type TemplateRuntimeValidation = {
   steps: TemplateRuntimeValidationStep[];
 };
 
+export type TemplatePhaseEffort = "low" | "medium" | "high";
+
+export type TemplatePhaseName = "plan" | "planRepair" | "generate" | "generateRepair";
+
+export type TemplatePhaseConfig = {
+  prompt?: string;
+  effort?: TemplatePhaseEffort;
+};
+
+export type TemplatePhaseMap = Record<TemplatePhaseName, TemplatePhaseConfig>;
+
 export type TemplateRepairRetries = {
   plan: number;
   generate: number;
@@ -172,6 +183,7 @@ export type TemplatePack = {
   skillsDirectory?: string;
   starterDirectory?: string;
   repairRetries: TemplateRepairRetries;
+  phases: TemplatePhaseMap;
   runtimeValidation: TemplateRuntimeValidation;
   hash: string;
 };
@@ -183,16 +195,11 @@ export type TemplateLock = {
   description?: string;
   projectRenderer: string;
   repairRetries: TemplateRepairRetries;
+  phases: TemplatePhaseMap;
   runtimeValidation: TemplateRuntimeValidation;
   hash: string;
   stagedAt: string;
   workspaceTemplateDirectory: string;
-  prompts: {
-    plan: string;
-    planRepair: string;
-    generate: string;
-    generateRepair: string;
-  };
 };
 
 export type OutputWorkspace = {
@@ -250,6 +257,7 @@ export type TextGeneratorRuntime = {
   generateAttempt?: number;
   maxGenerateRetries?: number;
   retryReasons?: string[];
+  templatePhases: TemplatePhaseMap;
   templateRuntimeValidation: TemplateRuntimeValidation;
 };
 

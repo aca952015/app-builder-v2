@@ -372,6 +372,73 @@ test("runCli validate can validate an existing generate session by session id", 
   }
 });
 
+test("runCli validate resolves a unique short session id prefix", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-short-id-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+    const result = await generateApplication({
+      specPath,
+      generator: new CliTestGenerator(),
+      validator: new SuccessfulCliValidator(),
+    });
+
+    const shortSessionId = result.sessionId.slice(0, 8);
+    assert.notEqual(shortSessionId, result.sessionId);
+
+    await runCli(
+      ["validate", shortSessionId, "--phase", "generate"],
+      {
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), new RegExp(`Session: ${result.sessionId}`));
+    assert.match(stdoutLines.join("\n"), /Validation passed\./);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runCli validate rejects an ambiguous short session id prefix", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-ambiguous-id-"));
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+  const outRoot = path.join(tempRoot, ".out");
+  const sharedPrefix = "12345678";
+  const sessionA = `${sharedPrefix}-aaaa-aaaa-aaaa-aaaaaaaaaaaa`;
+  const sessionB = `${sharedPrefix}-bbbb-bbbb-bbbb-bbbbbbbbbbbb`;
+
+  await mkdir(path.join(outRoot, sessionA), { recursive: true });
+  await mkdir(path.join(outRoot, sessionB), { recursive: true });
+
+  await assert.rejects(
+    () =>
+      runCli(
+        ["validate", sharedPrefix, "--phase", "generate"],
+        {
+          stdout: { log: (line: string) => stdoutLines.push(line) },
+          stderr: { error: (line: string) => stderrLines.push(line) },
+          cwd: tempRoot,
+        },
+      ),
+    new RegExp(`Session id "${sharedPrefix}" is ambiguous`),
+  );
+
+  assert.equal(stdoutLines.length, 0);
+  assert.equal(stderrLines.length, 0);
+});
+
 test("runCli validate resumes generate repair instead of exiting on validation failure", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-fail-"));
   const previousCwd = process.cwd();

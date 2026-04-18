@@ -72,7 +72,7 @@
 - `appName`
 - `summary`
 - `resources`
-  每个资源必须有资源名、复数名、路由片段、描述、字段定义、关系定义。
+  每个资源必须有资源名、复数名、路由片段、描述、字段定义、关系定义；若资源只作为其他页面/API 中的嵌套数据被使用，可声明 `usage = "indirect"`。
 - `pages`
   每个页面必须有名称、路由、页面类型、用途；资源页必须声明 `resourceName`。
 - `apis`
@@ -87,6 +87,8 @@
 额外要求：
 
 - 每个 `resource` 至少要在结构化 spec 中具备清晰用途；是否需要 REST API 由业务场景决定，不强制每个资源都规划独立 API。
+- 若某个 `resource` 只是其他资源/API 返回体中的嵌套结构、派生结构或只读明细，不需要专有页面/API 时，必须显式写 `usage = "indirect"`。
+- 对于 `usage = "indirect"` 的资源，不要再为它伪造专有 page 或 API；宿主会在生成验证时跳过这类资源的专有 page/API 覆盖要求。
 - `acceptanceChecks.target` 必须使用以下规则：
   - `resource` 类型填资源名
   - `page` 类型填页面路由

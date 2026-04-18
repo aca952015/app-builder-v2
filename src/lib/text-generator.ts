@@ -17,7 +17,7 @@ import {
   type TodoStatus,
   updateWorkflowBoard,
 } from "./terminal-ui.js";
-import { GeneratedProject, NormalizedSpec, PlanResult, TextGenerator, TextGeneratorRuntime } from "./types.js";
+import { GeneratedProject, NormalizedSpec, PlanResult, TemplatePhaseEffort, TextGenerator, TextGeneratorRuntime } from "./types.js";
 
 export {
   buildTodoBoardLines,
@@ -967,11 +967,12 @@ function extractStructuredResponse<T>(result: unknown, schema: z.ZodType<T>): T 
   return parsed.success ? parsed.data : null;
 }
 
-async function resolveModel(modelName: string) {
+async function resolveModel(modelName: string, effort?: TemplatePhaseEffort) {
   const { initChatModel } = await import("langchain/chat_models/universal");
   return initChatModel(modelName, {
     modelProvider: "openai",
     temperature: 0,
+    ...(effort ? { reasoning: { effort } } : {}),
     configuration: process.env.OPENAI_BASE_URL
       ? { baseURL: process.env.OPENAI_BASE_URL }
       : undefined,
@@ -996,7 +997,15 @@ export class DeepAgentsTextGenerator implements TextGenerator {
   ): Promise<T> {
     const deepagents = await loadDeepagentsModule();
     const createDeepAgent = deepagents.createDeepAgent;
-    const resolvedModel = await resolveModel(this.model);
+    const phaseName =
+      options.stage === "plan"
+        ? "plan"
+        : options.stage === "plan_repair"
+          ? "planRepair"
+          : options.stage === "generate"
+            ? "generate"
+            : "generateRepair";
+    const resolvedModel = await resolveModel(this.model, runtime.templatePhases[phaseName]?.effort);
     const systemPrompt = await loadSystemPrompt(runtime, options.promptPath, options.stage);
     const skillsDirectory = path.join(runtime.templateDirectory, "skills");
 

@@ -37,3 +37,7 @@
 - 涓変釜璁″垝浜х墿閮藉凡钀界洏
 - `artifacts.planSpec` 婊¤冻 schema
 - `artifacts.generatedSpec` 涓?`artifacts.planSpec` 涓€鑷?- 杩斿洖缁撴灉涓殑 `artifactsWritten` 鏄庣‘鍒楀嚭瀹為檯鍐欏叆鐨勪骇鐗?
+
+Additional resource usage rule:
+- If a resource is only consumed indirectly as nested data inside another page or API response, set `resources[*].usage = "indirect"`.
+- Resources marked as `usage = "indirect"` do not need dedicated pages or dedicated APIs.

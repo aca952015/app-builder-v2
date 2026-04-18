@@ -109,8 +109,12 @@ export function formatWorkflowStageLine(activeStage: WorkflowStageMarker): strin
     .join(" -> ");
 }
 
-export function formatLogHeader(): string {
-  return "详细日志：";
+function formatExecutionLogHeader(): string {
+  return "执行日志：";
+}
+
+function formatRepairLogHeader(): string {
+  return "修复进展：";
 }
 
 export function formatElapsedTime(elapsedMs: number): string {
@@ -133,6 +137,24 @@ function formatShortSessionId(sessionId?: string): string | null {
 
 function getVisibleLogs(logs: string[], limit = 8): string[] {
   return logs.slice(-limit);
+}
+
+function isRepairProgressMessage(message: string): boolean {
+  return /修复|轮次|待修复|恢复到.+修复阶段|失败，/.test(message);
+}
+
+function splitVisibleLogs(logs: string[], limitPerColumn = 6): {
+  execution: string[];
+  repair: string[];
+} {
+  const visibleLogs = getVisibleLogs(logs, limitPerColumn * 3);
+  const execution = visibleLogs.filter((logLine) => !isRepairProgressMessage(parseWorkflowLogLine(logLine).message));
+  const repair = visibleLogs.filter((logLine) => isRepairProgressMessage(parseWorkflowLogLine(logLine).message));
+
+  return {
+    execution: execution.slice(-limitPerColumn),
+    repair: repair.slice(-limitPerColumn),
+  };
 }
 
 function normalizeRelativePath(filePath: string): string {
@@ -353,9 +375,18 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
     }
   }
   if (state.logs && state.logs.length > 0) {
+    const { execution, repair } = splitVisibleLogs(state.logs);
     lines.push("");
-    lines.push(formatLogHeader());
-    for (const logLine of getVisibleLogs(state.logs)) {
+    lines.push(formatExecutionLogHeader());
+    for (const logLine of execution) {
+      lines.push(`  ${logLine}`);
+    }
+    lines.push("");
+    lines.push(formatRepairLogHeader());
+    if (repair.length === 0) {
+      lines.push("  暂无修复进展");
+    }
+    for (const logLine of repair) {
       lines.push(`  ${logLine}`);
     }
   }
@@ -417,6 +448,15 @@ export function createDefaultStepItems(stage: WorkflowStage): TodoItem[] {
     ];
   }
 
+  if (stage === "完成阶段") {
+    return [
+      { content: "计划阶段产物已通过宿主校验", status: "pending" },
+      { content: "生成阶段产物已通过宿主校验", status: "pending" },
+      { content: "验证记录与交付报告已确认落盘", status: "pending" },
+      { content: "工作流状态已切换为 complete", status: "pending" },
+    ];
+  }
+
   return [
     { content: "读取已验证的 planSpec 与 starter", status: "in_progress" },
     { content: "实现资源模型与 REST API", status: "pending" },
@@ -464,6 +504,85 @@ export function createArtifactItemsForStage(stage: WorkflowStage, status: Artifa
 function createTodoBoardElement(state: TodoBoardState) {
   const borderColor = borderColorForStage(state.stage);
   const sessionLabel = formatShortSessionId(state.sessionId);
+  const splitLogs = splitVisibleLogs(state.logs ?? []);
+  const renderLogColumn = (
+    title: string,
+    logLines: string[],
+    emptyState: string,
+    keyPrefix: string,
+  ) =>
+    React.createElement(
+      Box,
+      {
+        key: `${keyPrefix}-column`,
+        flexDirection: "column",
+        width: "50%",
+        borderStyle: "round",
+        borderColor: "gray",
+        paddingX: 1,
+        minHeight: 8,
+      },
+      [
+        React.createElement(
+          Text,
+          {
+            key: `${keyPrefix}-title`,
+            bold: true,
+          },
+          title,
+        ),
+        ...(logLines.length === 0
+          ? [
+              React.createElement(
+                Text,
+                {
+                  key: `${keyPrefix}-empty`,
+                  color: "gray",
+                },
+                emptyState,
+              ),
+            ]
+          : logLines.map((logLine, index) =>
+              React.createElement(
+                Box,
+                {
+                  key: `${keyPrefix}-log-${index}`,
+                  flexDirection: "row",
+                  flexWrap: "wrap",
+                },
+                (() => {
+                  const parsed = parseWorkflowLogLine(logLine);
+                  return [
+                    React.createElement(
+                      Text,
+                      {
+                        key: `${keyPrefix}-time-${index}`,
+                        color: "gray",
+                      },
+                      parsed.timestamp ? `[${parsed.timestamp}] ` : "",
+                    ),
+                    React.createElement(
+                      Text,
+                      {
+                        key: `${keyPrefix}-prefix-${index}`,
+                        color: parsed.prefixColor,
+                      },
+                      `${parsed.prefix} `,
+                    ),
+                    React.createElement(
+                      Text,
+                      {
+                        key: `${keyPrefix}-message-${index}`,
+                        color: "white",
+                      },
+                      parsed.message,
+                    ),
+                  ];
+                })(),
+              )
+            )),
+      ],
+    );
 
   return React.createElement(
     Box,
@@ -574,7 +693,7 @@ function createTodoBoardElement(state: TodoBoardState) {
             {
               key: "steps-panel",
               flexDirection: "column",
-              width: "60%",
+              width: "50%",
             },
             [
               React.createElement(
@@ -617,7 +736,7 @@ function createTodoBoardElement(state: TodoBoardState) {
             {
               key: "artifacts-panel",
               flexDirection: "column",
-              width: "40%",
+              width: "50%",
             },
             [
               React.createElement(
@@ -645,62 +764,15 @@ function createTodoBoardElement(state: TodoBoardState) {
       React.createElement(
         Box,
         {
-          key: "logs-box",
-          flexDirection: "column",
+          key: "logs-columns",
+          flexDirection: "row",
           width: "100%",
           marginTop: 1,
-          borderStyle: "round",
-          borderColor: "gray",
-          paddingX: 1,
+          columnGap: 2,
         },
         [
-          React.createElement(
-            Text,
-            {
-              key: "logs-title",
-              bold: true,
-            },
-            formatLogHeader(),
-          ),
-          ...getVisibleLogs(state.logs ?? []).map((logLine, index) =>
-            React.createElement(
-              Box,
-              {
-                key: `log-${index}`,
-                flexDirection: "row",
-                flexWrap: "wrap",
-              },
-              (() => {
-                const parsed = parseWorkflowLogLine(logLine);
-                return [
-                  React.createElement(
-                    Text,
-                    {
-                      key: `log-time-${index}`,
-                      color: "gray",
-                    },
-                    parsed.timestamp ? `[${parsed.timestamp}] ` : "",
-                  ),
-                  React.createElement(
-                    Text,
-                    {
-                      key: `log-prefix-${index}`,
-                      color: parsed.prefixColor,
-                    },
-                    `${parsed.prefix} `,
-                  ),
-                  React.createElement(
-                    Text,
-                    {
-                      key: `log-message-${index}`,
-                      color: "white",
-                    },
-                    parsed.message,
-                  ),
-                ];
-              })(),
-            )
-          ),
+          renderLogColumn("执行日志", splitLogs.execution, "暂无执行日志", "execution"),
+          renderLogColumn("修复进展", splitLogs.repair, "暂无修复进展", "repair"),
         ],
       ),
     ],
@@ -886,7 +958,7 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
 
 export async function appendWorkflowLog(logLine: string): Promise<void> {
   const content = sanitizeWorkflowLogContent(logLine);
-  if (!content || content.includes("完成")) {
+  if (!content || /^全部阶段完成[，。]?/.test(content)) {
     return;
   }
 

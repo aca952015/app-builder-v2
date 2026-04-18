@@ -96,6 +96,97 @@ function buildPlanSpec(): PlanSpec {
   };
 }
 
+function buildIndirectSupportPlanSpec(): PlanSpec {
+  return {
+    version: 1,
+    appName: "Weather Aggregation",
+    summary: "通过聚合天气 API 返回小时与日预报的轻量天气应用。",
+    resources: [
+      {
+        name: "Weather",
+        pluralName: "Weather",
+        routeSegment: "weather",
+        description: "聚合天气数据。",
+        fields: [
+          { name: "locationId", label: "位置ID", type: "string", required: true, source: "prd" },
+          { name: "temperature", label: "温度", type: "number", required: true, source: "prd" },
+        ],
+        relations: [],
+      },
+      {
+        name: "HourlyForecast",
+        pluralName: "HourlyForecasts",
+        routeSegment: "hourly-forecast",
+        description: "小时预报嵌套数据。",
+        usage: "indirect",
+        fields: [
+          { name: "time", label: "时间", type: "datetime", required: true, source: "prd" },
+          { name: "temperature", label: "温度", type: "number", required: true, source: "prd" },
+        ],
+        relations: [],
+      },
+      {
+        name: "DailyForecast",
+        pluralName: "DailyForecasts",
+        routeSegment: "daily-forecast",
+        description: "日预报嵌套数据。",
+        usage: "indirect",
+        fields: [
+          { name: "date", label: "日期", type: "date", required: true, source: "prd" },
+          { name: "tempMax", label: "最高温", type: "number", required: true, source: "prd" },
+        ],
+        relations: [],
+      },
+    ],
+    pages: [
+      {
+        name: "天气看板",
+        route: "/",
+        kind: "dashboard",
+        resourceName: "Weather",
+        purpose: "展示实时天气和聚合预报。",
+      },
+    ],
+    apis: [
+      {
+        name: "WeatherAggregation",
+        resourceName: "Weather",
+        path: "/app/api/weather/route.ts",
+        methods: ["GET"],
+        requestShape: "location query",
+        responseShape: "now + hourly + daily",
+      },
+    ],
+    flows: [
+      {
+        name: "天气查询",
+        steps: ["打开首页", "请求天气聚合接口", "展示当前天气与预报"],
+      },
+    ],
+    assumptions: ["小时预报与日预报作为 Weather API 的嵌套返回体提供。"],
+    acceptanceChecks: [
+      {
+        id: "page-dashboard",
+        description: "首页能展示聚合天气信息。",
+        type: "page",
+        target: "/",
+      },
+      {
+        id: "api-weather",
+        description: "天气聚合接口必须实现。",
+        type: "api",
+        target: "/app/api/weather/route.ts",
+      },
+      {
+        id: "flow-weather",
+        description: "天气查询流程必须可用。",
+        type: "flow",
+        target: "天气查询",
+      },
+    ],
+  };
+}
+
 function uniqueApiPaths(planSpec: PlanSpec): string[] {
   return Array.from(new Set(planSpec.apis.map((api) => api.path)));
 }
@@ -133,6 +224,12 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
     generateAttempt: 1,
     maxGenerateRetries: 2,
     retryReasons: [],
+    templatePhases: {
+      plan: { effort: "high" },
+      planRepair: { effort: "high" },
+      generate: { effort: "medium" },
+      generateRepair: { effort: "high" },
+    },
     templateRuntimeValidation: {
       copyEnvExample: true,
       steps: [],
@@ -367,6 +464,52 @@ class StubTextGenerator implements TextGenerator {
 
   async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
     throw new Error("generateRepairProject should not be called in StubTextGenerator");
+  }
+}
+
+class IndirectResourceTextGenerator implements TextGenerator {
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildIndirectSupportPlanSpec();
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# 间接资源分析稿\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# 间接资源详细规格\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+
+    return {
+      summary: "已写入包含 indirect 资源的计划产物。",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Indirect Resource Report\n\nGenerated with nested forecast data.\n",
+    });
+
+    return {
+      summary: "已生成聚合天气接口和首页。",
+      filesWritten: ["app-builder-report.md"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in IndirectResourceTextGenerator");
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("generateRepairProject should not be called in IndirectResourceTextGenerator");
   }
 }
 
@@ -1313,18 +1456,23 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(seed, /demo@example\.com/);
     assert.equal(sidebarMenu.length > 0, true);
     assert.equal(sidebarMenu.some((item) => item.label === "Workspace"), true);
-    assert.match(templateLock, /"plan": "prompts\/plan-system-prompt\.md"/);
-    assert.match(templateLock, /"planRepair": "prompts\/plan-repair-system-prompt\.md"/);
-    assert.match(templateLock, /"generate": "prompts\/generate-system-prompt\.md"/);
-    assert.match(templateLock, /"generateRepair": "prompts\/generate-repair-system-prompt\.md"/);
     assert.match(templateLock, /"repairRetries": \{/);
-    assert.match(templateLock, /"plan": 2/);
-    assert.match(templateLock, /"generate": 2/);
-    assert.match(stagedTemplateManifest, /"plan": "prompts\/plan-system-prompt\.md"/);
-    assert.match(stagedTemplateManifest, /"planRepair": "prompts\/plan-repair-system-prompt\.md"/);
-    assert.match(stagedTemplateManifest, /"generate": "prompts\/generate-system-prompt\.md"/);
-    assert.match(stagedTemplateManifest, /"generateRepair": "prompts\/generate-repair-system-prompt\.md"/);
+    assert.match(templateLock, /"plan": 5/);
+    assert.match(templateLock, /"generate": 5/);
+    assert.match(templateLock, /"phases": \{/);
+    assert.match(templateLock, /"plan": \{\s*"prompt": "prompts\/plan-system-prompt\.md"/);
+    assert.match(templateLock, /"planRepair": \{[\s\S]*"prompt": "prompts\/plan-repair-system-prompt\.md"/);
+    assert.match(templateLock, /"generate": \{[\s\S]*"prompt": "prompts\/generate-system-prompt\.md"/);
+    assert.match(templateLock, /"generateRepair": \{[\s\S]*"prompt": "prompts\/generate-repair-system-prompt\.md"/);
+    assert.match(templateLock, /"planRepair": \{[\s\S]*"effort": "high"/);
+    assert.match(templateLock, /"generate": \{[\s\S]*"effort": "medium"/);
     assert.match(stagedTemplateManifest, /"repairRetries": \{/);
+    assert.match(stagedTemplateManifest, /"phases": \{/);
+    assert.match(stagedTemplateManifest, /"plan": \{\s*"prompt": "prompts\/plan-system-prompt\.md"/);
+    assert.match(stagedTemplateManifest, /"planRepair": \{[\s\S]*"prompt": "prompts\/plan-repair-system-prompt\.md"/);
+    assert.match(stagedTemplateManifest, /"generate": \{[\s\S]*"prompt": "prompts\/generate-system-prompt\.md"/);
+    assert.match(stagedTemplateManifest, /"generateRepair": \{[\s\S]*"prompt": "prompts\/generate-repair-system-prompt\.md"/);
+    assert.match(stagedTemplateManifest, /"generateRepair": \{[\s\S]*"effort": "high"/);
     assert.match(sessionAgents, /# Host Session Policy/);
     assert.match(sessionAgents, /acceptanceChecks\.target/);
     assert.match(planPromptSnapshot, /artifacts\.planSpec/);
@@ -1359,6 +1507,8 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(runtimeValidationLog, /=== pnpm dev ===/);
     assert.match(deepagentsConfig, /"runtimeValidationLog": "\.deepagents\/runtime-validation\.log"/);
     assert.match(deepagentsConfig, /"repairRetries": \{/);
+    assert.match(deepagentsConfig, /"phases": \{/);
+    assert.match(deepagentsConfig, /"plan": \{[\s\S]*"prompt": "prompts\/plan-system-prompt\.md"[\s\S]*"effort": "high"/);
     assert.doesNotMatch(deepagentsConfig, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.doesNotMatch(stagedReference, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.equal(result.files.some((file) => file.startsWith(".git/")), false);
@@ -1608,6 +1758,31 @@ test("generateApplication validates generated coverage from actual files instead
   }
 });
 
+test("generateApplication ignores dedicated page/api coverage for indirect resources", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-indirect-resource-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator: new IndirectResourceTextGenerator(),
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.match(generationValidation, /"valid": true/);
+    assert.doesNotMatch(generationValidation, /HourlyForecast/);
+    assert.doesNotMatch(generationValidation, /DailyForecast/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication allows API-only support resources during plan validation", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-api-only-resource-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -1702,6 +1877,9 @@ test("full-stack template starter copies scaffold files into the output root", a
     const template = await loadTemplatePack("full-stack");
     const copied = await copyStarterScaffold(template, tempRoot);
 
+    assert.equal(template.phases.plan.effort, "high");
+    assert.equal(template.phases.generate.effort, "medium");
+    assert.equal(template.phases.generateRepair.effort, "high");
     assert.ok(copied.includes("package.json"));
     assert.ok(copied.includes("app/layout.tsx"));
     assert.ok(copied.includes("lib/session.ts"));

@@ -23,4 +23,7 @@
 - 瀹夸富鍒楀嚭鐨勫け璐ラ」宸查€愭潯淇ˉ
 - 涓変釜璁″垝浜х墿浠嶇劧瀛樺湪涓斾簰鐩镐竴鑷?- 杩斿洖缁撴灉涓殑 `artifactsWritten` 鍙嶆槧鏈疆瀹為檯淇敼
 
+Additional repair rule:
+- If a resource is only used as indirect nested data, do not invent a dedicated page or API for it.
+- Mark that resource as `usage = "indirect"` in `artifacts.planSpec.resources[*]`.
 

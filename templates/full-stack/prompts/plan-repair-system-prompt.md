@@ -50,6 +50,7 @@
 - 只补齐缺失或错误部分，不得整轮重写已经正确的内容。
 - 如需修改现有文件，必须先读再改。
 - 若某项失败来自资源/API/页面映射不完整，优先最小化补全 JSON 结构，再同步 Markdown 文档一致性。
+- 若某个资源实际上只作为嵌套数据间接使用，不应强行补出专有 page/API；应在 `artifacts.planSpec.resources[*].usage` 中显式标为 `indirect`，并同步文档说明。
 - `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束。
 - 在 `artifacts.planSpec` 重新成为合法 JSON 且通过 `hardConstraints.planSpecSchemaValidation.schema` 校验前，不允许结束修补或返回最终结构化响应。
 - 可选字符串字段无值时必须省略，不能写成空字符串 `""`；必填字符串字段必须提供非空字符串。

@@ -17,6 +17,11 @@ export const planSpecRelationKindSchema = z.enum([
   "manyToMany",
 ]);
 
+export const planSpecResourceUsageSchema = z.enum([
+  "direct",
+  "indirect",
+]);
+
 export const planSpecPageKindSchema = z.enum([
   "dashboard",
   "list",
@@ -51,6 +56,7 @@ export const planSpecSchema = z.object({
     pluralName: z.string().min(1),
     routeSegment: z.string().min(1),
     description: z.string().min(1),
+    usage: planSpecResourceUsageSchema.optional(),
     fields: z.array(z.object({
       name: z.string().min(1),
       label: z.string().min(1),

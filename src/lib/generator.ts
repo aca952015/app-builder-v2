@@ -28,6 +28,7 @@ import {
   GenerationResult,
   PlanResult,
   SessionValidationResult,
+  type TemplatePhaseMap,
   type TemplateRepairRetries,
   type TemplateRuntimeValidation,
   type TemplateRuntimeValidationStep,
@@ -704,7 +705,7 @@ async function collectGeneratedCoverage(
   apiExistsByPath: Map<string, boolean>;
   missingPageRoutes: string[];
   missingApiPaths: string[];
-  missingResources: string[];
+  indirectResources: string[];
 }> {
   const uniquePageRoutes = uniqueValues(planSpec.pages.map((page) => page.route));
   const uniqueApiPaths = uniqueValues(planSpec.apis.map((api) => api.path));
@@ -732,18 +733,11 @@ async function collectGeneratedCoverage(
 
   const missingPageRoutes = uniquePageRoutes.filter((route) => pageExistsByRoute.get(route) !== true);
   const missingApiPaths = uniqueApiPaths.filter((apiPath) => apiExistsByPath.get(apiPath) !== true);
-  const missingResources: string[] = [];
+  const indirectResources: string[] = [];
 
   for (const resource of planSpec.resources) {
-    const plannedPages = planSpec.pages.filter((page) => page.resourceName === resource.name);
-    const plannedApis = planSpec.apis.filter((api) => api.resourceName === resource.name);
-    const hasExpectedPage =
-      plannedPages.length === 0 || plannedPages.some((page) => pageExistsByRoute.get(page.route) === true);
-    const hasExpectedApi =
-      plannedApis.length > 0 && plannedApis.some((api) => apiExistsByPath.get(api.path) === true);
-
-    if (!hasExpectedPage || !hasExpectedApi) {
-      missingResources.push(resource.name);
+    if (resource.usage === "indirect") {
+      indirectResources.push(resource.name);
     }
   }
 
@@ -752,8 +746,38 @@ async function collectGeneratedCoverage(
     apiExistsByPath,
     missingPageRoutes,
     missingApiPaths,
-    missingResources,
+    indirectResources,
   };
+}
+
+async function appendIndirectResourceCoverageNotice(resourceNames: string[]): Promise<void> {
+  if (resourceNames.length === 0) {
+    return;
+  }
+
+  await appendWorkflowLog(
+    `[host] 检测到标记为 indirect 的资源 ${resourceNames.join(", ")}，已跳过专有页面/API 覆盖校验。`,
+  );
+}
+
+function collectMissingDeliveryAcceptanceChecks(
+  planSpec: PlanSpec,
+  coverage: Pick<Awaited<ReturnType<typeof collectGeneratedCoverage>>, "missingPageRoutes" | "missingApiPaths">,
+): string[] {
+  const missingPages = new Set(coverage.missingPageRoutes);
+  const missingApis = new Set(coverage.missingApiPaths);
+
+  return planSpec.acceptanceChecks.flatMap((check) => {
+    if (check.type === "page" && missingPages.has(check.target)) {
+      return [`${check.id}(${check.target})`];
+    }
+
+    if (check.type === "api" && missingApis.has(check.target)) {
+      return [`${check.id}(${check.target})`];
+    }
+
+    return [];
+  });
 }
 
 function resolveAppPrefixedPath(outputDirectory: string, filePath: string): string {
@@ -1192,8 +1216,7 @@ async function synthesizeRecoveredGeneratedResult(
   const hasGeneratedSignal =
     Boolean(reportContents && reportContents.trim().length > 0) ||
     coverage.missingApiPaths.length < planSpec.apis.length ||
-    coverage.missingPageRoutes.length < planSpec.pages.length ||
-    coverage.missingResources.length < planSpec.resources.length;
+    coverage.missingPageRoutes.length < planSpec.pages.length;
 
   if (!hasGeneratedSignal || filesWritten.length === 0) {
     return null;
@@ -1204,9 +1227,7 @@ async function synthesizeRecoveredGeneratedResult(
   return {
     summary: "结构化响应缺失，宿主已基于已落盘生成产物恢复结果。",
     filesWritten,
-    implementedResources: planSpec.resources
-      .filter((resource) => !coverage.missingResources.includes(resource.name))
-      .map((resource) => resource.name),
+    implementedResources: planSpec.resources.map((resource) => resource.name),
     implementedPages: planSpec.pages
       .filter((page) => !coverage.missingPageRoutes.includes(page.route))
       .map((page) => page.route),
@@ -1351,6 +1372,8 @@ async function collectPersistedGeneratedValidation(
   }
 
   const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
+  await appendIndirectResourceCoverageNotice(coverage.indirectResources);
+  const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
 
   if (coverage.missingApiPaths.length > 0) {
     reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
@@ -1360,8 +1383,8 @@ async function collectPersistedGeneratedValidation(
     reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
   }
 
-  if (coverage.missingResources.length > 0) {
-    reasons.push(`生成阶段未完成：以下资源对应的页面或接口尚未完整落盘：${coverage.missingResources.join(", ")}。`);
+  if (missingAcceptanceChecks.length > 0) {
+    reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
   }
 
   let steps: GenerationValidationStep[] = [];
@@ -1389,7 +1412,7 @@ async function validateGeneratedArtifacts(
   planSpec: PlanSpec,
   result: GeneratedProject,
   validator: GeneratedAppValidator,
-): Promise<{ reasons: string[] }> {
+): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
   await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
 
   const reasons: string[] = [];
@@ -1408,14 +1431,16 @@ async function validateGeneratedArtifacts(
   }
 
   const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
-  if (coverage.missingResources.length > 0) {
-    reasons.push(`生成阶段未完成：以下资源对应的页面或接口尚未完整落盘：${coverage.missingResources.join(", ")}。`);
-  }
+  await appendIndirectResourceCoverageNotice(coverage.indirectResources);
+  const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
   if (coverage.missingPageRoutes.length > 0) {
     reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
   }
   if (coverage.missingApiPaths.length > 0) {
     reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
+  }
+  if (missingAcceptanceChecks.length > 0) {
+    reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
   }
 
   let steps: GenerationValidationStep[] = [];
@@ -1437,7 +1462,7 @@ async function validateGeneratedArtifacts(
     steps,
   });
 
-  return { reasons };
+  return { reasons, steps };
 }
 
 async function appendRetryNote(logPath: string, attempt: number, stage: RetryStage, reasons: string[]): Promise<void> {
@@ -1448,6 +1473,35 @@ async function appendRetryNote(logPath: string, attempt: number, stage: RetrySta
     "",
   ];
   await fs.appendFile(logPath, `${lines.join("\n")}\n`, "utf8");
+}
+
+async function appendValidationFailureDetails(reasons: string[]): Promise<void> {
+  for (const [index, reason] of reasons.entries()) {
+    await appendWorkflowLog(`[host] 待修复错误 ${index + 1}/${reasons.length}: ${reason}`);
+  }
+}
+
+function extractValidationDetailLines(detail: string, maxLines = 6): string[] {
+  return detail
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(0, maxLines);
+}
+
+async function appendGenerationValidationStepDetails(steps: GenerationValidationStep[]): Promise<void> {
+  const failedSteps = steps.filter((step) => !step.ok);
+
+  for (const [index, step] of failedSteps.entries()) {
+    await appendWorkflowLog(`[host] 待修复验证步骤 ${index + 1}/${failedSteps.length}: ${step.name} 未通过。`);
+
+    const detailLines = extractValidationDetailLines(step.detail);
+    for (const [detailIndex, line] of detailLines.entries()) {
+      await appendWorkflowLog(
+        `[host] 待修复验证内容 ${step.name} ${detailIndex + 1}/${detailLines.length}: ${line}`,
+      );
+    }
+  }
 }
 
 async function collectGeneratedFiles(outputDirectory: string): Promise<string[]> {
@@ -1484,23 +1538,62 @@ async function collectGeneratedFiles(outputDirectory: string): Promise<string[]>
   return files.sort();
 }
 
+async function resolveSessionIdForLookup(sessionId: string, cwd = process.cwd()): Promise<string> {
+  const sessionsRoot = path.resolve(cwd, ".out");
+  const exactOutputDirectory = path.join(sessionsRoot, sessionId);
+
+  if (await pathExists(exactOutputDirectory)) {
+    return sessionId;
+  }
+
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(sessionsRoot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("ENOENT")) {
+      throw new Error(`Session "${sessionId}" was not found under ${sessionsRoot}.`);
+    }
+    throw error;
+  }
+
+  const matches = entries
+    .filter((entry) => entry.startsWith(sessionId))
+    .sort();
+
+  if (matches.length === 0) {
+    throw new Error(`Session "${sessionId}" was not found under ${sessionsRoot}.`);
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      `Session id "${sessionId}" is ambiguous under ${sessionsRoot}. Matches: ${matches.join(", ")}.`,
+    );
+  }
+
+  return matches[0] ?? sessionId;
+}
+
 async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): Promise<TextGeneratorRuntime> {
-  const outputDirectory = path.resolve(cwd, ".out", sessionId);
+  const resolvedSessionId = await resolveSessionIdForLookup(sessionId, cwd);
+  const outputDirectory = path.resolve(cwd, ".out", resolvedSessionId);
   const deepagentsDirectory = path.join(outputDirectory, ".deepagents");
   const configPath = path.join(deepagentsDirectory, "config.json");
 
-  if (!await pathExists(outputDirectory)) {
-    throw new Error(`Session "${sessionId}" was not found under ${path.resolve(cwd, ".out")}.`);
-  }
-
   if (!await pathExists(deepagentsDirectory)) {
-    throw new Error(`Session "${sessionId}" is missing the .deepagents workspace.`);
+    throw new Error(`Session "${resolvedSessionId}" is missing the .deepagents workspace.`);
   }
 
   let templateId = "unknown";
   let templateName = "unknown";
   let templateVersion = "unknown";
   let templateRepairRetries = defaultTemplateRepairRetries();
+  let templatePhases: TemplatePhaseMap = {
+    plan: {},
+    planRepair: {},
+    generate: {},
+    generateRepair: {},
+  };
   let templateRuntimeValidation = defaultTemplateRuntimeValidation();
 
   const configContents = await readIfExists(configPath);
@@ -1512,6 +1605,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
           name?: unknown;
           version?: unknown;
           repairRetries?: unknown;
+          phases?: unknown;
           runtimeValidation?: unknown;
         };
       };
@@ -1537,6 +1631,28 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
             generate: Number(repairRetriesCandidate.generate),
           };
         }
+      }
+      if (parsed.template?.phases && typeof parsed.template.phases === "object") {
+        const phasesCandidate = parsed.template.phases as Record<string, unknown>;
+        const parsePhaseEffort = (value: unknown): { effort?: "low" | "medium" | "high" } => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) {
+            return {};
+          }
+
+          const candidate = value as { effort?: unknown };
+          if (candidate.effort === "low" || candidate.effort === "medium" || candidate.effort === "high") {
+            return { effort: candidate.effort };
+          }
+
+          return {};
+        };
+
+        templatePhases = {
+          plan: parsePhaseEffort(phasesCandidate.plan),
+          planRepair: parsePhaseEffort(phasesCandidate.planRepair),
+          generate: parsePhaseEffort(phasesCandidate.generate),
+          generateRepair: parsePhaseEffort(phasesCandidate.generateRepair),
+        };
       }
       if (parsed.template?.runtimeValidation && typeof parsed.template.runtimeValidation === "object") {
         const runtimeValidationCandidate = parsed.template.runtimeValidation as Partial<TemplateRuntimeValidation>;
@@ -1592,7 +1708,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
   }
 
   return {
-    sessionId,
+    sessionId: resolvedSessionId,
     outputDirectory,
     deepagentsDirectory,
     deepagentsAgentsPath: path.join(deepagentsDirectory, "AGENTS.md"),
@@ -1620,6 +1736,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
     maxPlanRetries: templateRepairRetries.plan,
     maxGenerateRetries: templateRepairRetries.generate,
+    templatePhases,
     templateRuntimeValidation,
   };
 }
@@ -1719,6 +1836,8 @@ async function continueGenerateFlow(options: {
 
     generationRetryReasons = validation.reasons;
     await appendWorkflowLog(`[host] 生成阶段校验失败，待修复问题 ${validation.reasons.length} 条。`);
+    await appendValidationFailureDetails(validation.reasons);
+    await appendGenerationValidationStepDetails(validation.steps);
   }
 
   const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "生成修复阶段");
@@ -1782,6 +1901,8 @@ async function continueGenerateFlow(options: {
     await appendWorkflowLog(
       `[host] 生成修复轮次 ${existingRepairAttempts + repairIndex + 1} 仍未通过，剩余问题 ${validation.reasons.length} 条。`,
     );
+    await appendValidationFailureDetails(validation.reasons);
+    await appendGenerationValidationStepDetails(validation.steps);
   }
 
   throw new Error(`Generation validation failed: ${generationRetryReasons.join(" | ")}`);
@@ -1841,6 +1962,7 @@ async function continuePlanRepairFlow(options: {
     await appendWorkflowLog(
       `[host] 计划修复轮次 ${existingRepairAttempts + repairIndex + 1} 仍未通过，剩余问题 ${validation.reasons.length} 条。`,
     );
+    await appendValidationFailureDetails(validation.reasons);
   }
 
   if (!approvedPlan) {
@@ -1953,6 +2075,8 @@ export async function validateSessionPhase(options: {
     }
 
     await appendWorkflowLog("[host] validate 检测到生成阶段失败，恢复到生成修复阶段。");
+    await appendValidationFailureDetails(reasons);
+    await appendGenerationValidationStepDetails(steps);
     try {
       await continueGenerateFlow({
         runtime,
@@ -2095,6 +2219,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       deepagentsGenerationValidationPath: workspace.deepagentsGenerationValidationPath,
       maxPlanRetries: template.repairRetries.plan,
       maxGenerateRetries: template.repairRetries.generate,
+      templatePhases: template.phases,
       templateRuntimeValidation: template.runtimeValidation,
       ...overrides,
     });
@@ -2145,6 +2270,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       } else {
         planRetryReasons = validation.reasons;
         await appendWorkflowLog(`[host] 计划阶段校验失败，待修复问题 ${validation.reasons.length} 条。`);
+        await appendValidationFailureDetails(validation.reasons);
       }
     }
 
@@ -2193,6 +2319,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
 
       planRetryReasons = validation.reasons;
       await appendWorkflowLog(`[host] 计划修复轮次 ${repairIndex + 1} 仍未通过，剩余问题 ${validation.reasons.length} 条。`);
+      await appendValidationFailureDetails(validation.reasons);
     }
 
     if (!approvedPlan) {
@@ -2248,6 +2375,8 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       } else {
         generationRetryReasons = validation.reasons;
         await appendWorkflowLog(`[host] 生成阶段校验失败，待修复问题 ${validation.reasons.length} 条。`);
+        await appendValidationFailureDetails(validation.reasons);
+        await appendGenerationValidationStepDetails(validation.steps);
       }
     }
 
@@ -2302,6 +2431,8 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
 
       generationRetryReasons = validation.reasons;
       await appendWorkflowLog(`[host] 生成修复轮次 ${repairIndex + 1} 仍未通过，剩余问题 ${validation.reasons.length} 条。`);
+      await appendValidationFailureDetails(validation.reasons);
+      await appendGenerationValidationStepDetails(validation.steps);
     }
 
     if (generationRetryReasons.length > 0) {
