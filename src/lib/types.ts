@@ -124,6 +124,25 @@ export type GeneratedAppValidator = {
 export type WorkflowPhase = "plan" | "plan_repair" | "generate" | "generate_repair" | "complete";
 export type ValidationPhase = "plan" | "generate";
 
+export type RuntimeUsageSummary = {
+  inputTokens?: number | undefined;
+  outputTokens?: number | undefined;
+  totalTokens?: number | undefined;
+  reasoningTokens?: number | undefined;
+  cachedInputTokens?: number | undefined;
+};
+
+export type RuntimeStatusPhase = TemplatePhaseName | WorkflowPhase;
+
+export type RuntimeStatus = {
+  modelName?: string | undefined;
+  effort?: TemplatePhaseEffort | undefined;
+  usage?: RuntimeUsageSummary | undefined;
+  contextWindowUsedTokens?: number | undefined;
+  sessionId?: string | undefined;
+  phase?: RuntimeStatusPhase | undefined;
+};
+
 export type SessionValidationResult = {
   sessionId: string;
   phase: ValidationPhase;

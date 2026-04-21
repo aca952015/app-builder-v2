@@ -55,6 +55,9 @@
 - 侧边栏菜单的唯一事实来源是 `config/sidebar-menu.json`。
 - 对已存在文件默认执行“先读再改”；只有 `planSpec` 明确需要的新文件才新增。
 - 如果你改动了 starter 自带的持久化、鉴权或启动契约，必须把所有受该契约影响的 Prisma 配置、schema、seed、脚本、认证/会话和默认入口数据视为同一变更面，逐一读取并同步修改；禁止只改其中一部分就结束。
+- 如果你需要修改 `prisma/schema.prisma`，必须先读取当前 `prisma/schema.prisma`，确认它是 Prisma 的 canonical schema 文件，然后直接对 `prisma/schema.prisma` 执行一次完整覆盖写入，产出最终完整 schema。
+- 修改 `prisma/schema.prisma` 时，禁止采用“先写 `schema_new.prisma` / `schema_correct.prisma` / `schema_backup.prisma` 等候选文件，再尝试搬运或比对”的策略；禁止引入任何临时 schema 副本文件。
+- 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态。
 - 如果 `planSpec` 没有明确要求改变某个 starter 基础契约，优先保持兼容并在既有契约上扩展，而不是重写或漂移它的依赖链。
 - 宿主会在生成阶段结束后按输入里的 `template.runtimeValidation` 执行运行验证；若 `copyEnvExample` 未禁用，还会先准备 `.env`。你生成的代码、脚本、Prisma 配置和环境文件必须让这些步骤连续通过。
 - 不要生成依赖外部 CDN 的实现，不要使用 `eval()`、`new Function()`、`document.write()`。

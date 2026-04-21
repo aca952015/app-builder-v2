@@ -6,6 +6,7 @@ import { Box, Text, render, renderToString, type Instance } from "ink";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { routeToPageFileCandidates } from "./app-router.js";
+import type { RuntimeStatus } from "./types.js";
 
 export type WorkflowStage = "计划阶段" | "生成阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -31,6 +32,7 @@ export type TodoBoardState = {
   elapsedMs?: number;
   outputDirectory?: string;
   logs?: string[];
+  runtimeStatus?: RuntimeStatus | undefined;
 };
 
 export type TodoBoardRenderer = {
@@ -331,9 +333,110 @@ function buildTodoHeader(state: TodoBoardState): string {
   return formatTodoHeader(completedCount, state.todos.length);
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function formatRuntimeFieldValue(value?: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : "n/a";
+}
+
+function formatTokenCount(value: number): string {
+  if (value < 1024) {
+    return value.toLocaleString("en-US");
+  }
+
+  const units = ["K", "M", "G", "T"];
+  let scaledValue = value;
+  let unitIndex = -1;
+
+  while (scaledValue >= 1024 && unitIndex < units.length - 1) {
+    scaledValue /= 1024;
+    unitIndex += 1;
+  }
+
+  const rounded =
+    scaledValue >= 10
+      ? Math.round(scaledValue)
+      : Math.round(scaledValue * 10) / 10;
+  const formatted =
+    Number.isInteger(rounded)
+      ? rounded.toString()
+      : rounded.toFixed(1).replace(/\.0$/, "");
+
+  return `${formatted}${units[Math.max(unitIndex, 0)]}`;
+}
+
+function formatContextUsedValue(runtimeStatus?: RuntimeStatus): string {
+  const usage = runtimeStatus?.usage;
+  if (!usage) {
+    return "n/a";
+  }
+
+  const details: string[] = [];
+  if (isFiniteNumber(usage.inputTokens)) {
+    details.push(`in ${formatTokenCount(usage.inputTokens)}`);
+  }
+  if (isFiniteNumber(usage.outputTokens)) {
+    details.push(`out ${formatTokenCount(usage.outputTokens)}`);
+  }
+  if (isFiniteNumber(usage.reasoningTokens)) {
+    details.push(`reasoning ${formatTokenCount(usage.reasoningTokens)}`);
+  }
+  if (isFiniteNumber(usage.cachedInputTokens)) {
+    details.push(`cache ${formatTokenCount(usage.cachedInputTokens)}`);
+  }
+
+  const rawTotalTokens =
+    isFiniteNumber(usage.totalTokens)
+      ? usage.totalTokens
+      : isFiniteNumber(usage.inputTokens) && isFiniteNumber(usage.outputTokens)
+        ? usage.inputTokens + usage.outputTokens
+        : undefined;
+  const totalTokens =
+    rawTotalTokens !== undefined
+      ? Math.max(
+          0,
+          rawTotalTokens - (isFiniteNumber(usage.cachedInputTokens) ? usage.cachedInputTokens : 0),
+        )
+      : undefined;
+
+  if (totalTokens !== undefined) {
+    return details.length > 0
+      ? `${formatTokenCount(totalTokens)} total (${details.join(", ")})`
+      : `${formatTokenCount(totalTokens)} total`;
+  }
+
+  return details.length > 0 ? details.join(", ") : "n/a";
+}
+
+function formatContextWindowUsedValue(runtimeStatus?: RuntimeStatus): string {
+  return isFiniteNumber(runtimeStatus?.contextWindowUsedTokens)
+    ? formatTokenCount(runtimeStatus.contextWindowUsedTokens)
+    : "n/a";
+}
+
+function buildStatusFields(state: TodoBoardState): Array<{ label: string; value: string }> {
+  return [
+    { label: "model", value: formatRuntimeFieldValue(state.runtimeStatus?.modelName) },
+    { label: "effort", value: formatRuntimeFieldValue(state.runtimeStatus?.effort) },
+    { label: "token used", value: formatContextUsedValue(state.runtimeStatus) },
+    { label: "context used", value: formatContextWindowUsedValue(state.runtimeStatus) },
+    { label: "session id", value: formatRuntimeFieldValue(state.runtimeStatus?.sessionId ?? state.sessionId) },
+    { label: "phase", value: formatRuntimeFieldValue(state.runtimeStatus?.phase) },
+  ];
+}
+
+function buildStatusBarLine(state: TodoBoardState): string {
+  return buildStatusFields(state)
+    .map((field) => `${field.label}: ${field.value}`)
+    .join(" | ");
+}
+
 export function buildTodoBoardLines(state: TodoBoardState): string[] {
   if (state.todos.length === 0 && state.artifacts.length === 0) {
-    return [buildActionLine(state)];
+    return [buildActionLine(state), "", buildStatusBarLine(state)];
   }
 
   const sessionLabel = formatShortSessionId(state.sessionId);
@@ -373,6 +476,8 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
       lines.push(`  ${logLine}`);
     }
   }
+  lines.push("");
+  lines.push(buildStatusBarLine(state));
   return lines;
 }
 
@@ -484,7 +589,7 @@ export function createArtifactItemsForStage(stage: WorkflowStage, status: Artifa
   return [...planArtifacts, ...generationArtifacts];
 }
 
-function createTodoBoardElement(state: TodoBoardState) {
+function createWorkflowBoardElement(state: TodoBoardState) {
   const borderColor = borderColorForStage(state.stage);
   const sessionLabel = formatShortSessionId(state.sessionId);
   const splitLogs = splitVisibleLogs(state.logs ?? []);
@@ -570,6 +675,7 @@ function createTodoBoardElement(state: TodoBoardState) {
   return React.createElement(
     Box,
     {
+      key: "workflow-board",
       flexDirection: "column",
       borderStyle: "round",
       borderColor,
@@ -758,8 +864,62 @@ function createTodoBoardElement(state: TodoBoardState) {
           renderLogColumn("修复进展", splitLogs.repair, "暂无修复进展", "repair"),
         ],
       ),
+      createStatusBarElement(state),
     ],
   );
+}
+
+function createStatusBarElement(state: TodoBoardState) {
+  const statusFields = buildStatusFields(state);
+
+  return React.createElement(
+    Box,
+    {
+      key: "status-bar",
+      flexDirection: "row",
+      flexWrap: "wrap",
+      marginTop: 1,
+    },
+    statusFields.flatMap((field, index) => {
+        const nodes: React.ReactNode[] = [
+          React.createElement(
+            Text,
+            {
+              key: `status-field-label-${index}`,
+              color: "gray",
+            },
+            `${field.label}: `,
+          ),
+          React.createElement(
+            Text,
+            {
+              key: `status-field-value-${index}`,
+              color: "white",
+            },
+            field.value,
+          ),
+        ];
+
+        if (index < statusFields.length - 1) {
+          nodes.push(
+            React.createElement(
+              Text,
+              {
+                key: `status-separator-${index}`,
+                color: "gray",
+              },
+              " | ",
+            ),
+          );
+        }
+
+        return nodes;
+      }),
+  );
+}
+
+function createTodoBoardElement(state: TodoBoardState) {
+  return createWorkflowBoardElement(state);
 }
 
 export function renderTodoBoardToString(state: TodoBoardState, columns = 80): string {
@@ -928,12 +1088,19 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
     activeWorkflowStartedAt = Date.now();
   }
 
-  activeWorkflowState = {
+  const nextWorkflowState: TodoBoardState = {
     ...state,
     logs: state.logs ?? activeWorkflowLogs,
+    runtimeStatus: state.runtimeStatus
+      ? {
+          ...activeWorkflowState?.runtimeStatus,
+          ...state.runtimeStatus,
+        }
+      : activeWorkflowState?.runtimeStatus,
   };
-  activeWorkflowLogs = trimWorkflowLogs(activeWorkflowState.logs ?? []);
-  activeWorkflowRenderedArtifacts = activeWorkflowState.artifacts;
+  activeWorkflowState = nextWorkflowState;
+  activeWorkflowLogs = trimWorkflowLogs(nextWorkflowState.logs ?? []);
+  activeWorkflowRenderedArtifacts = nextWorkflowState.artifacts;
   ensureWorkflowTimers();
 
   await renderActiveWorkflowState(true);

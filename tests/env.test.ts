@@ -5,13 +5,18 @@ import os from "node:os";
 import path from "node:path";
 
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
+import type { TextGeneratorRuntime } from "../src/lib/types.js";
 import {
+  buildRuntimeStatus,
+  buildTodoBoardLines,
   createArtifactItemsForStage,
   createStepItemsForLifecycle,
   estimateRenderedRows,
+  extractRuntimeStatusPatch,
   formatDeepAgentsTraceEntry,
   formatTodoHeader,
   formatWorkflowStageLine,
+  mergeRuntimeStatus,
   renderArtifactStatus,
   formatElapsedTime,
   resolveDeepagentsStreamModes,
@@ -199,7 +204,21 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
       "[12:34:57] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）",
       "[12:34:58] [CHECK] 正在校验计划阶段产出物。",
     ],
-  }, 120));
+    runtimeStatus: {
+      modelName: "gpt-5.4",
+      effort: "high",
+      usage: {
+        inputTokens: 900,
+        outputTokens: 334,
+        totalTokens: 1_234,
+        reasoningTokens: 120,
+        cachedInputTokens: 256,
+      },
+      contextWindowUsedTokens: 900,
+      sessionId: "12345678-90ab-cdef-1234-567890abcdef",
+      phase: "plan",
+    },
+  }, 220));
 
   assert.match(output, /计划阶段/);
   assert.match(output, /计划阶段 -> 生成阶段 -> 完成阶段/);
@@ -221,6 +240,10 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /\[12:34:57\] \[READ\]/);
   assert.match(output, /读取文件：\.deepagents\/source-prd\.md（1-1000行）/);
   assert.match(output, /\[12:34:58\] \[CHECK\] 正在校验计划阶段产出物/);
+  assert.match(output, /model: gpt-5\.4 \| effort: high \| token used: 978 total \(.+\) \| context used: 900/);
+  assert.match(output, /reasoning 120/);
+  assert.match(output, /cache 256/);
+  assert.match(output, /session id: 12345678-90ab-cdef-1234-567890abcdef \| phase: plan/);
 });
 
 test("renderTodoBoardToString splits execution logs and repair progress into two sections", () => {
@@ -287,6 +310,49 @@ test("renderTodoBoardToString can render the completion stage", () => {
   assert.match(output, /生成阶段产物已通过宿主校验/);
   assert.match(output, /工作流状态已切换为 complete/);
   assert.doesNotMatch(output, /\[待生成\]/);
+});
+
+test("buildTodoBoardLines appends a horizontal runtime bar for plain-text rendering", () => {
+  const lines = buildTodoBoardLines({
+    stage: "生成阶段",
+    sessionId: "plain-session-123",
+    todos: [
+      { content: "读取已验证的 planSpec 与 starter", status: "completed" },
+    ],
+    artifacts: createArtifactItemsForStage("生成阶段", "validating"),
+    narrative: "正在验证生成阶段交付物。",
+    runtimeStatus: {
+      modelName: "gpt-5.4-mini",
+      effort: "medium",
+      usage: {
+        inputTokens: 2_048,
+        outputTokens: 512,
+        totalTokens: 2_560,
+      },
+      contextWindowUsedTokens: 2_048,
+      sessionId: "plain-session-123",
+      phase: "generate",
+    },
+  });
+
+  assert.deepEqual(lines.slice(-2), [
+    "",
+    "model: gpt-5.4-mini | effort: medium | token used: 2.5K total (in 2K, out 512) | context used: 2K | session id: plain-session-123 | phase: generate",
+  ]);
+});
+
+test("renderTodoBoardToString falls back to n/a for missing runtime status values", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "计划阶段",
+    todos: [
+      { content: "读取 PRD 与模板上下文", status: "in_progress" },
+    ],
+    artifacts: [],
+    narrative: "等待模型开始处理。",
+    runtimeStatus: {},
+  }, 120));
+
+  assert.match(output, /model: n\/a \| effort: n\/a \| token used: n\/a \| context used: n\/a \| session id: n\/a \| phase: n\/a/);
 });
 
 test("formatDeepAgentsTraceEntry renders readable tool call details without console board text", () => {
@@ -392,6 +458,108 @@ test("summarizeDeepAgentsAction exposes message tool-call intent", () => {
     ]),
     "准备写入文件：app/page.tsx",
   );
+});
+
+test("extractRuntimeStatusPatch reads model and usage metadata from stream payload", () => {
+  const patch = extractRuntimeStatusPatch({
+    message: {
+      response_metadata: {
+        model_name: "gpt-5.4-actual",
+      },
+      usage_metadata: {
+        input_tokens: 120,
+        output_tokens: 30,
+        total_tokens: 150,
+        output_token_details: {
+          reasoning: 12,
+        },
+        input_token_details: {
+          cache_read: 40,
+        },
+      },
+    },
+  });
+
+  assert.equal(patch.modelName, "gpt-5.4-actual");
+  assert.equal(patch.contextWindowUsedTokens, 120);
+  assert.deepEqual(patch.usage, {
+    inputTokens: 120,
+    outputTokens: 30,
+    totalTokens: 150,
+    reasoningTokens: 12,
+    cachedInputTokens: 40,
+  });
+});
+
+test("mergeRuntimeStatus accumulates usage across multiple chunks", () => {
+  const runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases"> = {
+    sessionId: "runtime-session-1",
+    templatePhases: {
+      plan: { effort: "high" },
+      planRepair: { effort: "high" },
+      generate: { effort: "medium" },
+      generateRepair: { effort: "low" },
+    },
+  };
+
+  const merged = mergeRuntimeStatus(
+    mergeRuntimeStatus(
+      buildRuntimeStatus({
+        runtime,
+        phase: "plan",
+        fallbackModelName: "openai:gpt-4.1-mini",
+      }),
+      extractRuntimeStatusPatch({
+        usage_metadata: {
+          input_tokens: 100,
+          output_tokens: 20,
+          total_tokens: 120,
+        },
+      }),
+    ),
+    extractRuntimeStatusPatch({
+      response_metadata: {
+        model_name: "gpt-5.4-stream",
+      },
+      usage_metadata: {
+        input_tokens: 50,
+        output_tokens: 10,
+        total_tokens: 60,
+        output_token_details: {
+          reasoning: 8,
+        },
+        input_token_details: {
+          cache_read: 12,
+        },
+      },
+    }),
+  );
+
+  assert.equal(merged.modelName, "gpt-5.4-stream");
+  assert.equal(merged.contextWindowUsedTokens, 50);
+  assert.deepEqual(merged.usage, {
+    inputTokens: 150,
+    outputTokens: 30,
+    totalTokens: 180,
+    reasoningTokens: 8,
+    cachedInputTokens: 12,
+  });
+});
+
+test("buildRuntimeStatus maps effort to the active phase", () => {
+  const runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases"> = {
+    sessionId: "runtime-session-2",
+    templatePhases: {
+      plan: { effort: "high" },
+      planRepair: { effort: "low" },
+      generate: { effort: "medium" },
+      generateRepair: { effort: "high" },
+    },
+  };
+
+  assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).effort, "low");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).effort, "medium");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "complete" }).effort, undefined);
 });
 
 test("withActivityTimeout keeps extending while activity continues", async () => {

@@ -1259,6 +1259,10 @@ async function showCompletedWorkflowBoard(sessionId: string, outputDirectory: st
     narrative: "全部阶段已完成。",
     sessionId,
     outputDirectory,
+    runtimeStatus: {
+      phase: "complete",
+      effort: undefined,
+    },
   });
 }
 

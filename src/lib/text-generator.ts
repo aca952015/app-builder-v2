@@ -17,7 +17,18 @@ import {
   type TodoStatus,
   updateWorkflowBoard,
 } from "./terminal-ui.js";
-import { GeneratedProject, NormalizedSpec, PlanResult, TemplatePhaseEffort, TextGenerator, TextGeneratorRuntime } from "./types.js";
+import {
+  GeneratedProject,
+  NormalizedSpec,
+  PlanResult,
+  RuntimeStatus,
+  RuntimeStatusPhase,
+  RuntimeUsageSummary,
+  TemplatePhaseEffort,
+  TemplatePhaseMap,
+  TextGenerator,
+  TextGeneratorRuntime,
+} from "./types.js";
 
 export {
   buildTodoBoardLines,
@@ -269,6 +280,252 @@ export function resolveDeepagentsStreamModes(
   return Array.from(new Set(modes));
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function readStringField(record: Record<string, unknown> | null, keys: string[]): string | undefined {
+  if (!record) {
+    return undefined;
+  }
+
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+}
+
+function readNumberField(record: Record<string, unknown> | null, keys: string[]): number | undefined {
+  if (!record) {
+    return undefined;
+  }
+
+  for (const key of keys) {
+    const value = record[key];
+    if (isFiniteNumber(value)) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function readObjectField(record: Record<string, unknown> | null, keys: string[]): Record<string, unknown> | null {
+  if (!record) {
+    return null;
+  }
+
+  for (const key of keys) {
+    const value = record[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  }
+
+  return null;
+}
+
+function hasRuntimeUsageSummary(usage?: RuntimeUsageSummary): usage is RuntimeUsageSummary {
+  return Boolean(
+    usage &&
+      (isFiniteNumber(usage.inputTokens) ||
+        isFiniteNumber(usage.outputTokens) ||
+        isFiniteNumber(usage.totalTokens) ||
+        isFiniteNumber(usage.reasoningTokens) ||
+        isFiniteNumber(usage.cachedInputTokens)),
+  );
+}
+
+function mergeRuntimeUsageSummary(
+  current?: RuntimeUsageSummary,
+  patch?: RuntimeUsageSummary,
+): RuntimeUsageSummary | undefined {
+  const mergeValue = (left?: number, right?: number): number | undefined => {
+    if (!isFiniteNumber(right)) {
+      return left;
+    }
+
+    return (left ?? 0) + right;
+  };
+
+  const merged: RuntimeUsageSummary = {
+    inputTokens: mergeValue(current?.inputTokens, patch?.inputTokens),
+    outputTokens: mergeValue(current?.outputTokens, patch?.outputTokens),
+    totalTokens: mergeValue(current?.totalTokens, patch?.totalTokens),
+    reasoningTokens: mergeValue(current?.reasoningTokens, patch?.reasoningTokens),
+    cachedInputTokens: mergeValue(current?.cachedInputTokens, patch?.cachedInputTokens),
+  };
+
+  return hasRuntimeUsageSummary(merged) ? merged : undefined;
+}
+
+function parseRuntimeUsageSummary(value: unknown): RuntimeUsageSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const inputDetails = readObjectField(record, ["input_token_details", "inputTokenDetails"]);
+  const outputDetails = readObjectField(record, ["output_token_details", "outputTokenDetails"]);
+
+  const usage: RuntimeUsageSummary = {
+    inputTokens: readNumberField(record, ["input_tokens", "inputTokens"]),
+    outputTokens: readNumberField(record, ["output_tokens", "outputTokens"]),
+    totalTokens: readNumberField(record, ["total_tokens", "totalTokens"]),
+    reasoningTokens:
+      readNumberField(record, ["reasoning_tokens", "reasoningTokens"]) ??
+      readNumberField(outputDetails, ["reasoning", "reasoning_tokens", "reasoningTokens"]),
+    cachedInputTokens:
+      readNumberField(record, ["cached_input_tokens", "cachedInputTokens"]) ??
+      readNumberField(inputDetails, ["cache_read", "cacheRead", "cached_tokens", "cachedTokens"]),
+  };
+
+  return hasRuntimeUsageSummary(usage) ? usage : null;
+}
+
+function collectRuntimeUsageSummaries(value: unknown, seen = new Set<object>()): RuntimeUsageSummary[] {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  if (seen.has(value as object)) {
+    return [];
+  }
+  seen.add(value as object);
+
+  const parsed = parseRuntimeUsageSummary(value);
+  const nestedValues = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+
+  return [
+    ...(parsed ? [parsed] : []),
+    ...nestedValues.flatMap((nested) => collectRuntimeUsageSummaries(nested, seen)),
+  ];
+}
+
+function parseRuntimeModelName(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const responseMetadata = readObjectField(record, ["response_metadata", "responseMetadata"]);
+
+  return (
+    readStringField(responseMetadata, ["model_name", "modelName"]) ??
+    readStringField(record, ["model_name", "modelName", "model"])
+  );
+}
+
+function collectRuntimeModelNames(value: unknown, seen = new Set<object>()): string[] {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  if (seen.has(value as object)) {
+    return [];
+  }
+  seen.add(value as object);
+
+  const modelName = parseRuntimeModelName(value);
+  const nestedValues = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
+
+  return [
+    ...(modelName ? [modelName] : []),
+    ...nestedValues.flatMap((nested) => collectRuntimeModelNames(nested, seen)),
+  ];
+}
+
+function resolveRuntimeModelFallback(fallbackModelName?: string): string {
+  return fallbackModelName?.trim() || process.env.APP_BUILDER_MODEL?.trim() || "openai:gpt-4.1-mini";
+}
+
+function runtimePhaseToWorkflowStage(phase: RuntimeStatusPhase): "计划阶段" | "生成阶段" {
+  return phase === "plan" || phase === "planRepair" || phase === "plan_repair" ? "计划阶段" : "生成阶段";
+}
+
+export function resolveRuntimeStatusPhase(
+  runtime: Pick<TextGeneratorRuntime, "planAttempt" | "generateAttempt">,
+): RuntimeStatusPhase {
+  if (runtime.generateAttempt !== undefined) {
+    return runtime.generateAttempt > 1 ? "generateRepair" : "generate";
+  }
+
+  return (runtime.planAttempt ?? 1) > 1 ? "planRepair" : "plan";
+}
+
+export function resolveRuntimeStatusEffort(
+  templatePhases: TemplatePhaseMap,
+  phase?: RuntimeStatusPhase,
+): TemplatePhaseEffort | undefined {
+  switch (phase) {
+    case "plan":
+      return templatePhases.plan?.effort;
+    case "planRepair":
+    case "plan_repair":
+      return templatePhases.planRepair?.effort;
+    case "generate":
+      return templatePhases.generate?.effort;
+    case "generateRepair":
+    case "generate_repair":
+      return templatePhases.generateRepair?.effort;
+    default:
+      return undefined;
+  }
+}
+
+export function buildRuntimeStatus(options: {
+  runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases">;
+  phase: RuntimeStatusPhase;
+  modelName?: string | undefined;
+  usage?: RuntimeUsageSummary | undefined;
+  fallbackModelName?: string | undefined;
+}): RuntimeStatus {
+  const usage = hasRuntimeUsageSummary(options.usage) ? options.usage : undefined;
+
+  return {
+    modelName: options.modelName ?? resolveRuntimeModelFallback(options.fallbackModelName),
+    effort: resolveRuntimeStatusEffort(options.runtime.templatePhases, options.phase),
+    sessionId: options.runtime.sessionId,
+    phase: options.phase,
+    ...(usage ? { usage } : {}),
+  };
+}
+
+export function mergeRuntimeStatus(current: RuntimeStatus, patch: Partial<RuntimeStatus>): RuntimeStatus {
+  const usage = mergeRuntimeUsageSummary(current.usage, patch.usage);
+
+  return {
+    ...current,
+    ...(patch.modelName ? { modelName: patch.modelName } : {}),
+    ...(patch.effort ? { effort: patch.effort } : {}),
+    ...(isFiniteNumber(patch.contextWindowUsedTokens) ? { contextWindowUsedTokens: patch.contextWindowUsedTokens } : {}),
+    ...(patch.sessionId ? { sessionId: patch.sessionId } : {}),
+    ...(patch.phase ? { phase: patch.phase } : {}),
+    ...(usage ? { usage } : current.usage ? { usage: current.usage } : {}),
+  };
+}
+
+export function extractRuntimeStatusPatch(payload: unknown): Partial<RuntimeStatus> {
+  const usageSummaries = collectRuntimeUsageSummaries(payload);
+  const usage = usageSummaries.reduce<RuntimeUsageSummary | undefined>(
+    (current, item) => mergeRuntimeUsageSummary(current, item),
+    undefined,
+  );
+  const latestUsage = usageSummaries.at(-1);
+  const modelNames = collectRuntimeModelNames(payload);
+  const modelName = modelNames.at(-1);
+
+  return {
+    ...(modelName ? { modelName } : {}),
+    ...(isFiniteNumber(latestUsage?.inputTokens) ? { contextWindowUsedTokens: latestUsage.inputTokens } : {}),
+    ...(usage ? { usage } : {}),
+  };
+}
+
 function extractMessageText(value: unknown): string | null {
   if (typeof value === "string") {
     return value;
@@ -308,6 +565,7 @@ type DeepAgentsTraceState = {
   todos: TodoItem[];
   lastNarrative: string;
   logFilePath?: string;
+  runtimeStatus: RuntimeStatus;
 };
 
 type ToolCallDetail = {
@@ -745,6 +1003,8 @@ async function updateTodoBoard(
   fallbackSummary: string,
   runtime?: TextGeneratorRuntime,
 ): Promise<void> {
+  trace.runtimeStatus = mergeRuntimeStatus(trace.runtimeStatus, extractRuntimeStatusPatch(payload));
+
   const extractedTodos = extractTodosFromPayload(payload);
   if (extractedTodos && extractedTodos.length > 0) {
     trace.todos = extractedTodos;
@@ -765,6 +1025,7 @@ async function updateTodoBoard(
     narrative: trace.lastNarrative,
     ...(runtime ? { sessionId: runtime.sessionId } : {}),
     ...(runtime ? { outputDirectory: runtime.outputDirectory } : {}),
+    runtimeStatus: trace.runtimeStatus,
   });
 }
 
@@ -900,13 +1161,21 @@ async function streamDeepAgentWithLogs(
   },
   state: unknown,
   runtime: TextGeneratorRuntime,
+  runtimePhase: RuntimeStatusPhase,
+  fallbackModelName?: string,
   signalActivity?: () => void,
 ): Promise<unknown> {
+  const workflowStage = runtimePhaseToWorkflowStage(runtimePhase);
   const trace: DeepAgentsTraceState = {
-    stage: runtime.generateAttempt ? "生成阶段" : "计划阶段",
-    todos: defaultTodosForStage(runtime.generateAttempt ? "生成阶段" : "计划阶段"),
+    stage: workflowStage,
+    todos: defaultTodosForStage(workflowStage),
     lastNarrative: "等待模型开始处理。",
     logFilePath: runtime.deepagentsLogPath,
+    runtimeStatus: buildRuntimeStatus({
+      runtime,
+      phase: runtimePhase,
+      fallbackModelName,
+    }),
   };
   await appendWorkflowLog(`[lifecycle] 进入${trace.stage}，开始流式生成。`);
   await updateWorkflowBoard({
@@ -916,6 +1185,7 @@ async function streamDeepAgentWithLogs(
     narrative: trace.lastNarrative,
     sessionId: runtime.sessionId,
     outputDirectory: runtime.outputDirectory,
+    runtimeStatus: trace.runtimeStatus,
   });
 
   const stream = await agent.stream(state, {
@@ -952,6 +1222,7 @@ async function streamDeepAgentWithLogs(
     narrative: trace.lastNarrative,
     sessionId: runtime.sessionId,
     outputDirectory: runtime.outputDirectory,
+    runtimeStatus: trace.runtimeStatus,
   });
 
   return lastValuesChunk;
@@ -1037,7 +1308,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
     };
 
     const result = await withActivityTimeout(
-      (signalActivity) => streamDeepAgentWithLogs(agent as any, state, runtime, signalActivity),
+      (signalActivity) => streamDeepAgentWithLogs(agent as any, state, runtime, phaseName, this.model, signalActivity),
       DEEPAGENTS_IDLE_TIMEOUT_MS,
       options.timeoutLabel,
     );
