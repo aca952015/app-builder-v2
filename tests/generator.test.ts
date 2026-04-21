@@ -1542,6 +1542,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     });
 
     assert.ok(result.files.includes("package.json"));
+    assert.ok(result.files.includes("prisma.config.ts"));
     assert.ok(result.files.includes("prisma/schema.prisma"));
     assert.ok(result.files.includes("app-builder-report.md"));
     assert.ok(result.files.includes("generated/marker.txt"));
@@ -1551,6 +1552,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     const npmrc = await readFile(path.join(result.outputDirectory, ".npmrc"), "utf8");
     const gitignore = await readFile(path.join(result.outputDirectory, ".gitignore"), "utf8");
     const envExample = await readFile(path.join(result.outputDirectory, ".env.example"), "utf8");
+    const prismaConfig = await readFile(path.join(result.outputDirectory, "prisma.config.ts"), "utf8");
     const schema = await readFile(path.join(result.outputDirectory, "prisma/schema.prisma"), "utf8");
     const seed = await readFile(path.join(result.outputDirectory, "prisma/seed.ts"), "utf8");
     const sidebarMenu = JSON.parse(
@@ -1626,8 +1628,12 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(packageJson, /"@tailwindcss\/postcss"/);
     assert.match(npmrc, /workspaces=false/);
     assert.match(gitignore, /node_modules/);
-    assert.match(envExample, /file:\.\/dev\.db/);
+    assert.match(envExample, /file:\.\/prisma\/dev\.db/);
+    assert.match(prismaConfig, /schema: "prisma\/schema\.prisma"/);
+    assert.match(prismaConfig, /const defaultDatabaseUrl = "file:\.\/prisma\/dev\.db"/);
+    assert.match(prismaConfig, /process\.env\.DATABASE_URL \?\? defaultDatabaseUrl/);
     assert.match(schema, /provider = "sqlite"/);
+    assert.doesNotMatch(schema, /url\s*=\s*env\("DATABASE_URL"\)/);
     assert.match(seed, /demo@example\.com/);
     assert.equal(sidebarMenu.length > 0, true);
     assert.equal(sidebarMenu.some((item) => item.label === "Workspace"), true);
@@ -2082,6 +2088,7 @@ test("full-stack template starter copies scaffold files into the output root", a
     assert.equal(template.phases.generate.effort, "medium");
     assert.equal(template.phases.generateRepair.effort, "high");
     assert.ok(copied.includes("package.json"));
+    assert.ok(copied.includes("prisma.config.ts"));
     assert.ok(copied.includes("app/layout.tsx"));
     assert.ok(copied.includes("lib/session.ts"));
     assert.ok(copied.includes("prisma/schema.prisma"));
@@ -2091,6 +2098,7 @@ test("full-stack template starter copies scaffold files into the output root", a
     const starterPackage = await readFile(path.join(tempRoot, "package.json"), "utf8");
     const starterLayout = await readFile(path.join(tempRoot, "app/layout.tsx"), "utf8");
     const starterEnv = await readFile(path.join(tempRoot, ".env.example"), "utf8");
+    const starterPrismaConfig = await readFile(path.join(tempRoot, "prisma.config.ts"), "utf8");
     const starterSchema = await readFile(path.join(tempRoot, "prisma/schema.prisma"), "utf8");
     const starterMenu = JSON.parse(
       await readFile(path.join(tempRoot, "config/sidebar-menu.json"), "utf8"),
@@ -2100,8 +2108,11 @@ test("full-stack template starter copies scaffold files into the output root", a
     assert.match(starterPackage, /"db:init"/);
     assert.match(starterPackage, /"@tailwindcss\/postcss"/);
     assert.match(starterLayout, /Generated App/);
-    assert.match(starterEnv, /file:\.\/dev\.db/);
+    assert.match(starterEnv, /file:\.\/prisma\/dev\.db/);
+    assert.match(starterPrismaConfig, /defineConfig/);
+    assert.match(starterPrismaConfig, /file:\.\/prisma\/dev\.db/);
     assert.match(starterSchema, /provider = "sqlite"/);
+    assert.doesNotMatch(starterSchema, /url\s*=\s*env\("DATABASE_URL"\)/);
     assert.equal(Array.isArray(starterMenu), true);
     assert.equal(starterMenu.some((item) => item.label === "Dashboard"), true);
   } finally {
@@ -2161,6 +2172,7 @@ test("generated app architecture reference matches the TailAdmin starter skeleto
   assert.match(architectureSource, /app\/\(full-width-pages\)\/login\/page\.tsx/);
   assert.match(architectureSource, /layout\/AdminShell\.tsx/);
   assert.match(architectureSource, /config\/sidebar-menu\.json/);
+  assert.match(architectureSource, /prisma\.config\.ts/);
   assert.match(architectureSource, /SQLite/);
   assert.match(architectureSource, /TailAdmin/);
   assert.match(architectureSource, /route groups/);
@@ -2275,6 +2287,7 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /`\/\.deepagents\/plan-spec\.json`/);
   assert.match(generatePromptSource, /`\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /持久化、鉴权或启动契约/);
+  assert.match(generatePromptSource, /Prisma 配置、schema、seed、脚本/);
   assert.match(generatePromptSource, /schema、seed、脚本、认证\/会话和默认入口数据/);
   assert.match(generatePromptSource, /按输入里的 `template\.runtimeValidation` 执行运行验证/);
   assert.match(generatePromptSource, /把 `\/app-builder-report\.md` 改成 `\/app\/app-builder-report\.md`/);
@@ -2292,6 +2305,7 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/generation-validation\.json`/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/runtime-validation\.log`/);
   assert.match(generateRepairPromptSource, /持久化、鉴权或启动契约被局部改坏/);
+  assert.match(generateRepairPromptSource, /Prisma 配置、schema、seed、脚本/);
   assert.match(generateRepairPromptSource, /schema、seed、脚本、认证\/会话和默认入口数据/);
   assert.match(generateRepairPromptSource, /`\/app-builder-report\.md`/);
 });

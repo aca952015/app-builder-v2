@@ -79,6 +79,7 @@ prisma/
   seed.ts
 
 README.md
+prisma.config.ts
 package.json
 next.config.ts
 postcss.config.js
@@ -214,10 +215,18 @@ app-builder-report.md
 - Prisma Client 单例出口
 - 开发环境通过全局复用避免热更新时重复实例化
 
+### `prisma.config.ts`
+
+- Prisma CLI 的静态配置入口
+- 负责声明 schema 路径，并把 datasource URL 收敛到配置层
+- starter 默认把 `DATABASE_URL` 解析为本地 SQLite：`file:./prisma/dev.db`
+- 如果未来需要切换默认数据库接线，优先先在这里调整，而不是把连接 URL 再散落回 `schema.prisma`
+
 ### `prisma/schema.prisma`
 
 - 当前 starter 使用 SQLite
-- datasource 通过 `.env.example` 中的 `DATABASE_URL="file:./dev.db"` 指向本地 SQLite 文件
+- datasource provider 保留在 `schema.prisma` 中，连接 URL 由根目录 `prisma.config.ts` 提供
+- `.env.example` 显式提供 `DATABASE_URL="file:./prisma/dev.db"`，与 starter 默认配置保持一致
 - 当前 starter 只通过 Prisma 访问 SQLite，不直接使用原生 sqlite 驱动；因此依赖里不需要额外安装 `sqlite3`、`better-sqlite3` 之类包
 - 预置 `User` 模型：
   - `id`
@@ -249,6 +258,7 @@ app-builder-report.md
 - 在现有 TailAdmin 卡片、表格、表单、间距和主题类之上扩展业务界面
 - 保留 Prisma + SQLite + session 基础设施，按 `planSpec` 扩展业务模型和 API
 - 业务 API 的持久化、查询、关联读取和事务逻辑默认使用 Prisma 表达，并复用 `lib/prisma.ts` 单例出口，而不是额外引入新的数据访问栈
+- 如果改动数据库接线或默认连接方式，要把 `prisma.config.ts`、`prisma/schema.prisma`、`.env.example` 与 seed/脚本一起保持一致
 - 把占位 dashboard、settings、登录文案替换为业务内容时，优先复用现有页面骨架
 
 ## 生成阶段不应做的事

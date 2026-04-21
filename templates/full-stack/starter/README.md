@@ -11,7 +11,9 @@ fills in product-specific content.
 4. Run `pnpm typecheck`
 5. Run `pnpm dev`
 
-The default local database is SQLite at `prisma/dev.db`.
+Prisma is configured through `prisma.config.ts`. The starter defaults
+`DATABASE_URL` to local SQLite at `prisma/dev.db`, and `.env.example`
+mirrors that default explicitly.
 
 ## UI framework
 
