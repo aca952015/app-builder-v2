@@ -9,7 +9,7 @@ export default async function AdminLayout({
 }) {
   const user = await requireUser();
 
-  async function logoutAction(_formData: FormData) {
+  async function logoutAction() {
     "use server";
     await logout();
   }

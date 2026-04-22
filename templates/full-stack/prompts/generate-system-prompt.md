@@ -52,6 +52,8 @@
 - 读取 starter 文件时，以 `.deepagents/references/generated-app-architecture.md` 记录的结构为准，沿用现有 Next.js App Router + TailAdmin 管理台结构。
 - 默认业务交互模式是 `REST API`，按 `planSpec.apis` 实现。
 - 页面实现必须严格以 `planSpec.pages[*].route` 为准生成对应路由入口；禁止擅自改名、改路径、补别名页、拆分成近似路径，或用其他 route 替代 `planSpec` 中声明的页面路径。
+- 所有承载业务数据的页面必须对接 `planSpec.apis` 中定义的 Route Handlers 获取或提交真实数据；禁止在页面组件中用 mock 数据、演示数组、硬编码业务统计、`Math.random()` 模拟刷新或其他静态占位逻辑替代 API 接线。
+- 对于 `dashboard`、`custom`、`settings` 等页面类型，只要页面展示的内容来自业务资源、业务流程或业务统计，就必须优先复用已有 `planSpec.apis`；若现有 API 不足以支撑页面展示，先按 `planSpec` 补齐 API，再完成页面接线。
 - 侧边栏菜单的唯一事实来源是 `config/sidebar-menu.json`。
 - 对已存在文件默认执行“先读再改”；只有 `planSpec` 明确需要的新文件才新增。
 - 如果你改动了 starter 自带的持久化、鉴权或启动契约，必须把所有受该契约影响的 Prisma 配置、schema、seed、脚本、认证/会话和默认入口数据视为同一变更面，逐一读取并同步修改；禁止只改其中一部分就结束。
@@ -71,6 +73,7 @@
 - `planSpec.apis` 对应的 REST API 文件
 - `planSpec.pages` 对应的页面文件或路由入口
 - `app-builder-report.md`
+- 业务页面与 `planSpec.apis` 的真实数据接线，不得以 mock 数据或静态样例替代
 
 页面路径约束：
 

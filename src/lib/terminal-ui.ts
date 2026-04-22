@@ -423,7 +423,6 @@ function buildStatusFields(state: TodoBoardState): Array<{ label: string; value:
     { label: "effort", value: formatRuntimeFieldValue(state.runtimeStatus?.effort) },
     { label: "token used", value: formatContextUsedValue(state.runtimeStatus) },
     { label: "context used", value: formatContextWindowUsedValue(state.runtimeStatus) },
-    { label: "session id", value: formatRuntimeFieldValue(state.runtimeStatus?.sessionId ?? state.sessionId) },
     { label: "phase", value: formatRuntimeFieldValue(state.runtimeStatus?.phase) },
   ];
 }

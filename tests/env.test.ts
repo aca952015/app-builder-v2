@@ -243,7 +243,7 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /model: gpt-5\.4 \| effort: high \| token used: 978 total \(.+\) \| context used: 900/);
   assert.match(output, /reasoning 120/);
   assert.match(output, /cache 256/);
-  assert.match(output, /session id: 12345678-90ab-cdef-1234-567890abcdef \| phase: plan/);
+  assert.match(output, /context used: 900 \| phase: plan/);
 });
 
 test("renderTodoBoardToString splits execution logs and repair progress into two sections", () => {
@@ -337,7 +337,7 @@ test("buildTodoBoardLines appends a horizontal runtime bar for plain-text render
 
   assert.deepEqual(lines.slice(-2), [
     "",
-    "model: gpt-5.4-mini | effort: medium | token used: 2.5K total (in 2K, out 512) | context used: 2K | session id: plain-session-123 | phase: generate",
+    "model: gpt-5.4-mini | effort: medium | token used: 2.5K total (in 2K, out 512) | context used: 2K | phase: generate",
   ]);
 });
 
@@ -352,7 +352,7 @@ test("renderTodoBoardToString falls back to n/a for missing runtime status value
     runtimeStatus: {},
   }, 120));
 
-  assert.match(output, /model: n\/a \| effort: n\/a \| token used: n\/a \| context used: n\/a \| session id: n\/a \| phase: n\/a/);
+  assert.match(output, /model: n\/a \| effort: n\/a \| token used: n\/a \| context used: n\/a \| phase: n\/a/);
 });
 
 test("formatDeepAgentsTraceEntry renders readable tool call details without console board text", () => {

@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function NotFoundPage() {
   return (
     <div className="min-h-screen grid place-items-center bg-gray-50 px-6 dark:bg-gray-900">
@@ -10,12 +12,12 @@ export default function NotFoundPage() {
           The TailAdmin starter could not find the requested route. Generated pages should keep the existing
           admin or full-width route grouping.
         </p>
-        <a
+        <Link
           href="/"
           className="mt-6 inline-flex items-center justify-center rounded-lg bg-brand-500 px-5 py-3 text-sm font-medium text-white hover:bg-brand-600"
         >
           Return to dashboard
-        </a>
+        </Link>
       </div>
     </div>
   );

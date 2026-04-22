@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { routeToAdminPagePath, routeToPageFileCandidates } from "../src/lib/app-router.js";
 import { type PlanSpec } from "../src/lib/plan-spec.js";
-import { generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
+import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
 import { buildPlanProjectPayload, buildPlanRepairPayload } from "../src/lib/text-generator.js";
 import { copyStarterScaffold, loadTemplatePack } from "../src/lib/template-pack.js";
 import { GeneratedAppValidator, NormalizedSpec, TextGenerator, TextGeneratorRuntime } from "../src/lib/types.js";
@@ -376,6 +376,20 @@ test("resolveSpawnCommand finds Windows command shims through PATHEXT", async (c
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("filterRedundantValidationDetailLines removes validation detail already present in reasons", () => {
+  const reasons = [
+    "生成阶段运行验证失败：pnpm typecheck 未通过。退出码 2。摘要：app/(admin)/page.tsx(24,5): error TS2687。详见 .deepagents/runtime-validation.log。",
+  ];
+
+  assert.deepEqual(
+    filterRedundantValidationDetailLines(
+      "退出码 2。摘要：app/(admin)/page.tsx(24,5): error TS2687。\n补充上下文：Dashboard 类型冲突。",
+      reasons,
+    ),
+    ["补充上下文：Dashboard 类型冲突。"],
+  );
 });
 
 test("routeToPageFileCandidates normalizes common dynamic route syntaxes to Next App Router paths", () => {
@@ -2292,6 +2306,9 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /按输入里的 `template\.runtimeValidation` 执行运行验证/);
   assert.match(generatePromptSource, /把 `\/app-builder-report\.md` 改成 `\/app\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /页面实现必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
+  assert.match(generatePromptSource, /所有承载业务数据的页面必须对接 `planSpec\.apis` 中定义的 Route Handlers/);
+  assert.match(generatePromptSource, /禁止在页面组件中用 mock 数据、演示数组、硬编码业务统计、`Math\.random\(\)` 模拟刷新/);
+  assert.match(generatePromptSource, /若现有 API 不足以支撑页面展示，先按 `planSpec` 补齐 API，再完成页面接线/);
   assert.match(planRepairPromptSource, /validationFailures/);
   assert.match(planRepairPromptSource, /`hardConstraints\.planSpecSchemaValidation`/);
   assert.match(planRepairPromptSource, /空字符串/);
@@ -2308,4 +2325,6 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generateRepairPromptSource, /Prisma 配置、schema、seed、脚本/);
   assert.match(generateRepairPromptSource, /schema、seed、脚本、认证\/会话和默认入口数据/);
   assert.match(generateRepairPromptSource, /`\/app-builder-report\.md`/);
+  assert.match(generateRepairPromptSource, /如果现有页面仍使用 mock 数据、演示数组、硬编码业务统计、`Math\.random\(\)` 模拟结果/);
+  assert.match(generateRepairPromptSource, /必须改为对接 `planSpec\.apis` 中对应的 Route Handlers/);
 });

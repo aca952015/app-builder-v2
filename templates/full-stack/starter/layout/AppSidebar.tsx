@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
-import { isSidebarGroupItem, sidebarMenuItems } from "@/config/sidebar-menu";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { isSidebarGroupItem, sidebarMenuItems } from "@/config/sidebar-menu";
 import { useSidebar } from "@/context/SidebarContext";
 
 function DashboardIcon() {
@@ -95,19 +95,16 @@ function renderSidebarIcon(icon: string) {
 export default function AppSidebar() {
   const pathname = usePathname();
   const { isExpanded, isMobileOpen, isHovered, setIsHovered } = useSidebar();
-  const [mounted, setMounted] = useState(false);
-  const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const [groupOverride, setGroupOverride] = useState<{
+    pathname: string;
+    openGroup: string | null;
+  } | null>(null);
 
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  useEffect(() => {
-    const activeGroup = sidebarMenuItems.find((item) =>
-      isSidebarGroupItem(item) ? item.children.some((child) => child.path === pathname) : false,
-    );
-    setOpenGroup(activeGroup && isSidebarGroupItem(activeGroup) ? activeGroup.label : null);
-  }, [pathname]);
+  const activeGroup = sidebarMenuItems.find((item) =>
+    isSidebarGroupItem(item) ? item.children.some((child) => child.path === pathname) : false,
+  );
+  const activeGroupLabel = activeGroup && isSidebarGroupItem(activeGroup) ? activeGroup.label : null;
+  const openGroup = groupOverride?.pathname === pathname ? groupOverride.openGroup : activeGroupLabel;
 
   const expanded = isExpanded || isHovered || isMobileOpen;
 
@@ -144,14 +141,19 @@ export default function AppSidebar() {
               <ul className="flex flex-col gap-4">
                 {sidebarMenuItems.map((item) => {
                   if (isSidebarGroupItem(item)) {
-                    const groupActive = mounted && item.children.some((child) => child.path === pathname);
+                    const groupActive = item.children.some((child) => child.path === pathname);
                     const groupOpen = expanded && openGroup === item.label;
 
                     return (
                       <li key={item.label}>
                         <button
                           type="button"
-                          onClick={() => setOpenGroup((current) => (current === item.label ? null : item.label))}
+                          onClick={() =>
+                            setGroupOverride({
+                              pathname,
+                              openGroup: openGroup === item.label ? null : item.label,
+                            })
+                          }
                           className={`menu-item group w-full ${groupActive ? "menu-item-active" : "menu-item-inactive"} ${
                             expanded ? "lg:justify-start" : "lg:justify-center"
                           }`}
@@ -170,7 +172,7 @@ export default function AppSidebar() {
                         {expanded && groupOpen && (
                           <ul className="mt-2 ml-11 space-y-1">
                             {item.children.map((child) => {
-                              const active = mounted && pathname === child.path;
+                              const active = pathname === child.path;
                               return (
                                 <li key={child.path}>
                                   <Link
@@ -191,7 +193,7 @@ export default function AppSidebar() {
                     );
                   }
 
-                  const active = mounted && pathname === item.path;
+                  const active = pathname === item.path;
                   return (
                     <li key={item.path}>
                       <Link

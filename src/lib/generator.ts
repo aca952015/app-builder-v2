@@ -1477,13 +1477,37 @@ function extractValidationDetailLines(detail: string, maxLines = 6): string[] {
     .slice(0, maxLines);
 }
 
-async function appendGenerationValidationStepDetails(steps: GenerationValidationStep[]): Promise<void> {
+function normalizeValidationDetailText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+export function filterRedundantValidationDetailLines(
+  detail: string,
+  reasons: string[],
+  maxLines = 6,
+): string[] {
+  const detailLines = extractValidationDetailLines(detail, maxLines);
+  if (detailLines.length === 0 || reasons.length === 0) {
+    return detailLines;
+  }
+
+  const normalizedReasons = reasons.map((reason) => normalizeValidationDetailText(reason));
+  return detailLines.filter((line) => {
+    const normalizedLine = normalizeValidationDetailText(line);
+    return !normalizedReasons.some((reason) => reason.includes(normalizedLine));
+  });
+}
+
+async function appendGenerationValidationStepDetails(
+  steps: GenerationValidationStep[],
+  reasons: string[] = [],
+): Promise<void> {
   const failedSteps = steps.filter((step) => !step.ok);
 
   for (const [index, step] of failedSteps.entries()) {
     await appendWorkflowLog(`[host] 待修复验证步骤 ${index + 1}/${failedSteps.length}: ${step.name} 未通过。`);
 
-    const detailLines = extractValidationDetailLines(step.detail);
+    const detailLines = filterRedundantValidationDetailLines(step.detail, reasons);
     for (const [detailIndex, line] of detailLines.entries()) {
       await appendWorkflowLog(
         `[host] 待修复验证内容 ${step.name} ${detailIndex + 1}/${detailLines.length}: ${line}`,
@@ -1825,7 +1849,7 @@ async function continueGenerateFlow(options: {
     generationRetryReasons = validation.reasons;
     await appendWorkflowLog(`[host] 生成阶段校验失败，待修复问题 ${validation.reasons.length} 条。`);
     await appendValidationFailureDetails(validation.reasons);
-    await appendGenerationValidationStepDetails(validation.steps);
+    await appendGenerationValidationStepDetails(validation.steps, validation.reasons);
   }
 
   const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "生成修复阶段");
@@ -1890,7 +1914,7 @@ async function continueGenerateFlow(options: {
       `[host] 生成修复轮次 ${existingRepairAttempts + repairIndex + 1} 仍未通过，剩余问题 ${validation.reasons.length} 条。`,
     );
     await appendValidationFailureDetails(validation.reasons);
-    await appendGenerationValidationStepDetails(validation.steps);
+    await appendGenerationValidationStepDetails(validation.steps, validation.reasons);
   }
 
   throw new Error(`Generation validation failed: ${generationRetryReasons.join(" | ")}`);
@@ -2065,7 +2089,7 @@ export async function validateSessionPhase(options: {
 
     await appendWorkflowLog("[host] validate 检测到生成阶段失败，恢复到生成修复阶段。");
     await appendValidationFailureDetails(reasons);
-    await appendGenerationValidationStepDetails(steps);
+    await appendGenerationValidationStepDetails(steps, reasons);
     try {
       await continueGenerateFlow({
         runtime,
@@ -2449,7 +2473,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         generationRetryReasons = validation.reasons;
         await appendWorkflowLog(`[host] 生成阶段校验失败，待修复问题 ${validation.reasons.length} 条。`);
         await appendValidationFailureDetails(validation.reasons);
-        await appendGenerationValidationStepDetails(validation.steps);
+        await appendGenerationValidationStepDetails(validation.steps, validation.reasons);
       }
     }
 
@@ -2505,7 +2529,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       generationRetryReasons = validation.reasons;
       await appendWorkflowLog(`[host] 生成修复轮次 ${repairIndex + 1} 仍未通过，剩余问题 ${validation.reasons.length} 条。`);
       await appendValidationFailureDetails(validation.reasons);
-      await appendGenerationValidationStepDetails(validation.steps);
+      await appendGenerationValidationStepDetails(validation.steps, validation.reasons);
     }
 
     if (generationRetryReasons.length > 0) {

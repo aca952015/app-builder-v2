@@ -11,7 +11,7 @@ type AppHeaderProps = {
 };
 
 export default function AppHeader({ userEmail, logoutAction }: AppHeaderProps) {
-  const [isApplicationMenuOpen, setApplicationMenuOpen] = useState(false);
+  const [isApplicationMenuOpen] = useState(false);
   const { isMobileOpen, toggleSidebar, toggleMobileSidebar } = useSidebar();
   const inputRef = useRef<HTMLInputElement>(null);
 

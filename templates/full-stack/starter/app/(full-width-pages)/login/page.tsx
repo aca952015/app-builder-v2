@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { authenticate } from "@/app/login/actions";
 
 export default function LoginPage() {
@@ -6,7 +8,7 @@ export default function LoginPage() {
       <div className="relative flex lg:flex-row w-full h-screen justify-center flex-col dark:bg-gray-900 sm:p-0">
         <div className="flex flex-col flex-1 w-full lg:w-1/2">
           <div className="w-full max-w-md pt-10 mx-auto mb-5">
-            <a
+            <Link
               href="/"
               className="inline-flex items-center text-sm text-gray-500 transition-colors hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
             >
@@ -15,7 +17,7 @@ export default function LoginPage() {
                 <path d="M16.667 10H3.33366" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
               Back to dashboard
-            </a>
+            </Link>
           </div>
 
           <div className="flex flex-col justify-center flex-1 w-full max-w-md mx-auto">
