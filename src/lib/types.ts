@@ -143,6 +143,8 @@ export type RuntimeStatus = {
   phase?: RuntimeStatusPhase | undefined;
 };
 
+export type StdoutMode = "dashboard" | "log";
+
 export type SessionValidationResult = {
   sessionId: string;
   phase: ValidationPhase;
@@ -293,6 +295,7 @@ export type GenerateAppOptions = {
   appNameOverride?: string;
   templateId?: string;
   force?: boolean;
+  stdoutMode?: StdoutMode;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
 };

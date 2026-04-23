@@ -18,6 +18,7 @@ import {
   closeWorkflowBoard,
   createArtifactItemsForStage,
   createStepItemsForLifecycle,
+  setWorkflowStdoutMode,
   updateWorkflowBoard,
 } from "./terminal-ui.js";
 import {
@@ -35,6 +36,7 @@ import {
   type TemplateRuntimeValidationStep,
   TextGenerator,
   TextGeneratorRuntime,
+  type StdoutMode,
   ValidationPhase,
   WorkflowPhase,
 } from "./types.js";
@@ -1994,33 +1996,50 @@ export async function validateSessionPhase(options: {
   sessionId: string;
   phase?: ValidationPhase;
   cwd?: string;
+  stdoutMode?: StdoutMode;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
 }): Promise<SessionValidationResult> {
-  const runtime = await createRuntimeForSession(options.sessionId, options.cwd);
-  const phase = await resolveValidationPhase(runtime, options.phase);
-  const validator = options.validator ?? new ShellGeneratedAppValidator();
+  setWorkflowStdoutMode(options.stdoutMode);
+  try {
+    const runtime = await createRuntimeForSession(options.sessionId, options.cwd);
+    const phase = await resolveValidationPhase(runtime, options.phase);
+    const validator = options.validator ?? new ShellGeneratedAppValidator();
 
-  if (phase === "plan") {
-    const validation = await collectPersistedPlanValidation(runtime);
-    await writePlanValidationResult(runtime.deepagentsPlanValidationPath, {
-      valid: validation.reasons.length === 0,
-      reasons: validation.reasons,
-      ...(validation.planSpec ? { planSpecVersion: validation.planSpec.version } : {}),
-    });
+    if (phase === "plan") {
+      const validation = await collectPersistedPlanValidation(runtime);
+      await writePlanValidationResult(runtime.deepagentsPlanValidationPath, {
+        valid: validation.reasons.length === 0,
+        reasons: validation.reasons,
+        ...(validation.planSpec ? { planSpecVersion: validation.planSpec.version } : {}),
+      });
 
-    if (validation.reasons.length > 0) {
-      const generator = requireSessionGenerator(options.generator);
-      await appendWorkflowLog("[host] validate 检测到计划阶段失败，恢复到计划修复阶段。");
-      try {
-        await continuePlanRepairFlow({
-          runtime,
-          generator,
-          validator,
-          initialRetryReasons: validation.reasons,
-        });
-      } finally {
-        await closeWorkflowBoard();
+      if (validation.reasons.length > 0) {
+        const generator = requireSessionGenerator(options.generator);
+        await appendWorkflowLog("[host] validate 检测到计划阶段失败，恢复到计划修复阶段。");
+        try {
+          await continuePlanRepairFlow({
+            runtime,
+            generator,
+            validator,
+            initialRetryReasons: validation.reasons,
+          });
+        } finally {
+          await closeWorkflowBoard();
+        }
+
+        return {
+          sessionId: runtime.sessionId,
+          phase,
+          outputDirectory: runtime.outputDirectory,
+          valid: true,
+          reasons: [],
+          steps: [],
+          validationPath: runtime.deepagentsPlanValidationPath,
+          runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
+          workflowPhase: "complete",
+          resumedFromPhase: "plan_repair",
+        };
       }
 
       return {
@@ -2032,75 +2051,61 @@ export async function validateSessionPhase(options: {
         steps: [],
         validationPath: runtime.deepagentsPlanValidationPath,
         runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
-        workflowPhase: "complete",
-        resumedFromPhase: "plan_repair",
+        workflowPhase: "plan",
       };
     }
 
-    return {
-      sessionId: runtime.sessionId,
-      phase,
-      outputDirectory: runtime.outputDirectory,
-      valid: true,
-      reasons: [],
-      steps: [],
-      validationPath: runtime.deepagentsPlanValidationPath,
-      runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
-      workflowPhase: "plan",
-    };
-  }
+    const planValidation = await collectPersistedPlanValidation(runtime);
+    const reasons = [...planValidation.reasons];
+    let steps: GenerationValidationStep[] = [];
 
-  const planValidation = await collectPersistedPlanValidation(runtime);
-  const reasons = [...planValidation.reasons];
-  let steps: GenerationValidationStep[] = [];
-
-  if (!planValidation.planSpec) {
-    reasons.push("生成阶段校验前置失败：artifacts.planSpec 不可用，无法继续验证生成交付物。");
-  }
-
-  if (reasons.length === 0 && planValidation.planSpec) {
-    const generationValidation = await collectPersistedGeneratedValidation(
-      runtime.outputDirectory,
-      runtime,
-      planValidation.planSpec,
-      validator,
-    );
-    reasons.push(...generationValidation.reasons);
-    steps = generationValidation.steps;
-  } else {
-    await fs.writeFile(
-      runtime.deepagentsRuntimeValidationLogPath,
-      "未执行运行命令验证：生成阶段前置计划产物校验未通过。\n",
-      "utf8",
-    );
-  }
-
-  await writeGenerationValidationResult(runtime.deepagentsGenerationValidationPath, {
-    valid: reasons.length === 0,
-    reasons,
-    steps,
-  });
-
-  if (reasons.length > 0) {
-    const generator = requireSessionGenerator(options.generator);
     if (!planValidation.planSpec) {
-      throw new Error(`Generation validation failed: ${reasons.join(" | ")}`);
+      reasons.push("生成阶段校验前置失败：artifacts.planSpec 不可用，无法继续验证生成交付物。");
     }
 
-    await appendWorkflowLog("[host] validate 检测到生成阶段失败，恢复到生成修复阶段。");
-    await appendValidationFailureDetails(reasons);
-    await appendGenerationValidationStepDetails(steps, reasons);
-    try {
-      await continueGenerateFlow({
+    if (reasons.length === 0 && planValidation.planSpec) {
+      const generationValidation = await collectPersistedGeneratedValidation(
+        runtime.outputDirectory,
         runtime,
-        generator,
+        planValidation.planSpec,
         validator,
-        approvedPlan: planValidation.planSpec,
-        initialRetryReasons: reasons,
-      });
-    } finally {
-      await closeWorkflowBoard();
+      );
+      reasons.push(...generationValidation.reasons);
+      steps = generationValidation.steps;
+    } else {
+      await fs.writeFile(
+        runtime.deepagentsRuntimeValidationLogPath,
+        "未执行运行命令验证：生成阶段前置计划产物校验未通过。\n",
+        "utf8",
+      );
     }
+
+    await writeGenerationValidationResult(runtime.deepagentsGenerationValidationPath, {
+      valid: reasons.length === 0,
+      reasons,
+      steps,
+    });
+
+    if (reasons.length > 0) {
+      const generator = requireSessionGenerator(options.generator);
+      if (!planValidation.planSpec) {
+        throw new Error(`Generation validation failed: ${reasons.join(" | ")}`);
+      }
+
+      await appendWorkflowLog("[host] validate 检测到生成阶段失败，恢复到生成修复阶段。");
+      await appendValidationFailureDetails(reasons);
+      await appendGenerationValidationStepDetails(steps, reasons);
+      try {
+        await continueGenerateFlow({
+          runtime,
+          generator,
+          validator,
+          approvedPlan: planValidation.planSpec,
+          initialRetryReasons: reasons,
+        });
+      } finally {
+        await closeWorkflowBoard();
+      }
 
       return {
         sessionId: runtime.sessionId,
@@ -2108,27 +2113,30 @@ export async function validateSessionPhase(options: {
         outputDirectory: runtime.outputDirectory,
         valid: true,
         reasons: [],
-      steps: (await readPersistedGenerationValidation(runtime.deepagentsGenerationValidationPath))?.steps ?? steps,
+        steps: (await readPersistedGenerationValidation(runtime.deepagentsGenerationValidationPath))?.steps ?? steps,
+        validationPath: runtime.deepagentsGenerationValidationPath,
+        runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
+        workflowPhase: "complete",
+        resumedFromPhase: "generate_repair",
+      };
+    }
+
+    await updateWorkflowState(runtime.deepagentsConfigPath, "complete", ["plan", "generate"]);
+
+    return {
+      sessionId: runtime.sessionId,
+      phase,
+      outputDirectory: runtime.outputDirectory,
+      valid: true,
+      reasons: [],
+      steps,
       validationPath: runtime.deepagentsGenerationValidationPath,
       runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
       workflowPhase: "complete",
-      resumedFromPhase: "generate_repair",
     };
+  } finally {
+    setWorkflowStdoutMode(undefined);
   }
-
-  await updateWorkflowState(runtime.deepagentsConfigPath, "complete", ["plan", "generate"]);
-
-  return {
-    sessionId: runtime.sessionId,
-    phase,
-    outputDirectory: runtime.outputDirectory,
-    valid: true,
-    reasons: [],
-    steps,
-    validationPath: runtime.deepagentsGenerationValidationPath,
-    runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
-    workflowPhase: "complete",
-  };
 }
 
 async function resolveValidationPhase(
@@ -2223,6 +2231,7 @@ function defaultTemplateRepairRetries(): TemplateRepairRetries {
 }
 
 export async function generateApplication(options: GenerateAppOptions): Promise<GenerationResult> {
+  setWorkflowStdoutMode(options.stdoutMode);
   try {
     const workspaceOptions: {
       outputDirectory?: string;
@@ -2562,6 +2571,10 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       report,
     };
   } finally {
-    await closeWorkflowBoard();
+    try {
+      await closeWorkflowBoard();
+    } finally {
+      setWorkflowStdoutMode(undefined);
+    }
   }
 }

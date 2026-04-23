@@ -5,6 +5,12 @@ import os from "node:os";
 import path from "node:path";
 
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
+import {
+  createTodoBoardRenderer,
+  releaseWorkflowInputStream,
+  resolveWorkflowStdoutMode,
+  setWorkflowStdoutMode,
+} from "../src/lib/terminal-ui.js";
 import type { TextGeneratorRuntime } from "../src/lib/types.js";
 import {
   buildRuntimeStatus,
@@ -12,6 +18,7 @@ import {
   createArtifactItemsForStage,
   createStepItemsForLifecycle,
   estimateRenderedRows,
+  extractCompatibleStreamErrorReason,
   extractRuntimeStatusPatch,
   formatDeepAgentsTraceEntry,
   formatTodoHeader,
@@ -60,6 +67,107 @@ test("resolveDeepagentsStreamModes rejects invalid modes", () => {
     () => resolveDeepagentsStreamModes("updates,unknown"),
     /Invalid APP_BUILDER_STREAM_MODES value: unknown/,
   );
+});
+
+test("resolveWorkflowStdoutMode returns dashboard by default", () => {
+  assert.equal(resolveWorkflowStdoutMode(undefined), "dashboard");
+  assert.equal(resolveWorkflowStdoutMode(""), "dashboard");
+});
+
+test("resolveWorkflowStdoutMode parses explicit values", () => {
+  assert.equal(resolveWorkflowStdoutMode("dashboard"), "dashboard");
+  assert.equal(resolveWorkflowStdoutMode("log"), "log");
+});
+
+test("resolveWorkflowStdoutMode rejects invalid values", () => {
+  assert.throws(
+    () => resolveWorkflowStdoutMode("verbose"),
+    /Invalid APP_BUILDER_STDOUT value: verbose/,
+  );
+});
+
+test("releaseWorkflowInputStream restores and detaches tty stdin", () => {
+  const calls: string[] = [];
+  const stdin = {
+    isTTY: true,
+    pause() {
+      calls.push("pause");
+    },
+    setRawMode(mode: boolean) {
+      calls.push(`raw:${String(mode)}`);
+    },
+    unref() {
+      calls.push("unref");
+    },
+  } as unknown as NodeJS.ReadStream;
+
+  releaseWorkflowInputStream(stdin);
+
+  assert.deepEqual(calls, ["raw:false", "pause", "unref"]);
+});
+
+test("releaseWorkflowInputStream tolerates plain streams", () => {
+  assert.doesNotThrow(() => releaseWorkflowInputStream({} as NodeJS.ReadStream));
+});
+
+test("extractCompatibleStreamErrorReason finds nested compatible stream errors", () => {
+  const error = new Error("middleware failed") as Error & { cause?: unknown };
+  error.cause = {
+    message: "output new_sensitive (1027)",
+  };
+
+  assert.equal(extractCompatibleStreamErrorReason(error), "output new_sensitive (1027)");
+});
+
+test("createTodoBoardRenderer can stream incremental logs in tty log mode", async () => {
+  const writes: string[] = [];
+  const stdout = {
+    isTTY: true,
+    write(chunk: string) {
+      writes.push(String(chunk));
+      return true;
+    },
+  } as unknown as NodeJS.WriteStream;
+
+  setWorkflowStdoutMode("log");
+  try {
+    const renderer = createTodoBoardRenderer(
+      stdout,
+      {} as NodeJS.ReadStream,
+      {} as NodeJS.WriteStream,
+    );
+    const baseState = {
+      stage: "计划阶段" as const,
+      todos: createStepItemsForLifecycle("计划阶段", "validating"),
+      artifacts: createArtifactItemsForStage("计划阶段", "validating"),
+      narrative: "正在验证计划阶段产出物。",
+      logs: ["[12:00:00] [FLOW] 进入计划阶段，开始流式生成。"],
+    };
+
+    await renderer.update(baseState);
+    await renderer.update({
+      ...baseState,
+      logs: [
+        ...baseState.logs,
+        "[12:00:01] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）",
+      ],
+    });
+    await renderer.update({
+      ...baseState,
+      logs: [
+        ...baseState.logs,
+        "[12:00:01] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）",
+      ],
+    });
+    await renderer.stop();
+  } finally {
+    setWorkflowStdoutMode(undefined);
+  }
+
+  assert.deepEqual(writes, [
+    "[12:00:00] [FLOW] 进入计划阶段，开始流式生成。\n",
+    "[12:00:01] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）\n",
+  ]);
 });
 
 test("toVirtualWorkspacePath anchors files at the virtual workspace root", () => {

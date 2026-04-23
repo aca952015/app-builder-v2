@@ -63,8 +63,16 @@ const generatedProjectSchema = z.object({
 const SANDBOX_ALPHA_WARNING =
   "langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.";
 const DEEPAGENTS_IDLE_TIMEOUT_MS = 600_000;
+const DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT = 1;
 const DEFAULT_DEEPAGENTS_STREAM_MODES = ["updates", "messages", "tools", "values"] as const;
 const VALID_DEEPAGENTS_STREAM_MODES = new Set<string>(DEFAULT_DEEPAGENTS_STREAM_MODES);
+
+type DeepAgentRunner = {
+  stream: (
+    state: unknown,
+    options: { streamMode: string[] },
+  ) => AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
+};
 
 async function loadDeepagentsModule() {
   const originalWarn = console.warn;
@@ -1102,6 +1110,57 @@ async function logDeepAgentsChunk(
   writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
 }
 
+function collectErrorMessages(error: unknown, limit = 8): string[] {
+  const messages: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+
+  while (current && !seen.has(current) && messages.length < limit) {
+    seen.add(current);
+
+    if (current instanceof Error) {
+      if (current.message) {
+        messages.push(current.message);
+      }
+
+      current = current.cause;
+      continue;
+    }
+
+    if (typeof current === "object") {
+      const record = current as {
+        message?: unknown;
+        error?: unknown;
+        cause?: unknown;
+      };
+
+      if (typeof record.message === "string" && record.message.trim()) {
+        messages.push(record.message);
+      }
+
+      current = record.cause ?? record.error;
+      continue;
+    }
+
+    break;
+  }
+
+  return messages;
+}
+
+export function extractCompatibleStreamErrorReason(error: unknown): string | null {
+  const pattern = /\boutput\s+[a-z0-9_]+\s+\(\d+\)/i;
+
+  for (const message of collectErrorMessages(error)) {
+    const match = message.match(pattern);
+    if (match) {
+      return match[0];
+    }
+  }
+
+  return null;
+}
+
 export async function withActivityTimeout<T>(
   callback: (signalActivity: () => void) => Promise<T>,
   timeoutMs: number,
@@ -1152,18 +1211,13 @@ export async function withActivityTimeout<T>(
   });
 }
 
-async function streamDeepAgentWithLogs(
-  agent: {
-    stream: (
-      state: unknown,
-      options: { streamMode: string[] },
-    ) => AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
-  },
+export async function runDeepAgentWithLogs(
+  agent: DeepAgentRunner,
   state: unknown,
   runtime: TextGeneratorRuntime,
   runtimePhase: RuntimeStatusPhase,
+  timeoutLabel: string,
   fallbackModelName?: string,
-  signalActivity?: () => void,
 ): Promise<unknown> {
   const workflowStage = runtimePhaseToWorkflowStage(runtimePhase);
   const trace: DeepAgentsTraceState = {
@@ -1188,44 +1242,82 @@ async function streamDeepAgentWithLogs(
     runtimeStatus: trace.runtimeStatus,
   });
 
-  const stream = await agent.stream(state, {
-    streamMode: resolveDeepagentsStreamModes(),
-  });
+  for (let retryCount = 0; ; retryCount += 1) {
+    try {
+      const lastValuesChunk = await withActivityTimeout(
+        async (signalActivity) => {
+          const stream = await agent.stream(state, {
+            streamMode: resolveDeepagentsStreamModes(),
+          });
 
-  let lastValuesChunk: unknown = null;
+          let lastChunk: unknown = null;
 
-  for await (const chunk of stream) {
-    signalActivity?.();
+          for await (const chunk of stream) {
+            signalActivity();
 
-    if (Array.isArray(chunk) && chunk.length === 2 && typeof chunk[0] === "string") {
-      const [mode, payload] = chunk as [string, unknown];
-      await logDeepAgentsChunk(mode, payload, trace, runtime);
-      if (mode === "values") {
-        lastValuesChunk = payload;
+            if (Array.isArray(chunk) && chunk.length === 2 && typeof chunk[0] === "string") {
+              const [mode, payload] = chunk as [string, unknown];
+              await logDeepAgentsChunk(mode, payload, trace, runtime);
+              if (mode === "values") {
+                lastChunk = payload;
+              }
+              continue;
+            }
+
+            const summary = "收到一条未分类事件。";
+            await updateTodoBoard(trace, chunk, summary, runtime);
+            writeSystemTraceEvent(trace.logFilePath, "unclassified", chunk, summary);
+            lastChunk = chunk;
+          }
+
+          return lastChunk;
+        },
+        DEEPAGENTS_IDLE_TIMEOUT_MS,
+        timeoutLabel,
+      );
+
+      trace.lastNarrative = "生成流程结束。";
+      await appendWorkflowLog("[lifecycle] 本轮流式生成结束，等待宿主后续处理。");
+      writeSystemTraceEvent(trace.logFilePath, "lifecycle", { result: lastValuesChunk }, "生成流程结束。");
+      await updateWorkflowBoard({
+        stage: trace.stage,
+        todos: trace.todos,
+        artifacts: createArtifactItemsForStage(trace.stage, "generating"),
+        narrative: trace.lastNarrative,
+        sessionId: runtime.sessionId,
+        outputDirectory: runtime.outputDirectory,
+        runtimeStatus: trace.runtimeStatus,
+      });
+
+      return lastValuesChunk;
+    } catch (error) {
+      const retryReason = extractCompatibleStreamErrorReason(error);
+      if (!retryReason || retryCount >= DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT) {
+        throw error;
       }
-      continue;
+
+      const currentRetry = retryCount + 1;
+      trace.lastNarrative = `检测到兼容端点流式响应错误，准备重试第 ${currentRetry} 次。`;
+      await appendWorkflowLog(
+        `[host] 检测到流式响应兼容性错误（${retryReason}），准备重试第 ${currentRetry}/${DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT} 次。`,
+      );
+      writeSystemTraceEvent(
+        trace.logFilePath,
+        "stream-retry",
+        { reason: retryReason, retry: currentRetry, retryLimit: DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT },
+        "流式响应失败，准备重试。",
+      );
+      await updateWorkflowBoard({
+        stage: trace.stage,
+        todos: trace.todos,
+        artifacts: createArtifactItemsForStage(trace.stage, "generating"),
+        narrative: trace.lastNarrative,
+        sessionId: runtime.sessionId,
+        outputDirectory: runtime.outputDirectory,
+        runtimeStatus: trace.runtimeStatus,
+      });
     }
-
-    const summary = "收到一条未分类事件。";
-    await updateTodoBoard(trace, chunk, summary, runtime);
-    writeSystemTraceEvent(trace.logFilePath, "unclassified", chunk, summary);
-    lastValuesChunk = chunk;
   }
-
-  trace.lastNarrative = "生成流程结束。";
-  await appendWorkflowLog("[lifecycle] 本轮流式生成结束，等待宿主后续处理。");
-  writeSystemTraceEvent(trace.logFilePath, "lifecycle", { result: lastValuesChunk }, "生成流程结束。");
-  await updateWorkflowBoard({
-    stage: trace.stage,
-    todos: trace.todos,
-    artifacts: createArtifactItemsForStage(trace.stage, "generating"),
-    narrative: trace.lastNarrative,
-    sessionId: runtime.sessionId,
-    outputDirectory: runtime.outputDirectory,
-    runtimeStatus: trace.runtimeStatus,
-  });
-
-  return lastValuesChunk;
 }
 
 function extractStructuredResponse<T>(result: unknown, schema: z.ZodType<T>): T | null {
@@ -1307,10 +1399,13 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       ],
     };
 
-    const result = await withActivityTimeout(
-      (signalActivity) => streamDeepAgentWithLogs(agent as any, state, runtime, phaseName, this.model, signalActivity),
-      DEEPAGENTS_IDLE_TIMEOUT_MS,
+    const result = await runDeepAgentWithLogs(
+      agent as any,
+      state,
+      runtime,
+      phaseName,
       options.timeoutLabel,
+      this.model,
     );
 
     const structured = extractStructuredResponse(result, options.responseSchema);

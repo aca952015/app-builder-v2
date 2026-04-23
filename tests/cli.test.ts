@@ -492,6 +492,37 @@ test("runCli accepts -g and -v as generate and validate aliases", async () => {
   }
 });
 
+test("runCli accepts --stdout log on generate", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-stdout-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+
+    await runCli(
+      ["generate", specPath, "--stdout", "log"],
+      {
+        generator: new CliTestGenerator(),
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), /Session: /);
+    assert.match(stdoutLines.join("\n"), /Generated Field Ops Planner at/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("runCli validate rejects an ambiguous short session id prefix", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-ambiguous-id-"));
   const stdoutLines: string[] = [];

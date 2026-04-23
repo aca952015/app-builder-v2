@@ -19,6 +19,7 @@ Environment variables:
 - `OPENAI_BASE_URL`: optional API base URL override. Useful for proxy or compatible endpoints.
 - `APP_BUILDER_MODEL`: optional model override. Defaults to `openai:gpt-4.1-mini`.
 - `APP_BUILDER_STREAM_MODES`: optional deepagents stream mode list, comma-separated. Defaults to `updates,messages,tools,values`.
+- `APP_BUILDER_STDOUT`: optional TTY stdout renderer override. Use `dashboard` for the interactive dashboard or `log` for line-by-line log output.
 
 Example `.env`:
 
@@ -27,6 +28,7 @@ OPENAI_API_KEY=your-openai-api-key
 OPENAI_BASE_URL=https://api.openai.com/v1
 APP_BUILDER_MODEL=openai:gpt-4.1-mini
 APP_BUILDER_STREAM_MODES=updates,messages,tools,values
+APP_BUILDER_STDOUT=log
 ```
 
 Each run creates a session directory under `.out/<sessionId>/`. `deepagents` writes the application files into that session directory, while `.deepagents/` stores the template context, phase prompts, plan artifacts, and generation logs. The generator will not enter code generation until `.deepagents/plan-spec.json` passes host validation.

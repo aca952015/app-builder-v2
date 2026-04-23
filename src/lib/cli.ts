@@ -2,6 +2,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { generateApplication, validateSessionPhase } from "./generator.js";
+import { resolveWorkflowStdoutMode } from "./terminal-ui.js";
 import { GenerateAppOptions, GeneratedAppValidator, TextGenerator, ValidationPhase } from "./types.js";
 
 function formatValidationStepLine(step: { name: string; ok: boolean; detail: string }): string {
@@ -18,16 +19,17 @@ type CliDeps = {
 
 function helpText(): string {
   return `Usage:
-  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--force]
-  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--force]
-  app-builder validate <session-id> [--phase <plan|generate|auto>]
-  app-builder -v <session-id> [--phase <plan|generate|auto>]
+  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--force] [--stdout <log|dashboard>]
+  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--force] [--stdout <log|dashboard>]
+  app-builder validate <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
+  app-builder -v <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
 
 Environment:
   OPENAI_API_KEY    Required unless a custom generator is injected
   OPENAI_BASE_URL   Optional API base URL override
   APP_BUILDER_MODEL Optional deepagents model override
   APP_BUILDER_STREAM_MODES Optional comma-separated deepagents stream modes
+  APP_BUILDER_STDOUT  Optional TTY stdout renderer override: dashboard or log
 `;
 }
 
@@ -57,6 +59,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       allowPositionals: true,
       options: {
         phase: { type: "string" },
+        stdout: { type: "string" },
       },
     });
 
@@ -69,12 +72,14 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     if (phaseValue !== undefined && phaseValue !== "plan" && phaseValue !== "generate" && phaseValue !== "auto") {
       throw new Error('The --phase option must be one of "plan", "generate", or "auto".');
     }
+    const stdoutModeValue = parsed.values.stdout;
 
     const result = await validateSessionPhase({
       sessionId,
       ...(phaseValue === "plan" || phaseValue === "generate"
         ? { phase: phaseValue satisfies ValidationPhase }
         : {}),
+      ...(stdoutModeValue ? { stdoutMode: resolveWorkflowStdoutMode(stdoutModeValue) } : {}),
       cwd,
       ...(deps.generator ? { generator: deps.generator } : {}),
       ...(deps.validator ? { validator: deps.validator } : {}),
@@ -116,6 +121,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       "app-name": { type: "string" },
       template: { type: "string" },
       force: { type: "boolean" },
+      stdout: { type: "string" },
     },
   });
 
@@ -135,6 +141,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
 
   if (parsed.values.template) {
     options.templateId = parsed.values.template;
+  }
+
+  if (parsed.values.stdout) {
+    options.stdoutMode = resolveWorkflowStdoutMode(parsed.values.stdout);
   }
 
   if (deps.generator) {

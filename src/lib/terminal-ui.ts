@@ -6,7 +6,7 @@ import { Box, Text, render, renderToString, type Instance } from "ink";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { routeToPageFileCandidates } from "./app-router.js";
-import type { RuntimeStatus } from "./types.js";
+import type { RuntimeStatus, StdoutMode } from "./types.js";
 
 export type WorkflowStage = "计划阶段" | "生成阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -42,6 +42,8 @@ export type TodoBoardRenderer = {
 
 const WORKFLOW_STAGE_SEQUENCE: WorkflowStageMarker[] = ["计划阶段", "生成阶段", "完成阶段"];
 type WorkflowLogPrefixColor = "cyan" | "yellow" | "magenta" | "blue" | "green" | "red" | "gray";
+const DEFAULT_STDOUT_MODE: StdoutMode = "dashboard";
+const VALID_STDOUT_MODES = new Set<StdoutMode>(["dashboard", "log"]);
 
 function isWideCodePoint(codePoint: number): boolean {
   return (
@@ -925,6 +927,50 @@ export function renderTodoBoardToString(state: TodoBoardState, columns = 80): st
   return renderToString(createTodoBoardElement(state), { columns });
 }
 
+export function resolveWorkflowStdoutMode(
+  value: string | undefined = process.env.APP_BUILDER_STDOUT,
+): StdoutMode {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return DEFAULT_STDOUT_MODE;
+  }
+
+  if (normalized === "dashboard" || normalized === "log") {
+    return normalized;
+  }
+
+  throw new Error(
+    `Invalid APP_BUILDER_STDOUT value: ${normalized}. Valid values are ${[...VALID_STDOUT_MODES].join(", ")}.`,
+  );
+}
+
+function getWorkflowStdoutMode(): StdoutMode {
+  return workflowStdoutModeOverride ?? resolveWorkflowStdoutMode();
+}
+
+export function releaseWorkflowInputStream(stdin: NodeJS.ReadStream): void {
+  const input = stdin as NodeJS.ReadStream & {
+    isTTY?: boolean;
+    pause?: () => void;
+    setRawMode?: (mode: boolean) => void;
+    unref?: () => void;
+  };
+
+  try {
+    if (input.isTTY && typeof input.setRawMode === "function") {
+      input.setRawMode(false);
+    }
+  } catch {}
+
+  try {
+    input.pause?.();
+  } catch {}
+
+  try {
+    input.unref?.();
+  } catch {}
+}
+
 class PlainTodoBoardRenderer implements TodoBoardRenderer {
   private lastFrame = "";
 
@@ -938,6 +984,38 @@ class PlainTodoBoardRenderer implements TodoBoardRenderer {
 
     this.stdout.write(`${frame}\n`);
     this.lastFrame = frame;
+  }
+
+  async stop(): Promise<void> {}
+}
+
+class LogTodoBoardRenderer implements TodoBoardRenderer {
+  private lastLogLine: string | null = null;
+
+  constructor(private readonly stdout: NodeJS.WriteStream) {}
+
+  async update(state: TodoBoardState): Promise<void> {
+    const logs = state.logs ?? [];
+    if (logs.length === 0) {
+      return;
+    }
+
+    let startIndex = 0;
+    if (this.lastLogLine !== null) {
+      const lastIndex = logs.lastIndexOf(this.lastLogLine);
+      startIndex = lastIndex >= 0 ? lastIndex + 1 : Math.max(logs.length - 1, 0);
+    }
+
+    const nextLogs = logs.slice(startIndex);
+    if (nextLogs.length === 0) {
+      return;
+    }
+
+    for (const logLine of nextLogs) {
+      this.stdout.write(`${logLine}\n`);
+    }
+
+    this.lastLogLine = nextLogs.at(-1) ?? this.lastLogLine;
   }
 
   async stop(): Promise<void> {}
@@ -976,8 +1054,10 @@ class InkTodoBoardRenderer implements TodoBoardRenderer {
       return;
     }
 
-    this.instance.unmount();
-    await this.instance.waitUntilExit();
+    const instance = this.instance;
+    instance.unmount();
+    releaseWorkflowInputStream(this.stdin);
+    await instance.waitUntilExit();
     this.instance = null;
   }
 }
@@ -991,6 +1071,10 @@ export function createTodoBoardRenderer(
     return new PlainTodoBoardRenderer(stdout);
   }
 
+  if (getWorkflowStdoutMode() === "log") {
+    return new LogTodoBoardRenderer(stdout);
+  }
+
   return new InkTodoBoardRenderer(stdout, stdin, stderr);
 }
 
@@ -1002,6 +1086,11 @@ let activeWorkflowRenderedArtifacts: ArtifactItem[] | null = null;
 let elapsedRefreshTimer: NodeJS.Timeout | null = null;
 let artifactRefreshTimer: NodeJS.Timeout | null = null;
 let artifactRefreshInFlight = false;
+let workflowStdoutModeOverride: StdoutMode | null = null;
+
+export function setWorkflowStdoutMode(mode?: StdoutMode): void {
+  workflowStdoutModeOverride = mode ?? null;
+}
 
 function trimWorkflowLogs(logs: string[], maxEntries = 200): string[] {
   return logs.slice(-maxEntries);
@@ -1070,12 +1159,14 @@ function ensureWorkflowTimers(): void {
     elapsedRefreshTimer = setInterval(() => {
       void renderActiveWorkflowState(false);
     }, 1_000);
+    elapsedRefreshTimer.unref();
   }
 
   if (!artifactRefreshTimer) {
     artifactRefreshTimer = setInterval(() => {
       void renderActiveWorkflowState(true);
     }, 30_000);
+    artifactRefreshTimer.unref();
   }
 }
 
