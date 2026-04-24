@@ -29,6 +29,8 @@ const defaultRepairRetries: TemplateRepairRetries = {
   generate: 2,
 };
 
+export const DEFAULT_TEMPLATE_ID = "full-stack";
+
 function moduleDirectory(): string {
   return path.dirname(fileURLToPath(import.meta.url));
 }
@@ -310,7 +312,7 @@ async function ensureFileExists(filePath: string, fieldName: string): Promise<vo
   }
 }
 
-export async function loadTemplatePack(templateId = "full-stack"): Promise<TemplatePack> {
+export async function loadTemplatePack(templateId = DEFAULT_TEMPLATE_ID): Promise<TemplatePack> {
   const templateRoot = await resolveTemplateRoot(templateId);
   const directory = path.join(templateRoot, templateId);
   const manifestPath = path.join(directory, "template.json");

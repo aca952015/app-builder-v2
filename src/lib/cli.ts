@@ -2,11 +2,30 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { generateApplication, validateSessionPhase } from "./generator.js";
+import { DEFAULT_TEMPLATE_ID } from "./template-pack.js";
 import { resolveWorkflowStdoutMode } from "./terminal-ui.js";
-import { GenerateAppOptions, GeneratedAppValidator, TextGenerator, ValidationPhase } from "./types.js";
+import { GenerateAppOptions, GeneratedAppValidator, StdoutMode, TextGenerator, ValidationPhase } from "./types.js";
 
 function formatValidationStepLine(step: { name: string; ok: boolean; detail: string }): string {
   return `- ${step.ok ? "OK" : "FAIL"} ${step.name}: ${step.detail}`;
+}
+
+type CliExecutionParameterValue = string | boolean;
+
+const DEFAULT_DEEPAGENTS_MODEL = "openai:gpt-4.1-mini";
+
+function resolveCliModelName(): string {
+  return process.env.APP_BUILDER_MODEL || DEFAULT_DEEPAGENTS_MODEL;
+}
+
+function logCliExecutionParameters(
+  stdout: Pick<typeof console, "log">,
+  parameters: Record<string, CliExecutionParameterValue>,
+): void {
+  stdout.log("CLI execution parameters:");
+  for (const [name, value] of Object.entries(parameters)) {
+    stdout.log(`- ${name}: ${String(value)}`);
+  }
 }
 
 type CliDeps = {
@@ -73,13 +92,24 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       throw new Error('The --phase option must be one of "plan", "generate", or "auto".');
     }
     const stdoutModeValue = parsed.values.stdout;
+    const stdoutMode = resolveWorkflowStdoutMode(stdoutModeValue);
+    const phase = phaseValue === "plan" || phaseValue === "generate" ? phaseValue : "auto";
+
+    logCliExecutionParameters(stdout, {
+      command: "validate",
+      sessionId,
+      phase,
+      model: resolveCliModelName(),
+      stdout: stdoutMode,
+      cwd,
+    });
 
     const result = await validateSessionPhase({
       sessionId,
       ...(phaseValue === "plan" || phaseValue === "generate"
         ? { phase: phaseValue satisfies ValidationPhase }
         : {}),
-      ...(stdoutModeValue ? { stdoutMode: resolveWorkflowStdoutMode(stdoutModeValue) } : {}),
+      stdoutMode,
       cwd,
       ...(deps.generator ? { generator: deps.generator } : {}),
       ...(deps.validator ? { validator: deps.validator } : {}),
@@ -130,21 +160,26 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     throw new Error("A Markdown spec path is required.");
   }
 
+  const resolvedSpecPath = path.resolve(cwd, specPath);
+  const appNameOverride =
+    parsed.values["app-name"] && parsed.values["app-name"].trim() !== ""
+      ? parsed.values["app-name"]
+      : undefined;
+  const templateId =
+    parsed.values.template && parsed.values.template.trim() !== ""
+      ? parsed.values.template
+      : DEFAULT_TEMPLATE_ID;
+  const stdoutMode: StdoutMode = resolveWorkflowStdoutMode(parsed.values.stdout);
+
   const options: GenerateAppOptions = {
-    specPath: path.resolve(cwd, specPath),
+    specPath: resolvedSpecPath,
     force: parsed.values.force ?? false,
+    templateId,
+    stdoutMode,
   };
 
-  if (parsed.values["app-name"]) {
-    options.appNameOverride = parsed.values["app-name"];
-  }
-
-  if (parsed.values.template) {
-    options.templateId = parsed.values.template;
-  }
-
-  if (parsed.values.stdout) {
-    options.stdoutMode = resolveWorkflowStdoutMode(parsed.values.stdout);
+  if (appNameOverride) {
+    options.appNameOverride = appNameOverride;
   }
 
   if (deps.generator) {
@@ -154,6 +189,17 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
   if (deps.validator) {
     options.validator = deps.validator;
   }
+
+  logCliExecutionParameters(stdout, {
+    command: "generate",
+    specPath: resolvedSpecPath,
+    appName: appNameOverride ?? "auto",
+    template: templateId,
+    force: options.force ?? false,
+    model: resolveCliModelName(),
+    stdout: stdoutMode,
+    cwd,
+  });
 
   const result = await generateApplication(options);
   stdout.log(`Session: ${result.sessionId}`);

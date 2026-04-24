@@ -492,6 +492,62 @@ test("runCli accepts -g and -v as generate and validate aliases", async () => {
   }
 });
 
+test("runCli prints generate execution parameters before running", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-params-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+
+    await runCli(
+      [
+        "generate",
+        specPath,
+        "--app-name",
+        "Ops Console",
+        "--template",
+        "mini-app",
+        "--force",
+        "--stdout",
+        "log",
+      ],
+      {
+        generator: new CliTestGenerator(),
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(stderrLines.length, 0);
+    assert.deepEqual(stdoutLines.slice(0, 9), [
+      "CLI execution parameters:",
+      "- command: generate",
+      `- specPath: ${specPath}`,
+      "- appName: Ops Console",
+      "- template: mini-app",
+      "- force: true",
+      "- model: openai:gpt-4.1-mini",
+      "- stdout: log",
+      `- cwd: ${tempRoot}`,
+    ]);
+
+    const paramsIndex = stdoutLines.indexOf("CLI execution parameters:");
+    const sessionIndex = stdoutLines.findIndex((line) => line.startsWith("Session: "));
+    assert.ok(paramsIndex >= 0);
+    assert.ok(sessionIndex > paramsIndex);
+    assert.match(stdoutLines.join("\n"), /Generated Ops Console at/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("runCli accepts --stdout log on generate", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-stdout-"));
   const previousCwd = process.cwd();
@@ -548,7 +604,12 @@ test("runCli validate rejects an ambiguous short session id prefix", async () =>
     new RegExp(`Session id "${sharedPrefix}" is ambiguous`),
   );
 
-  assert.equal(stdoutLines.length, 0);
+  assert.match(stdoutLines.join("\n"), /CLI execution parameters:/);
+  assert.match(stdoutLines.join("\n"), /- command: validate/);
+  assert.match(stdoutLines.join("\n"), new RegExp(`- sessionId: ${sharedPrefix}`));
+  assert.match(stdoutLines.join("\n"), /- phase: generate/);
+  assert.match(stdoutLines.join("\n"), /- model: openai:gpt-4\.1-mini/);
+  assert.equal(stdoutLines.some((line) => line.startsWith("Session: ")), false);
   assert.equal(stderrLines.length, 0);
 });
 
