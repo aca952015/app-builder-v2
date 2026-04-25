@@ -33,6 +33,11 @@ export type TodoBoardState = {
   outputDirectory?: string;
   logs?: string[];
   runtimeStatus?: RuntimeStatus | undefined;
+  streamProgress?: {
+    inputTokens?: number | undefined;
+    outputTokens?: number | undefined;
+    outputTokensEstimated?: boolean | undefined;
+  } | undefined;
 };
 
 export type TodoBoardRenderer = {
@@ -44,6 +49,8 @@ const WORKFLOW_STAGE_SEQUENCE: WorkflowStageMarker[] = ["计划阶段", "生成�
 type WorkflowLogPrefixColor = "cyan" | "yellow" | "magenta" | "blue" | "green" | "red" | "gray";
 const DEFAULT_STDOUT_MODE: StdoutMode = "dashboard";
 const VALID_STDOUT_MODES = new Set<StdoutMode>(["dashboard", "log"]);
+const THINKING_GRADIENT_BAND_COLORS = ["#eeeeee", "#d6d6d6", "#b8b8b8", "#969696", "#b8b8b8", "#d6d6d6"] as const;
+const THINKING_GRADIENT_INTERVAL_MS = 75;
 
 function isWideCodePoint(codePoint: number): boolean {
   return (
@@ -327,7 +334,67 @@ function parseWorkflowLogLine(logLine: string): {
 }
 
 function buildActionLine(state: TodoBoardState): string {
-  return `当前动作：${state.narrative}`;
+  return `当前动作：${formatActionNarrative(state)}`;
+}
+
+function shouldRenderWorkingStatus(narrative: string): boolean {
+  return /^模型(?:正在工作中|正在思考|思考中)(?:（.*）)?。?$/.test(narrative.trim());
+}
+
+function formatWorkingElapsedTime(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function formatWorkingTokenCount(value: unknown): string {
+  if (!isFiniteNumber(value)) {
+    return "n/a";
+  }
+
+  const safeValue = Math.max(0, Math.round(value));
+  const kiloTokens = safeValue / 1_000;
+  const rounded =
+    kiloTokens >= 100
+      ? Math.round(kiloTokens)
+      : kiloTokens >= 1
+        ? Math.round(kiloTokens * 10) / 10
+        : Math.round(kiloTokens * 1_000) / 1_000;
+  const formatted =
+    Number.isInteger(rounded)
+      ? rounded.toString()
+      : rounded.toFixed(kiloTokens >= 1 ? 1 : 3).replace(/\.?0+$/, "");
+
+  return `${formatted} k`;
+}
+
+function formatActionNarrative(state: TodoBoardState): string {
+  if (!shouldRenderWorkingStatus(state.narrative)) {
+    return state.narrative;
+  }
+
+  const usage = state.runtimeStatus?.usage;
+  const inputTokens = state.streamProgress?.inputTokens ?? usage?.inputTokens ?? state.runtimeStatus?.contextWindowUsedTokens;
+  const outputTokens = state.streamProgress?.outputTokens ?? usage?.outputTokens;
+
+  return [
+    "模型正在工作中（",
+    formatWorkingElapsedTime(state.elapsedMs ?? 0),
+    `, in: ${formatWorkingTokenCount(inputTokens)}`,
+    `，out：${formatWorkingTokenCount(outputTokens)}`,
+    "）",
+  ].join("");
 }
 
 function buildTodoHeader(state: TodoBoardState): string {
@@ -510,6 +577,82 @@ function artifactColorForStatus(status: ArtifactStatus): "gray" | "yellow" | "bl
     default:
       return "yellow";
   }
+}
+
+function AnimatedGradientText({ text, active }: { text: string; active: boolean }) {
+  const [frame, setFrame] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!active) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      setFrame((currentFrame) => currentFrame + 1);
+    }, THINKING_GRADIENT_INTERVAL_MS);
+
+    return () => clearInterval(timer);
+  }, [active]);
+
+  if (!active) {
+    return React.createElement(
+      Text,
+      {
+        color: "white",
+      },
+      text,
+    );
+  }
+
+  return React.createElement(
+    Box,
+    {
+      flexDirection: "row",
+      flexWrap: "wrap",
+    },
+    Array.from(text).map((char, index, chars) => {
+      const bandStart = frame % Math.max(chars.length, 1);
+      const bandOffset = index - bandStart;
+      const color = THINKING_GRADIENT_BAND_COLORS[bandOffset] ?? "white";
+      return React.createElement(
+        Text,
+        {
+          key: `thinking-char-${index}`,
+          color,
+        },
+        char,
+      );
+    }),
+  );
+}
+
+function createActionElement(state: TodoBoardState) {
+  const actionNarrative = formatActionNarrative(state);
+
+  return React.createElement(
+    Box,
+    {
+      key: "action-wrap",
+      marginTop: 1,
+      flexDirection: "row",
+      flexWrap: "wrap",
+    },
+    [
+      React.createElement(
+        Text,
+        {
+          key: "action-prefix",
+          color: "magenta",
+        },
+        "当前动作：",
+      ),
+      React.createElement(AnimatedGradientText, {
+        key: "action-narrative",
+        text: actionNarrative,
+        active: shouldRenderWorkingStatus(state.narrative),
+      }),
+    ],
+  );
 }
 
 export function renderArtifactStatus(status: ArtifactStatus): string {
@@ -804,21 +947,6 @@ function createWorkflowBoardElement(state: TodoBoardState) {
                   `${renderTodoStatus(todo.status)} ${todo.content}`,
                 )
               ),
-              React.createElement(
-                Box,
-                {
-                  key: "action-wrap",
-                  marginTop: 1,
-                },
-                React.createElement(
-                  Text,
-                  {
-                    key: "action",
-                    color: "magenta",
-                  },
-                  buildActionLine(state),
-                ),
-              ),
             ],
           ),
           React.createElement(
@@ -851,6 +979,7 @@ function createWorkflowBoardElement(state: TodoBoardState) {
           ),
         ],
       ),
+      createActionElement(state),
       React.createElement(
         Box,
         {
@@ -1187,6 +1316,12 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
           ...state.runtimeStatus,
         }
       : activeWorkflowState?.runtimeStatus,
+    streamProgress: state.streamProgress
+      ? {
+          ...activeWorkflowState?.streamProgress,
+          ...state.streamProgress,
+        }
+      : activeWorkflowState?.streamProgress,
   };
   activeWorkflowState = nextWorkflowState;
   activeWorkflowLogs = trimWorkflowLogs(nextWorkflowState.logs ?? []);

@@ -548,6 +548,38 @@ test("runCli prints generate execution parameters before running", async () => {
   }
 });
 
+test("runCli omits generate execution parameters in dashboard mode", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-dashboard-params-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+
+    await runCli(
+      ["generate", specPath],
+      {
+        generator: new CliTestGenerator(),
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(stderrLines.length, 0);
+    assert.equal(stdoutLines.includes("CLI execution parameters:"), false);
+    assert.equal(stdoutLines.some((line) => line.startsWith("- specPath: ")), false);
+    assert.match(stdoutLines.join("\n"), /Generated Field Ops Planner at/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("runCli accepts --stdout log on generate", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-stdout-"));
   const previousCwd = process.cwd();
@@ -594,7 +626,7 @@ test("runCli validate rejects an ambiguous short session id prefix", async () =>
   await assert.rejects(
     () =>
       runCli(
-        ["validate", sharedPrefix, "--phase", "generate"],
+        ["validate", sharedPrefix, "--phase", "generate", "--stdout", "log"],
         {
           stdout: { log: (line: string) => stdoutLines.push(line) },
           stderr: { error: (line: string) => stderrLines.push(line) },
@@ -609,6 +641,37 @@ test("runCli validate rejects an ambiguous short session id prefix", async () =>
   assert.match(stdoutLines.join("\n"), new RegExp(`- sessionId: ${sharedPrefix}`));
   assert.match(stdoutLines.join("\n"), /- phase: generate/);
   assert.match(stdoutLines.join("\n"), /- model: openai:gpt-4\.1-mini/);
+  assert.equal(stdoutLines.some((line) => line.startsWith("Session: ")), false);
+  assert.equal(stderrLines.length, 0);
+});
+
+test("runCli omits validate execution parameters in dashboard mode", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-dashboard-params-"));
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+  const outRoot = path.join(tempRoot, ".out");
+  const sharedPrefix = "12345678";
+  const sessionA = `${sharedPrefix}-aaaa-aaaa-aaaa-aaaaaaaaaaaa`;
+  const sessionB = `${sharedPrefix}-bbbb-bbbb-bbbb-bbbbbbbbbbbb`;
+
+  await mkdir(path.join(outRoot, sessionA), { recursive: true });
+  await mkdir(path.join(outRoot, sessionB), { recursive: true });
+
+  await assert.rejects(
+    () =>
+      runCli(
+        ["validate", sharedPrefix, "--phase", "generate"],
+        {
+          stdout: { log: (line: string) => stdoutLines.push(line) },
+          stderr: { error: (line: string) => stderrLines.push(line) },
+          cwd: tempRoot,
+        },
+      ),
+    new RegExp(`Session id "${sharedPrefix}" is ambiguous`),
+  );
+
+  assert.equal(stdoutLines.includes("CLI execution parameters:"), false);
+  assert.equal(stdoutLines.some((line) => line.startsWith("- sessionId: ")), false);
   assert.equal(stdoutLines.some((line) => line.startsWith("Session: ")), false);
   assert.equal(stderrLines.length, 0);
 });

@@ -354,6 +354,29 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /context used: 900 \| phase: plan/);
 });
 
+test("renderTodoBoardToString preserves animated thinking action text", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "计划阶段",
+    todos: [
+      { content: "读取 PRD 与模板上下文", status: "in_progress" },
+    ],
+    artifacts: createArtifactItemsForStage("计划阶段", "generating"),
+    narrative: "模型正在工作中",
+    elapsedMs: 154_000,
+    runtimeStatus: {
+      usage: {
+        inputTokens: 12_500,
+      },
+    },
+    streamProgress: {
+      outputTokens: 1_536,
+      outputTokensEstimated: true,
+    },
+  }, 120));
+
+  assert.match(output, /当前动作：模型正在工作中（2m 34s, in: 12.5 k，out：1.5 k）/);
+});
+
 test("renderTodoBoardToString splits execution logs and repair progress into two sections", () => {
   const output = stripAnsi(renderTodoBoardToString({
     stage: "生成阶段",
@@ -565,6 +588,37 @@ test("summarizeDeepAgentsAction exposes message tool-call intent", () => {
       },
     ]),
     "准备写入文件：app/page.tsx",
+  );
+});
+
+test("summarizeDeepAgentsAction shows received token progress while thinking", () => {
+  assert.equal(
+    summarizeDeepAgentsAction("messages", { content: "" }, { receivedOutputTokens: 1_536 }),
+    "模型正在工作中",
+  );
+
+  assert.equal(
+    summarizeDeepAgentsAction("messages", { content: [] }, {
+      receivedOutputTokens: 42,
+      receivedOutputTokensEstimated: true,
+    }),
+    "模型正在工作中",
+  );
+
+  assert.equal(
+    summarizeDeepAgentsAction("messages", [
+      { role: "user", content: "{\"stage\":\"plan\",\"sourcePrdMarkdown\":\"do not print input payload\"}" },
+      { content: [{ text: "partial output" }] },
+      { response_metadata: { model_name: "gpt-5.4" } },
+    ]),
+    "partial output",
+  );
+
+  assert.equal(
+    summarizeDeepAgentsAction("messages", [
+      { id: ["langchain_core", "messages", "HumanMessage"], content: "{\"stage\":\"plan\"}" },
+    ]),
+    "模型正在工作中",
   );
 });
 

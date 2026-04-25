@@ -30,6 +30,11 @@ When changing plan/generate/repair behavior:
 - When adding a brand-new host-side phase to the workflow, for example a deploy phase after generate, use the project skill `host-phase-builder` from `.codex/skills/host-phase-builder/`.
 - This skill is specifically for creating and wiring a new phase into the host orchestrator, not for general feature edits inside an existing phase.
 
+## Ignored Inputs
+
+- Ignore files under `prds/` by default. Treat them as user-supplied source documents, not repository code.
+- Do not lint, format, clean up, or edit `prds/` files unless the user explicitly asks for changes there.
+
 ## Validation
 
 - Run `pnpm check` after host workflow changes.

@@ -19,9 +19,14 @@ function resolveCliModelName(): string {
 }
 
 function logCliExecutionParameters(
+  stdoutMode: StdoutMode,
   stdout: Pick<typeof console, "log">,
   parameters: Record<string, CliExecutionParameterValue>,
 ): void {
+  if (stdoutMode !== "log") {
+    return;
+  }
+
   stdout.log("CLI execution parameters:");
   for (const [name, value] of Object.entries(parameters)) {
     stdout.log(`- ${name}: ${String(value)}`);
@@ -95,7 +100,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     const stdoutMode = resolveWorkflowStdoutMode(stdoutModeValue);
     const phase = phaseValue === "plan" || phaseValue === "generate" ? phaseValue : "auto";
 
-    logCliExecutionParameters(stdout, {
+    logCliExecutionParameters(stdoutMode, stdout, {
       command: "validate",
       sessionId,
       phase,
@@ -190,7 +195,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     options.validator = deps.validator;
   }
 
-  logCliExecutionParameters(stdout, {
+  logCliExecutionParameters(stdoutMode, stdout, {
     command: "generate",
     specPath: resolvedSpecPath,
     appName: appNameOverride ?? "auto",

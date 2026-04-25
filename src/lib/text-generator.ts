@@ -13,6 +13,7 @@ import {
   appendWorkflowLog,
   createArtifactItemsForStage,
   createDefaultStepItems,
+  type TodoBoardState,
   type TodoItem,
   type TodoStatus,
   updateWorkflowBoard,
@@ -72,6 +73,11 @@ type DeepAgentRunner = {
     state: unknown,
     options: { streamMode: string[] },
   ) => AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
+};
+
+type StreamProgressSummary = {
+  receivedOutputTokens?: number | undefined;
+  receivedOutputTokensEstimated?: boolean | undefined;
 };
 
 async function loadDeepagentsModule() {
@@ -395,6 +401,20 @@ function parseRuntimeUsageSummary(value: unknown): RuntimeUsageSummary | null {
   return hasRuntimeUsageSummary(usage) ? usage : null;
 }
 
+function estimateReceivedTokenCount(text: string): number {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return 0;
+  }
+
+  const cjkAndWideChars = trimmed.match(/[\u3400-\u9fff\uf900-\ufaff]/g)?.length ?? 0;
+  const remaining = trimmed.replace(/[\u3400-\u9fff\uf900-\ufaff]/g, "").trim();
+  const compactRemaining = remaining.replace(/\s+/g, " ");
+  const remainingTokens = compactRemaining ? Math.ceil(compactRemaining.length / 4) : 0;
+
+  return Math.max(1, cjkAndWideChars + remainingTokens);
+}
+
 function collectRuntimeUsageSummaries(value: unknown, seen = new Set<object>()): RuntimeUsageSummary[] {
   if (!value || typeof value !== "object") {
     return [];
@@ -534,9 +554,59 @@ export function extractRuntimeStatusPatch(payload: unknown): Partial<RuntimeStat
   };
 }
 
+function extractMessageKind(record: Record<string, unknown>): string | null {
+  const directKind = readStringField(record, ["role", "type"]);
+  if (directKind) {
+    return directKind.toLowerCase();
+  }
+
+  if (Array.isArray(record.id)) {
+    const serializedKind = [...record.id]
+      .reverse()
+      .map((item) => (typeof item === "string" ? item : ""))
+      .find((item) => /message/i.test(item));
+    if (serializedKind) {
+      return serializedKind.toLowerCase();
+    }
+  }
+
+  const kwargs = readObjectField(record, ["kwargs"]);
+  const kwargsKind = readStringField(kwargs, ["role", "type"]);
+  return kwargsKind ? kwargsKind.toLowerCase() : null;
+}
+
+function isInputOrToolMessage(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const kind = extractMessageKind(value as Record<string, unknown>);
+  return Boolean(
+    kind &&
+      (kind === "user" ||
+        kind === "human" ||
+        kind === "system" ||
+        kind === "developer" ||
+        kind === "tool" ||
+        kind === "function" ||
+        kind.includes("humanmessage") ||
+        kind.includes("systemmessage") ||
+        kind.includes("toolmessage") ||
+        kind.includes("functionmessage")),
+  );
+}
+
 function extractMessageText(value: unknown): string | null {
   if (typeof value === "string") {
     return value;
+  }
+
+  if (Array.isArray(value)) {
+    const text = value
+      .map((item) => (isInputOrToolMessage(item) ? null : extractMessageText(item)))
+      .filter((item): item is string => Boolean(item))
+      .join("");
+    return text || null;
   }
 
   if (!value || typeof value !== "object") {
@@ -544,6 +614,10 @@ function extractMessageText(value: unknown): string | null {
   }
 
   const record = value as Record<string, unknown>;
+  if (isInputOrToolMessage(record)) {
+    return null;
+  }
+
   const content = record.content;
 
   if (typeof content === "string") {
@@ -574,6 +648,9 @@ type DeepAgentsTraceState = {
   lastNarrative: string;
   logFilePath?: string;
   runtimeStatus: RuntimeStatus;
+  modelOutputStarted: boolean;
+  receivedOutputTokens: number;
+  receivedOutputTokensEstimated: boolean;
 };
 
 type ToolCallDetail = {
@@ -896,7 +973,37 @@ function summarizeMessageToolCall(payload: unknown): string | null {
   return `准备${action}。`;
 }
 
-export function summarizeDeepAgentsAction(mode: string, payload: unknown): string {
+function formatModelThinkingSummary(_progress?: StreamProgressSummary): string {
+  return "模型正在工作中";
+}
+
+function getStreamProgressSummary(trace: DeepAgentsTraceState): StreamProgressSummary {
+  return {
+    receivedOutputTokens: trace.receivedOutputTokens,
+    receivedOutputTokensEstimated: trace.receivedOutputTokensEstimated,
+  };
+}
+
+function getTodoBoardStreamProgress(trace: DeepAgentsTraceState): TodoBoardState["streamProgress"] {
+  const progress: NonNullable<TodoBoardState["streamProgress"]> = {};
+  const inputTokens = trace.runtimeStatus.usage?.inputTokens ?? trace.runtimeStatus.contextWindowUsedTokens;
+
+  if (isFiniteNumber(inputTokens)) {
+    progress.inputTokens = inputTokens;
+  }
+  if (isFiniteNumber(trace.receivedOutputTokens)) {
+    progress.outputTokens = trace.receivedOutputTokens;
+  }
+  progress.outputTokensEstimated = trace.receivedOutputTokensEstimated;
+
+  return progress;
+}
+
+export function summarizeDeepAgentsAction(
+  mode: string,
+  payload: unknown,
+  progress?: StreamProgressSummary,
+): string {
   if (mode === "updates") {
     const messageText = extractMessageText(payload)?.trim();
     return messageText && messageText.length > 0 ? messageText : "收到一条进度更新。";
@@ -909,7 +1016,7 @@ export function summarizeDeepAgentsAction(mode: string, payload: unknown): strin
     }
 
     const messageText = extractMessageText(payload)?.trim();
-    return messageText && messageText.length > 0 ? messageText : "模型正在思考。";
+    return messageText && messageText.length > 0 ? messageText : formatModelThinkingSummary(progress);
   }
 
   if (mode === "tools") {
@@ -935,11 +1042,16 @@ export function summarizeDeepAgentsAction(mode: string, payload: unknown): strin
 
 function shouldAppendDetailedLog(mode: string, summary: string): boolean {
   if (
+    summary === "模型正在工作中" ||
     summary === "模型正在思考。" ||
     summary === "收到一条进度更新。" ||
     summary === "收到工具调用事件。" ||
     summary === "正在生成结构化结果。"
   ) {
+    return false;
+  }
+
+  if (/^模型正在思考（已接收.* tokens）。$/.test(summary)) {
     return false;
   }
 
@@ -1005,13 +1117,47 @@ function ensureTraceState(trace: DeepAgentsTraceState, todoSummary: string): voi
   }
 }
 
+function applyStreamProgress(trace: DeepAgentsTraceState, mode: string, payload: unknown): void {
+  trace.runtimeStatus = mergeRuntimeStatus(trace.runtimeStatus, extractRuntimeStatusPatch(payload));
+
+  const messageText = mode === "messages" ? extractMessageText(payload)?.trim() : undefined;
+  if (messageText) {
+    const estimatedTokens = estimateReceivedTokenCount(messageText);
+    if (estimatedTokens > 0) {
+      trace.modelOutputStarted = true;
+      trace.receivedOutputTokens += estimatedTokens;
+      trace.receivedOutputTokensEstimated = true;
+    }
+  }
+
+  const exactOutputTokens = trace.runtimeStatus.usage?.outputTokens;
+  if (isFiniteNumber(exactOutputTokens) && exactOutputTokens > trace.receivedOutputTokens) {
+    trace.modelOutputStarted = true;
+    trace.receivedOutputTokens = exactOutputTokens;
+    trace.receivedOutputTokensEstimated = false;
+  }
+}
+
+function shouldShowThinkingProgress(mode: string | undefined, fallbackSummary: string, trace: DeepAgentsTraceState): boolean {
+  return (
+    mode === "messages" &&
+    trace.modelOutputStarted &&
+    trace.receivedOutputTokens > 0 &&
+    !/^准备/.test(fallbackSummary)
+  );
+}
+
 async function updateTodoBoard(
   trace: DeepAgentsTraceState,
   payload: unknown,
   fallbackSummary: string,
   runtime?: TextGeneratorRuntime,
+  mode?: string,
+  progressAlreadyApplied = false,
 ): Promise<void> {
-  trace.runtimeStatus = mergeRuntimeStatus(trace.runtimeStatus, extractRuntimeStatusPatch(payload));
+  if (!progressAlreadyApplied) {
+    applyStreamProgress(trace, mode ?? "unclassified", payload);
+  }
 
   const extractedTodos = extractTodosFromPayload(payload);
   if (extractedTodos && extractedTodos.length > 0) {
@@ -1019,10 +1165,15 @@ async function updateTodoBoard(
   }
 
   if (typeof payload === "string" && payload.trim()) {
-    trace.lastNarrative = payload.trim();
+    trace.lastNarrative = shouldShowThinkingProgress(mode, fallbackSummary, trace)
+      ? formatModelThinkingSummary(getStreamProgressSummary(trace))
+      : payload.trim();
   } else {
     const extractedMessage = extractMessageText(payload);
-    trace.lastNarrative = extractedMessage?.trim() || fallbackSummary;
+    const narrative = extractedMessage?.trim() || fallbackSummary;
+    trace.lastNarrative = shouldShowThinkingProgress(mode, fallbackSummary, trace)
+      ? formatModelThinkingSummary(getStreamProgressSummary(trace))
+      : narrative;
   }
 
   ensureTraceState(trace, fallbackSummary);
@@ -1034,6 +1185,7 @@ async function updateTodoBoard(
     ...(runtime ? { sessionId: runtime.sessionId } : {}),
     ...(runtime ? { outputDirectory: runtime.outputDirectory } : {}),
     runtimeStatus: trace.runtimeStatus,
+    streamProgress: getTodoBoardStreamProgress(trace),
   });
 }
 
@@ -1102,11 +1254,12 @@ async function logDeepAgentsChunk(
   trace: DeepAgentsTraceState,
   runtime?: TextGeneratorRuntime,
 ): Promise<void> {
-  const summary = summarizeDeepAgentsAction(mode, payload);
+  applyStreamProgress(trace, mode, payload);
+  const summary = summarizeDeepAgentsAction(mode, payload, getStreamProgressSummary(trace));
   if (shouldAppendDetailedLog(mode, summary)) {
     await appendWorkflowLog(`[${mode}] ${summary}`);
   }
-  await updateTodoBoard(trace, payload, summary, runtime);
+  await updateTodoBoard(trace, payload, summary, runtime, mode, true);
   writeSystemTraceEvent(trace.logFilePath, mode, payload, summary);
 }
 
@@ -1230,6 +1383,9 @@ export async function runDeepAgentWithLogs(
       phase: runtimePhase,
       fallbackModelName,
     }),
+    modelOutputStarted: false,
+    receivedOutputTokens: 0,
+    receivedOutputTokensEstimated: false,
   };
   await appendWorkflowLog(`[lifecycle] 进入${trace.stage}，开始流式生成。`);
   await updateWorkflowBoard({
@@ -1244,6 +1400,10 @@ export async function runDeepAgentWithLogs(
 
   for (let retryCount = 0; ; retryCount += 1) {
     try {
+      trace.modelOutputStarted = false;
+      trace.receivedOutputTokens = 0;
+      trace.receivedOutputTokensEstimated = false;
+
       const lastValuesChunk = await withActivityTimeout(
         async (signalActivity) => {
           const stream = await agent.stream(state, {
@@ -1265,7 +1425,7 @@ export async function runDeepAgentWithLogs(
             }
 
             const summary = "收到一条未分类事件。";
-            await updateTodoBoard(trace, chunk, summary, runtime);
+            await updateTodoBoard(trace, chunk, summary, runtime, "unclassified");
             writeSystemTraceEvent(trace.logFilePath, "unclassified", chunk, summary);
             lastChunk = chunk;
           }
