@@ -7,6 +7,7 @@ import { toolStrategy } from "langchain";
 import { z } from "zod";
 
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
+import { createOpenAICompatibleModel } from "./deepseek-openai.js";
 import { buildSessionPolicyDocument, composeStageSystemPrompt, type SessionPolicyStage } from "./session-policy.js";
 import { resolveTemplateFilePath } from "./template-pack.js";
 import {
@@ -1491,14 +1492,10 @@ function extractStructuredResponse<T>(result: unknown, schema: z.ZodType<T>): T 
 }
 
 async function resolveModel(modelName: string, effort?: TemplatePhaseEffort) {
-  const { initChatModel } = await import("langchain/chat_models/universal");
-  return initChatModel(modelName, {
-    modelProvider: "openai",
-    temperature: 0,
-    ...(effort ? { reasoning: { effort } } : {}),
-    configuration: process.env.OPENAI_BASE_URL
-      ? { baseURL: process.env.OPENAI_BASE_URL }
-      : undefined,
+  return createOpenAICompatibleModel({
+    modelName,
+    ...(effort ? { effort } : {}),
+    ...(process.env.OPENAI_BASE_URL ? { baseURL: process.env.OPENAI_BASE_URL } : {}),
   });
 }
 

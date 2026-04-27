@@ -1,9 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
+import {
+  convertMessagesToDeepSeekCompletionsMessageParams,
+  normalizeOpenAICompatibleModelName,
+  sanitizeDeepSeekCompletionsParams,
+  shouldUseDeepSeekReasoningContentCompat,
+} from "../src/lib/deepseek-openai.js";
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
   createTodoBoardRenderer,
@@ -34,6 +42,20 @@ import {
   toVirtualWorkspacePath,
   withActivityTimeout,
 } from "../src/lib/text-generator.js";
+
+const require = createRequire(import.meta.url);
+
+async function loadLangChainCoreMessages() {
+  const openAiPackagePath = require.resolve("@langchain/openai/package.json");
+  const messagesPath = require.resolve("@langchain/core/messages", {
+    paths: [path.dirname(openAiPackagePath)],
+  });
+  return import(pathToFileURL(messagesPath).href) as Promise<{
+    AIMessage: new (fields: unknown) => unknown;
+    HumanMessage: new (content: unknown) => unknown;
+    ToolMessage: new (fields: unknown) => unknown;
+  }>;
+}
 
 test("parseDotEnv reads simple key-value pairs", () => {
   const parsed = parseDotEnv(`
@@ -67,6 +89,98 @@ test("resolveDeepagentsStreamModes rejects invalid modes", () => {
     () => resolveDeepagentsStreamModes("updates,unknown"),
     /Invalid APP_BUILDER_STREAM_MODES value: unknown/,
   );
+});
+
+test("normalizeOpenAICompatibleModelName strips only the OpenAI provider prefix", () => {
+  assert.equal(normalizeOpenAICompatibleModelName("openai:deepseek-v4-pro"), "deepseek-v4-pro");
+  assert.equal(normalizeOpenAICompatibleModelName("deepseek-v4-pro"), "deepseek-v4-pro");
+  assert.equal(normalizeOpenAICompatibleModelName("anthropic:claude-sonnet-4-5"), "anthropic:claude-sonnet-4-5");
+});
+
+test("shouldUseDeepSeekReasoningContentCompat detects DeepSeek model or endpoint", () => {
+  assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:deepseek-v4-pro"), true);
+  assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:gpt-4.1-mini", "https://api.deepseek.com"), true);
+  assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:gpt-4.1-mini", "https://api.openai.com/v1"), false);
+});
+
+test("sanitizeDeepSeekCompletionsParams removes forced tool choice", () => {
+  const sanitized = sanitizeDeepSeekCompletionsParams({
+    model: "deepseek-v4-pro",
+    tool_choice: "required",
+    tools: [{ type: "function", function: { name: "extract", parameters: { type: "object" } } }],
+  });
+
+  assert.equal("tool_choice" in sanitized, false);
+  assert.deepEqual(
+    sanitizeDeepSeekCompletionsParams({ model: "deepseek-v4-pro", tool_choice: "auto" }),
+    { model: "deepseek-v4-pro", tool_choice: "auto" },
+  );
+});
+
+test("convertMessagesToDeepSeekCompletionsMessageParams keeps reasoning_content for tool turns", async () => {
+  const { AIMessage, HumanMessage, ToolMessage } = await loadLangChainCoreMessages();
+  const messages = [
+    new HumanMessage("How is the weather tomorrow?"),
+    new AIMessage({
+      content: "Let me check.",
+      additional_kwargs: {
+        reasoning_content: "Need to fetch the current date before asking weather.",
+      },
+      tool_calls: [
+        {
+          id: "call_1",
+          name: "get_date",
+          args: {},
+          type: "tool_call",
+        },
+      ],
+    }),
+    new ToolMessage({
+      content: "2026-04-27",
+      tool_call_id: "call_1",
+    }),
+    new AIMessage({
+      content: "Tomorrow is 2026-04-28.",
+      additional_kwargs: {
+        reasoning_content: "The tool returned today's date, so tomorrow is one day later.",
+      },
+    }),
+    new HumanMessage("What about Guangzhou?"),
+  ];
+
+  const converted = convertMessagesToDeepSeekCompletionsMessageParams({
+    messages: messages as any,
+    model: "deepseek-v4-pro",
+  });
+  const resolved = await converted;
+  const assistantMessages = resolved.filter((message) => message.role === "assistant") as Array<{
+    reasoning_content?: string;
+  }>;
+
+  assert.equal(assistantMessages[0]?.reasoning_content, "Need to fetch the current date before asking weather.");
+  assert.equal(assistantMessages[1]?.reasoning_content, "The tool returned today's date, so tomorrow is one day later.");
+});
+
+test("convertMessagesToDeepSeekCompletionsMessageParams drops reasoning_content for non-tool turns", async () => {
+  const { AIMessage, HumanMessage } = await loadLangChainCoreMessages();
+  const converted = await convertMessagesToDeepSeekCompletionsMessageParams({
+    messages: [
+      new HumanMessage("Which is bigger, 9.11 or 9.8?"),
+      new AIMessage({
+        content: "9.8 is bigger.",
+        additional_kwargs: {
+          reasoning_content: "Compare decimals by writing 9.80 and 9.11.",
+        },
+      }),
+      new HumanMessage("How many Rs are in strawberry?"),
+    ] as any,
+    model: "deepseek-v4-pro",
+  });
+  const assistantMessage = converted.find((message) => message.role === "assistant") as {
+    reasoning_content?: string;
+  } | undefined;
+
+  assert.equal(assistantMessage?.reasoning_content, undefined);
 });
 
 test("resolveWorkflowStdoutMode returns dashboard by default", () => {
