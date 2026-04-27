@@ -8,6 +8,13 @@ import { z } from "zod";
 
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
 import { createOpenAICompatibleModel } from "./deepseek-openai.js";
+import {
+  DEFAULT_MODEL_NAME,
+  resolveModelRoleConfigs,
+  type ModelRole,
+  type ModelRoleConfig,
+  type ModelRoleConfigMap,
+} from "./model-config.js";
 import { buildSessionPolicyDocument, composeStageSystemPrompt, type SessionPolicyStage } from "./session-policy.js";
 import { resolveTemplateFilePath } from "./template-pack.js";
 import {
@@ -469,7 +476,23 @@ function collectRuntimeModelNames(value: unknown, seen = new Set<object>()): str
 }
 
 function resolveRuntimeModelFallback(fallbackModelName?: string): string {
-  return fallbackModelName?.trim() || process.env.APP_BUILDER_MODEL?.trim() || "openai:gpt-4.1-mini";
+  return fallbackModelName?.trim() || process.env.APP_BUILDER_MODEL?.trim() || DEFAULT_MODEL_NAME;
+}
+
+export function modelRoleForRuntimePhase(phase?: RuntimeStatusPhase): ModelRole | undefined {
+  switch (phase) {
+    case "plan":
+      return "plan";
+    case "generate":
+      return "generate";
+    case "planRepair":
+    case "plan_repair":
+    case "generateRepair":
+    case "generate_repair":
+      return "repair";
+    default:
+      return undefined;
+  }
 }
 
 function runtimePhaseToWorkflowStage(phase: RuntimeStatusPhase): "计划阶段" | "生成阶段" {
@@ -507,16 +530,18 @@ export function resolveRuntimeStatusEffort(
 }
 
 export function buildRuntimeStatus(options: {
-  runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases">;
+  runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases"> & Partial<Pick<TextGeneratorRuntime, "modelRoles">>;
   phase: RuntimeStatusPhase;
   modelName?: string | undefined;
   usage?: RuntimeUsageSummary | undefined;
   fallbackModelName?: string | undefined;
 }): RuntimeStatus {
   const usage = hasRuntimeUsageSummary(options.usage) ? options.usage : undefined;
+  const modelRole = modelRoleForRuntimePhase(options.phase);
+  const roleModelName = modelRole ? options.runtime.modelRoles?.[modelRole]?.modelName : undefined;
 
   return {
-    modelName: options.modelName ?? resolveRuntimeModelFallback(options.fallbackModelName),
+    modelName: options.modelName ?? roleModelName ?? resolveRuntimeModelFallback(options.fallbackModelName),
     effort: resolveRuntimeStatusEffort(options.runtime.templatePhases, options.phase),
     sessionId: options.runtime.sessionId,
     phase: options.phase,
@@ -1491,18 +1516,60 @@ function extractStructuredResponse<T>(result: unknown, schema: z.ZodType<T>): T 
   return parsed.success ? parsed.data : null;
 }
 
-async function resolveModel(modelName: string, effort?: TemplatePhaseEffort) {
+async function resolveModel(config: ModelRoleConfig, effort?: TemplatePhaseEffort) {
   return createOpenAICompatibleModel({
-    modelName,
+    modelName: config.modelName,
     ...(effort ? { effort } : {}),
-    ...(process.env.OPENAI_BASE_URL ? { baseURL: process.env.OPENAI_BASE_URL } : {}),
+    ...(config.baseURL ? { baseURL: config.baseURL } : {}),
+    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
   });
 }
 
+type DeepAgentsTextGeneratorOptions =
+  | string
+  | ModelRoleConfigMap
+  | {
+      modelRoles: ModelRoleConfigMap;
+    };
+
+function isModelRoleConfigMap(value: unknown): value is ModelRoleConfigMap {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Partial<Record<ModelRole, Partial<ModelRoleConfig>>>;
+  return Boolean(
+    record.plan?.modelName &&
+      record.generate?.modelName &&
+      record.repair?.modelName,
+  );
+}
+
+function resolveConstructorModelRoles(options?: DeepAgentsTextGeneratorOptions): ModelRoleConfigMap {
+  if (typeof options === "string") {
+    return resolveModelRoleConfigs({
+      ...process.env,
+      APP_BUILDER_MODEL: options,
+    });
+  }
+
+  if (isModelRoleConfigMap(options)) {
+    return options;
+  }
+
+  if (options?.modelRoles) {
+    return options.modelRoles;
+  }
+
+  return resolveModelRoleConfigs();
+}
+
 export class DeepAgentsTextGenerator implements TextGenerator {
-  constructor(
-    private readonly model: string = process.env.APP_BUILDER_MODEL || "openai:gpt-4.1-mini",
-  ) {}
+  private readonly modelRoles: ModelRoleConfigMap;
+
+  constructor(options?: DeepAgentsTextGeneratorOptions) {
+    this.modelRoles = resolveConstructorModelRoles(options);
+  }
 
   private async runPhase<T>(
     runtime: TextGeneratorRuntime,
@@ -1525,7 +1592,9 @@ export class DeepAgentsTextGenerator implements TextGenerator {
           : options.stage === "generate"
             ? "generate"
             : "generateRepair";
-    const resolvedModel = await resolveModel(this.model, runtime.templatePhases[phaseName]?.effort);
+    const modelRole = modelRoleForRuntimePhase(phaseName);
+    const modelConfig = modelRole ? (runtime.modelRoles?.[modelRole] ?? this.modelRoles[modelRole]) : this.modelRoles.plan;
+    const resolvedModel = await resolveModel(modelConfig, runtime.templatePhases[phaseName]?.effort);
     const systemPrompt = await loadSystemPrompt(runtime, options.promptPath, options.stage);
     const skillsDirectory = path.join(runtime.templateDirectory, "skills");
 
@@ -1562,7 +1631,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       runtime,
       phaseName,
       options.timeoutLabel,
-      this.model,
+      modelConfig.modelName,
     );
 
     const structured = extractStructuredResponse(result, options.responseSchema);

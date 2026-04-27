@@ -1,4 +1,5 @@
 import type { PlanSpec } from "./plan-spec.js";
+import type { ModelRoleConfigMap } from "./model-config.js";
 
 export type ParsedSection = {
   heading: string;
@@ -280,6 +281,7 @@ export type TextGeneratorRuntime = {
   retryReasons?: string[];
   templatePhases: TemplatePhaseMap;
   templateRuntimeValidation: TemplateRuntimeValidation;
+  modelRoles: ModelRoleConfigMap;
 };
 
 export type TextGenerator = {

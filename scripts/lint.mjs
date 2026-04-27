@@ -31,7 +31,7 @@ async function collectFiles(dir) {
 
 function findIssues(contents) {
   const issues = [];
-  const lines = contents.split("\n");
+  const lines = contents.split(/\r?\n/);
 
   lines.forEach((line, index) => {
     if (/\t/.test(line)) {

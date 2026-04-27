@@ -8,6 +8,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { routeToPageFileCandidates } from "./app-router.js";
+import {
+  parseSanitizedModelRoleConfigs,
+  resolveModelRoleConfigs,
+  sanitizeModelRoleConfigs,
+  validateModelRoleApiKeys,
+  type SanitizedModelRoleConfigMap,
+} from "./model-config.js";
 import { prepareOutputWorkspace, writeDeepagentsConfig } from "./output-workspace.js";
 import { parsePrd } from "./prd-parser.js";
 import { normalizeSpec } from "./spec-normalizer.js";
@@ -1609,11 +1616,15 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     generateRepair: {},
   };
   let templateRuntimeValidation = defaultTemplateRuntimeValidation();
+  let persistedModelName: string | undefined;
+  let persistedModelRoles: Partial<SanitizedModelRoleConfigMap> = {};
 
   const configContents = await readIfExists(configPath);
   if (configContents) {
     try {
       const parsed = JSON.parse(configContents) as {
+        model?: unknown;
+        models?: unknown;
         template?: {
           id?: unknown;
           name?: unknown;
@@ -1623,6 +1634,10 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
           runtimeValidation?: unknown;
         };
       };
+      if (typeof parsed.model === "string" && parsed.model.trim() !== "") {
+        persistedModelName = parsed.model.trim();
+      }
+      persistedModelRoles = parseSanitizedModelRoleConfigs(parsed.models);
       if (typeof parsed.template?.id === "string" && parsed.template.id.trim() !== "") {
         templateId = parsed.template.id;
       }
@@ -1721,6 +1736,12 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     }
   }
 
+  const modelRoles = resolveModelRoleConfigs(process.env, {
+    persisted: persistedModelRoles,
+    fallbackModelName: persistedModelName,
+    requireApiKeys: false,
+  });
+
   return {
     sessionId: resolvedSessionId,
     outputDirectory,
@@ -1752,19 +1773,18 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     maxGenerateRetries: templateRepairRetries.generate,
     templatePhases,
     templateRuntimeValidation,
+    modelRoles,
   };
 }
 
-function requireSessionGenerator(generator?: TextGenerator): TextGenerator {
+function requireSessionGenerator(runtime: TextGeneratorRuntime, generator?: TextGenerator): TextGenerator {
   if (generator) {
     return generator;
   }
 
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is required.");
-  }
+  validateModelRoleApiKeys(runtime.modelRoles);
 
-  return new DeepAgentsTextGenerator();
+  return new DeepAgentsTextGenerator({ modelRoles: runtime.modelRoles });
 }
 
 function createSessionRuntime(
@@ -2015,7 +2035,7 @@ export async function validateSessionPhase(options: {
       });
 
       if (validation.reasons.length > 0) {
-        const generator = requireSessionGenerator(options.generator);
+        const generator = requireSessionGenerator(runtime, options.generator);
         await appendWorkflowLog("[host] validate 检测到计划阶段失败，恢复到计划修复阶段。");
         try {
           await continuePlanRepairFlow({
@@ -2087,7 +2107,7 @@ export async function validateSessionPhase(options: {
     });
 
     if (reasons.length > 0) {
-      const generator = requireSessionGenerator(options.generator);
+      const generator = requireSessionGenerator(runtime, options.generator);
       if (!planValidation.planSpec) {
         throw new Error(`Generation validation failed: ${reasons.join(" | ")}`);
       }
@@ -2255,14 +2275,12 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
     const spec = normalizeSpec(parsed, sourceMarkdown, options.appNameOverride);
     await fs.writeFile(workspace.sourcePrdSnapshotPath, sourceMarkdown, "utf8");
 
+    const modelRoles = resolveModelRoleConfigs(process.env, {
+      requireApiKeys: options.generator ? false : true,
+    });
     const generator =
       options.generator ??
-      (() => {
-        if (!process.env.OPENAI_API_KEY) {
-          throw new Error("OPENAI_API_KEY is required.");
-        }
-        return new DeepAgentsTextGenerator();
-      })();
+      new DeepAgentsTextGenerator({ modelRoles });
     const validator =
       options.validator ??
       (options.generator ? new PassthroughGeneratedAppValidator() : new ShellGeneratedAppValidator());
@@ -2272,7 +2290,8 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       sessionId: workspace.sessionId,
       startedAt: new Date().toISOString(),
       appName: spec.appName,
-      model: process.env.APP_BUILDER_MODEL || "openai:gpt-4.1-mini",
+      model: modelRoles.plan.modelName,
+      models: sanitizeModelRoleConfigs(modelRoles),
       workflow: {
         phase: "plan",
         completedPhases: [],
@@ -2327,6 +2346,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       maxGenerateRetries: template.repairRetries.generate,
       templatePhases: template.phases,
       templateRuntimeValidation: template.runtimeValidation,
+      modelRoles,
       ...overrides,
     });
     const maxPlanRepairs = template.repairRetries.plan;

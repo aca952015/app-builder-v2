@@ -14,6 +14,11 @@ import {
 } from "../src/lib/deepseek-openai.js";
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
+  DEFAULT_MODEL_NAME,
+  resolveModelRoleConfigs,
+  sanitizeModelRoleConfigs,
+} from "../src/lib/model-config.js";
+import {
   createTodoBoardRenderer,
   releaseWorkflowInputStream,
   resolveWorkflowStdoutMode,
@@ -32,6 +37,7 @@ import {
   formatTodoHeader,
   formatWorkflowStageLine,
   mergeRuntimeStatus,
+  modelRoleForRuntimePhase,
   renderArtifactStatus,
   formatElapsedTime,
   resolveDeepagentsStreamModes,
@@ -60,18 +66,134 @@ async function loadLangChainCoreMessages() {
 test("parseDotEnv reads simple key-value pairs", () => {
   const parsed = parseDotEnv(`
 # comment
-OPENAI_API_KEY=test-key
-OPENAI_BASE_URL="https://example.com/v1"
+APP_BUILDER_API_KEY=test-key
+APP_BUILDER_BASE_URL="https://example.com/v1"
 APP_BUILDER_MODEL=openai:gpt-4.1-mini
 APP_BUILDER_STREAM_MODES=updates,tools,values
 `);
 
   assert.deepEqual(parsed, {
-    OPENAI_API_KEY: "test-key",
-    OPENAI_BASE_URL: "https://example.com/v1",
+    APP_BUILDER_API_KEY: "test-key",
+    APP_BUILDER_BASE_URL: "https://example.com/v1",
     APP_BUILDER_MODEL: "openai:gpt-4.1-mini",
     APP_BUILDER_STREAM_MODES: "updates,tools,values",
   });
+});
+
+test("resolveModelRoleConfigs falls back to global model, base URL, and API key", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_BASE_URL: "https://proxy.example/v1",
+    APP_BUILDER_MODEL: "openai:gpt-5.4-mini",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].modelName, "openai:gpt-5.4-mini");
+    assert.equal(configs[role].baseURL, "https://proxy.example/v1");
+    assert.equal(configs[role].apiKey, "global-key");
+  }
+});
+
+test("resolveModelRoleConfigs defaults model names when only a global key is present", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+  });
+
+  assert.equal(configs.plan.modelName, DEFAULT_MODEL_NAME);
+  assert.equal(configs.generate.modelName, DEFAULT_MODEL_NAME);
+  assert.equal(configs.repair.modelName, DEFAULT_MODEL_NAME);
+});
+
+test("resolveModelRoleConfigs applies role-specific model, base URL, and API key overrides", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_BASE_URL: "https://global.example/v1",
+    APP_BUILDER_MODEL: "openai:global-model",
+    APP_BUILDER_PLAN_MODEL: "openai:plan-model",
+    APP_BUILDER_GENERATE_MODEL: "openai:generate-model",
+    APP_BUILDER_REPAIR_MODEL: "openai:repair-model",
+    APP_BUILDER_PLAN_BASE_URL: "https://plan.example/v1",
+    APP_BUILDER_GENERATE_BASE_URL: "https://generate.example/v1",
+    APP_BUILDER_REPAIR_BASE_URL: "https://repair.example/v1",
+    APP_BUILDER_PLAN_API_KEY: "plan-key",
+    APP_BUILDER_GENERATE_API_KEY: "generate-key",
+    APP_BUILDER_REPAIR_API_KEY: "repair-key",
+  });
+
+  assert.equal(configs.plan.modelName, "openai:plan-model");
+  assert.equal(configs.generate.modelName, "openai:generate-model");
+  assert.equal(configs.repair.modelName, "openai:repair-model");
+  assert.equal(configs.plan.baseURL, "https://plan.example/v1");
+  assert.equal(configs.generate.baseURL, "https://generate.example/v1");
+  assert.equal(configs.repair.baseURL, "https://repair.example/v1");
+  assert.equal(configs.plan.apiKey, "plan-key");
+  assert.equal(configs.generate.apiKey, "generate-key");
+  assert.equal(configs.repair.apiKey, "repair-key");
+});
+
+test("resolveModelRoleConfigs rejects missing role API key coverage without a global key", () => {
+  assert.throws(
+    () =>
+      resolveModelRoleConfigs({
+        APP_BUILDER_PLAN_API_KEY: "plan-key",
+      }),
+    /Missing: APP_BUILDER_GENERATE_API_KEY, APP_BUILDER_REPAIR_API_KEY/,
+  );
+});
+
+test("resolveModelRoleConfigs can merge persisted model metadata with current secrets", () => {
+  const configs = resolveModelRoleConfigs(
+    {
+      APP_BUILDER_API_KEY: "runtime-key",
+    },
+    {
+      fallbackModelName: "openai:legacy-model",
+      persisted: {
+        plan: {
+          role: "plan",
+          modelName: "openai:persisted-plan",
+          baseURL: "https://persisted-plan.example/v1",
+        },
+        repair: {
+          role: "repair",
+          modelName: "openai:persisted-repair",
+        },
+      },
+    },
+  );
+
+  assert.equal(configs.plan.modelName, "openai:persisted-plan");
+  assert.equal(configs.plan.baseURL, "https://persisted-plan.example/v1");
+  assert.equal(configs.generate.modelName, "openai:legacy-model");
+  assert.equal(configs.repair.modelName, "openai:persisted-repair");
+  assert.equal(configs.repair.apiKey, "runtime-key");
+});
+
+test("sanitizeModelRoleConfigs strips API keys", () => {
+  const sanitized = sanitizeModelRoleConfigs(
+    resolveModelRoleConfigs({
+      APP_BUILDER_API_KEY: "global-secret",
+      APP_BUILDER_MODEL: "openai:gpt-5.4-mini",
+      APP_BUILDER_BASE_URL: "https://proxy.example/v1",
+    }),
+  );
+  const serialized = JSON.stringify(sanitized);
+
+  assert.equal("apiKey" in sanitized.plan, false);
+  assert.equal("apiKey" in sanitized.generate, false);
+  assert.equal("apiKey" in sanitized.repair, false);
+  assert.doesNotMatch(serialized, /global-secret/);
+  assert.match(serialized, /openai:gpt-5\.4-mini/);
+});
+
+test("modelRoleForRuntimePhase maps workflow phases to model roles", () => {
+  assert.equal(modelRoleForRuntimePhase("plan"), "plan");
+  assert.equal(modelRoleForRuntimePhase("generate"), "generate");
+  assert.equal(modelRoleForRuntimePhase("planRepair"), "repair");
+  assert.equal(modelRoleForRuntimePhase("plan_repair"), "repair");
+  assert.equal(modelRoleForRuntimePhase("generateRepair"), "repair");
+  assert.equal(modelRoleForRuntimePhase("generate_repair"), "repair");
+  assert.equal(modelRoleForRuntimePhase("complete"), undefined);
 });
 
 test("resolveDeepagentsStreamModes returns defaults when env is empty", () => {
@@ -873,6 +995,29 @@ test("buildRuntimeStatus maps effort to the active phase", () => {
   assert.equal(buildRuntimeStatus({ runtime, phase: "complete" }).effort, undefined);
 });
 
+test("buildRuntimeStatus reports the active role model name", () => {
+  const runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases" | "modelRoles"> = {
+    sessionId: "runtime-session-3",
+    templatePhases: {
+      plan: { effort: "high" },
+      planRepair: { effort: "low" },
+      generate: { effort: "medium" },
+      generateRepair: { effort: "high" },
+    },
+    modelRoles: resolveModelRoleConfigs({
+      APP_BUILDER_API_KEY: "global-key",
+      APP_BUILDER_PLAN_MODEL: "openai:plan-model",
+      APP_BUILDER_GENERATE_MODEL: "openai:generate-model",
+      APP_BUILDER_REPAIR_MODEL: "openai:repair-model",
+    }),
+  };
+
+  assert.equal(buildRuntimeStatus({ runtime, phase: "plan" }).modelName, "openai:plan-model");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).modelName, "openai:generate-model");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).modelName, "openai:repair-model");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "generate_repair" }).modelName, "openai:repair-model");
+});
+
 test("withActivityTimeout keeps extending while activity continues", async () => {
   const result = await withActivityTimeout(
     async (signalActivity) => {
@@ -908,34 +1053,34 @@ test("withActivityTimeout rejects after prolonged inactivity", async () => {
 
 test("loadProjectEnv populates missing process env values from .env", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-env-"));
-  const originalApiKey = process.env.OPENAI_API_KEY;
-  const originalBaseUrl = process.env.OPENAI_BASE_URL;
+  const originalApiKey = process.env.APP_BUILDER_API_KEY;
+  const originalBaseUrl = process.env.APP_BUILDER_BASE_URL;
 
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.OPENAI_BASE_URL;
+  delete process.env.APP_BUILDER_API_KEY;
+  delete process.env.APP_BUILDER_BASE_URL;
 
   try {
     await writeFile(
       path.join(tempRoot, ".env"),
-      "OPENAI_API_KEY=from-file\nOPENAI_BASE_URL=https://proxy.example/v1\n",
+      "APP_BUILDER_API_KEY=from-file\nAPP_BUILDER_BASE_URL=https://proxy.example/v1\n",
       "utf8",
     );
 
     await loadProjectEnv(tempRoot);
 
-    assert.equal(process.env.OPENAI_API_KEY, "from-file");
-    assert.equal(process.env.OPENAI_BASE_URL, "https://proxy.example/v1");
+    assert.equal(process.env.APP_BUILDER_API_KEY, "from-file");
+    assert.equal(process.env.APP_BUILDER_BASE_URL, "https://proxy.example/v1");
   } finally {
     if (originalApiKey === undefined) {
-      delete process.env.OPENAI_API_KEY;
+      delete process.env.APP_BUILDER_API_KEY;
     } else {
-      process.env.OPENAI_API_KEY = originalApiKey;
+      process.env.APP_BUILDER_API_KEY = originalApiKey;
     }
 
     if (originalBaseUrl === undefined) {
-      delete process.env.OPENAI_BASE_URL;
+      delete process.env.APP_BUILDER_BASE_URL;
     } else {
-      process.env.OPENAI_BASE_URL = originalBaseUrl;
+      process.env.APP_BUILDER_BASE_URL = originalBaseUrl;
     }
 
     await rm(tempRoot, { recursive: true, force: true });
@@ -944,19 +1089,19 @@ test("loadProjectEnv populates missing process env values from .env", async () =
 
 test("loadProjectEnv does not override existing process env values", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-env-"));
-  const originalApiKey = process.env.OPENAI_API_KEY;
+  const originalApiKey = process.env.APP_BUILDER_API_KEY;
 
-  process.env.OPENAI_API_KEY = "already-set";
+  process.env.APP_BUILDER_API_KEY = "already-set";
 
   try {
-    await writeFile(path.join(tempRoot, ".env"), "OPENAI_API_KEY=from-file\n", "utf8");
+    await writeFile(path.join(tempRoot, ".env"), "APP_BUILDER_API_KEY=from-file\n", "utf8");
     await loadProjectEnv(tempRoot);
-    assert.equal(process.env.OPENAI_API_KEY, "already-set");
+    assert.equal(process.env.APP_BUILDER_API_KEY, "already-set");
   } finally {
     if (originalApiKey === undefined) {
-      delete process.env.OPENAI_API_KEY;
+      delete process.env.APP_BUILDER_API_KEY;
     } else {
-      process.env.OPENAI_API_KEY = originalApiKey;
+      process.env.APP_BUILDER_API_KEY = originalApiKey;
     }
 
     await rm(tempRoot, { recursive: true, force: true });

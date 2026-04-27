@@ -257,6 +257,15 @@ class CliRepairingGenerator extends CliTestGenerator {
   }
 }
 
+class ModelRoleCapturingRepairGenerator extends CliRepairingGenerator {
+  repairRuntime: TextGeneratorRuntime | undefined;
+
+  async generateRepairProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    this.repairRuntime = runtime;
+    return await super.generateRepairProject(planSpec, runtime);
+  }
+}
+
 class BrokenPlanSessionGenerator implements TextGenerator {
   async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
     await writeFile(runtime.deepagentsAnalysisPath, "# 不完整分析稿\n", "utf8");
@@ -725,6 +734,85 @@ test("runCli validate resumes generate repair instead of exiting on validation f
       /"phase": "complete"/,
     );
   } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runCli validate reconstructs persisted role model metadata for resume", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-model-resume-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+  const repairingGenerator = new ModelRoleCapturingRepairGenerator();
+  const repairValidator = new RepairingCliValidator();
+  const envKeys = [
+    "APP_BUILDER_API_KEY",
+    "APP_BUILDER_BASE_URL",
+    "APP_BUILDER_MODEL",
+    "APP_BUILDER_PLAN_MODEL",
+    "APP_BUILDER_GENERATE_MODEL",
+    "APP_BUILDER_REPAIR_MODEL",
+    "APP_BUILDER_PLAN_BASE_URL",
+    "APP_BUILDER_GENERATE_BASE_URL",
+    "APP_BUILDER_REPAIR_BASE_URL",
+  ] as const;
+  const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+
+  process.chdir(tempRoot);
+
+  try {
+    process.env.APP_BUILDER_API_KEY = "secret-for-initial-run";
+    process.env.APP_BUILDER_BASE_URL = "https://global.example/v1";
+    process.env.APP_BUILDER_MODEL = "openai:global-model";
+    process.env.APP_BUILDER_PLAN_MODEL = "openai:plan-resume-model";
+    process.env.APP_BUILDER_GENERATE_MODEL = "openai:generate-resume-model";
+    process.env.APP_BUILDER_REPAIR_MODEL = "openai:repair-resume-model";
+    process.env.APP_BUILDER_PLAN_BASE_URL = "https://plan-resume.example/v1";
+    process.env.APP_BUILDER_GENERATE_BASE_URL = "https://generate-resume.example/v1";
+    process.env.APP_BUILDER_REPAIR_BASE_URL = "https://repair-resume.example/v1";
+
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+    const result = await generateApplication({
+      specPath,
+      generator: new CliTestGenerator(),
+      validator: new SuccessfulCliValidator(),
+    });
+
+    for (const key of envKeys) {
+      delete process.env[key];
+    }
+
+    await runCli(
+      ["validate", result.sessionId, "--phase", "generate"],
+      {
+        generator: repairingGenerator,
+        validator: repairValidator,
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(repairingGenerator.generateRepairAttempts, 1);
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.modelName, "openai:plan-resume-model");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.modelName, "openai:generate-resume-model");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.modelName, "openai:repair-resume-model");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.baseURL, "https://plan-resume.example/v1");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.baseURL, "https://generate-resume.example/v1");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.baseURL, "https://repair-resume.example/v1");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.apiKey, undefined);
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), /Resumed from: generate_repair/);
+  } finally {
+    for (const key of envKeys) {
+      const original = originalEnv.get(key);
+      if (original === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = original;
+      }
+    }
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });
   }

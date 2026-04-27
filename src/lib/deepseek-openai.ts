@@ -535,6 +535,7 @@ export function createOpenAICompatibleModel(options: {
   modelName: string;
   effort?: TemplatePhaseEffort;
   baseURL?: string;
+  apiKey?: string;
 }) {
   const model = normalizeOpenAICompatibleModelName(options.modelName);
   const fields: OpenAICompatibleModelFields = {
@@ -542,6 +543,7 @@ export function createOpenAICompatibleModel(options: {
     temperature: 0,
     ...(options.effort ? { reasoning: { effort: options.effort } } : {}),
     ...(options.baseURL ? { configuration: { baseURL: options.baseURL } } : {}),
+    ...(options.apiKey ? { apiKey: options.apiKey } : {}),
   };
 
   if (!shouldUseDeepSeekReasoningContentCompat(options.modelName, options.baseURL)) {

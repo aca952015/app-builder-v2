@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { routeToAdminPagePath, routeToPageFileCandidates } from "../src/lib/app-router.js";
+import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
 import { type PlanSpec } from "../src/lib/plan-spec.js";
 import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
 import { buildPlanProjectPayload, buildPlanRepairPayload, runDeepAgentWithLogs } from "../src/lib/text-generator.js";
@@ -352,6 +353,9 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
       copyEnvExample: true,
       steps: [],
     },
+    modelRoles: resolveModelRoleConfigs({
+      APP_BUILDER_API_KEY: "test-key",
+    }),
     ...overrides,
   };
 }
@@ -2242,6 +2246,79 @@ test("generateApplication creates a session workspace under .out by default", as
     assert.equal(outputEntries.includes(".git"), true);
   } finally {
     process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication persists sanitized role model metadata", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-model-config-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const outputDirectory = path.join(tempRoot, "generated-app");
+  const envKeys = [
+    "APP_BUILDER_API_KEY",
+    "APP_BUILDER_BASE_URL",
+    "APP_BUILDER_MODEL",
+    "APP_BUILDER_PLAN_MODEL",
+    "APP_BUILDER_GENERATE_MODEL",
+    "APP_BUILDER_REPAIR_MODEL",
+    "APP_BUILDER_PLAN_BASE_URL",
+    "APP_BUILDER_GENERATE_BASE_URL",
+    "APP_BUILDER_REPAIR_BASE_URL",
+    "APP_BUILDER_PLAN_API_KEY",
+    "APP_BUILDER_GENERATE_API_KEY",
+    "APP_BUILDER_REPAIR_API_KEY",
+  ] as const;
+  const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+
+  try {
+    process.env.APP_BUILDER_API_KEY = "global-secret";
+    process.env.APP_BUILDER_BASE_URL = "https://global.example/v1";
+    process.env.APP_BUILDER_MODEL = "openai:global-model";
+    process.env.APP_BUILDER_PLAN_MODEL = "openai:plan-model";
+    process.env.APP_BUILDER_GENERATE_MODEL = "openai:generate-model";
+    process.env.APP_BUILDER_REPAIR_MODEL = "openai:repair-model";
+    process.env.APP_BUILDER_PLAN_BASE_URL = "https://plan.example/v1";
+    process.env.APP_BUILDER_GENERATE_BASE_URL = "https://generate.example/v1";
+    process.env.APP_BUILDER_REPAIR_BASE_URL = "https://repair.example/v1";
+    process.env.APP_BUILDER_PLAN_API_KEY = "plan-secret";
+    process.env.APP_BUILDER_GENERATE_API_KEY = "generate-secret";
+    process.env.APP_BUILDER_REPAIR_API_KEY = "repair-secret";
+
+    await generateApplication({
+      specPath,
+      outputDirectory,
+      force: true,
+      generator: new StubTextGenerator(),
+    });
+
+    const configRaw = await readFile(path.join(outputDirectory, ".deepagents/config.json"), "utf8");
+    const config = JSON.parse(configRaw) as {
+      model?: string;
+      models?: {
+        plan?: { modelName?: string; baseURL?: string; apiKey?: string };
+        generate?: { modelName?: string; baseURL?: string; apiKey?: string };
+        repair?: { modelName?: string; baseURL?: string; apiKey?: string };
+      };
+    };
+
+    assert.equal(config.model, "openai:plan-model");
+    assert.equal(config.models?.plan?.modelName, "openai:plan-model");
+    assert.equal(config.models?.generate?.modelName, "openai:generate-model");
+    assert.equal(config.models?.repair?.modelName, "openai:repair-model");
+    assert.equal(config.models?.plan?.baseURL, "https://plan.example/v1");
+    assert.equal(config.models?.generate?.baseURL, "https://generate.example/v1");
+    assert.equal(config.models?.repair?.baseURL, "https://repair.example/v1");
+    assert.equal(config.models?.plan?.apiKey, undefined);
+    assert.doesNotMatch(configRaw, /global-secret|plan-secret|generate-secret|repair-secret/);
+  } finally {
+    for (const key of envKeys) {
+      const original = originalEnv.get(key);
+      if (original === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = original;
+      }
+    }
     await rm(tempRoot, { recursive: true, force: true });
   }
 });

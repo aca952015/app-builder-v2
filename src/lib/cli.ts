@@ -2,6 +2,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { generateApplication, validateSessionPhase } from "./generator.js";
+import { resolveModelRoleConfigs } from "./model-config.js";
 import { DEFAULT_TEMPLATE_ID } from "./template-pack.js";
 import { resolveWorkflowStdoutMode } from "./terminal-ui.js";
 import { GenerateAppOptions, GeneratedAppValidator, StdoutMode, TextGenerator, ValidationPhase } from "./types.js";
@@ -12,10 +13,8 @@ function formatValidationStepLine(step: { name: string; ok: boolean; detail: str
 
 type CliExecutionParameterValue = string | boolean;
 
-const DEFAULT_DEEPAGENTS_MODEL = "openai:gpt-4.1-mini";
-
 function resolveCliModelName(): string {
-  return process.env.APP_BUILDER_MODEL || DEFAULT_DEEPAGENTS_MODEL;
+  return resolveModelRoleConfigs(process.env, { requireApiKeys: false }).plan.modelName;
 }
 
 function logCliExecutionParameters(
@@ -49,9 +48,12 @@ function helpText(): string {
   app-builder -v <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
 
 Environment:
-  OPENAI_API_KEY    Required unless a custom generator is injected
-  OPENAI_BASE_URL   Optional API base URL override
-  APP_BUILDER_MODEL Optional deepagents model override
+  APP_BUILDER_API_KEY Required unless role-specific API keys or a custom generator are used
+  APP_BUILDER_BASE_URL Optional API base URL fallback for all model roles
+  APP_BUILDER_MODEL Optional model fallback for all roles
+  APP_BUILDER_PLAN_MODEL / APP_BUILDER_GENERATE_MODEL / APP_BUILDER_REPAIR_MODEL Optional role model overrides
+  APP_BUILDER_PLAN_BASE_URL / APP_BUILDER_GENERATE_BASE_URL / APP_BUILDER_REPAIR_BASE_URL Optional role base URLs
+  APP_BUILDER_PLAN_API_KEY / APP_BUILDER_GENERATE_API_KEY / APP_BUILDER_REPAIR_API_KEY Optional role API keys
   APP_BUILDER_STREAM_MODES Optional comma-separated deepagents stream modes
   APP_BUILDER_STDOUT  Optional TTY stdout renderer override: dashboard or log
 `;
