@@ -161,6 +161,41 @@ test("convertMessagesToDeepSeekCompletionsMessageParams keeps reasoning_content 
   assert.equal(assistantMessages[1]?.reasoning_content, "The tool returned today's date, so tomorrow is one day later.");
 });
 
+test("convertMessagesToDeepSeekCompletionsMessageParams preserves empty reasoning_content for tool turns", async () => {
+  const { AIMessage, HumanMessage, ToolMessage } = await loadLangChainCoreMessages();
+  const converted = await convertMessagesToDeepSeekCompletionsMessageParams({
+    messages: [
+      new HumanMessage("Read the project file."),
+      new AIMessage({
+        content: "",
+        additional_kwargs: {
+          reasoning_content: "",
+        },
+        tool_calls: [
+          {
+            id: "call_1",
+            name: "read_file",
+            args: { path: "package.json" },
+            type: "tool_call",
+          },
+        ],
+      }),
+      new ToolMessage({
+        content: "{}",
+        tool_call_id: "call_1",
+      }),
+    ] as any,
+    model: "deepseek-v4-flash",
+  });
+  const assistantMessage = converted.find((message) => message.role === "assistant") as {
+    reasoning_content?: string;
+  } | undefined;
+
+  assert.notEqual(assistantMessage, undefined);
+  assert.equal("reasoning_content" in assistantMessage!, true);
+  assert.equal(assistantMessage?.reasoning_content, "");
+});
+
 test("convertMessagesToDeepSeekCompletionsMessageParams drops reasoning_content for non-tool turns", async () => {
   const { AIMessage, HumanMessage } = await loadLangChainCoreMessages();
   const converted = await convertMessagesToDeepSeekCompletionsMessageParams({

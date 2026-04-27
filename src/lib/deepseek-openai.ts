@@ -139,7 +139,7 @@ function hasAssistantToolCalls(message: BaseMessage, coreMessages: LangChainCore
 
 function getReasoningContent(message: BaseMessage): string | undefined {
   const reasoningContent = asReasoningMessage(message).additional_kwargs.reasoning_content;
-  return typeof reasoningContent === "string" && reasoningContent.length > 0 ? reasoningContent : undefined;
+  return typeof reasoningContent === "string" ? reasoningContent : undefined;
 }
 
 function computeReasoningContentPassthrough(
@@ -156,7 +156,7 @@ function computeReasoningContentPassthrough(
     }
 
     for (let index = segmentStart; index < exclusiveEnd; index += 1) {
-      if (getReasoningContent(messages[index]!)) {
+      if (getReasoningContent(messages[index]!) !== undefined) {
         passthrough[index] = true;
       }
     }
@@ -195,7 +195,7 @@ export async function convertMessagesToDeepSeekCompletionsMessageParams(
     }) as CompletionMessageParamWithReasoning[];
     const reasoningContent = passthrough[index] ? getReasoningContent(message) : undefined;
 
-    if (!reasoningContent) {
+    if (reasoningContent === undefined) {
       return converted;
     }
 
