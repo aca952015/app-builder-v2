@@ -1302,6 +1302,11 @@ function collectErrorMessages(error: unknown, limit = 8): string[] {
         messages.push(current.message);
       }
 
+      const errorRecord = current as { code?: unknown };
+      if (typeof errorRecord.code === "string" && errorRecord.code.trim()) {
+        messages.push(errorRecord.code);
+      }
+
       current = current.cause;
       continue;
     }
@@ -1309,12 +1314,17 @@ function collectErrorMessages(error: unknown, limit = 8): string[] {
     if (typeof current === "object") {
       const record = current as {
         message?: unknown;
+        code?: unknown;
         error?: unknown;
         cause?: unknown;
       };
 
       if (typeof record.message === "string" && record.message.trim()) {
         messages.push(record.message);
+      }
+
+      if (typeof record.code === "string" && record.code.trim()) {
+        messages.push(record.code);
       }
 
       current = record.cause ?? record.error;
@@ -1329,11 +1339,34 @@ function collectErrorMessages(error: unknown, limit = 8): string[] {
 
 export function extractCompatibleStreamErrorReason(error: unknown): string | null {
   const pattern = /\boutput\s+[a-z0-9_]+\s+\(\d+\)/i;
+  const transientPatterns: Array<{ pattern: RegExp; reason: string }> = [
+    {
+      pattern: /socket connection was closed unexpectedly/i,
+      reason: "socket connection closed unexpectedly",
+    },
+    {
+      pattern: /^connection error\.?$/i,
+      reason: "connection error",
+    },
+    {
+      pattern: /\bECONNRESET\b/i,
+      reason: "ECONNRESET",
+    },
+    {
+      pattern: /\b(?:ETIMEDOUT|ECONNABORTED|EPIPE|UND_ERR_SOCKET)\b/i,
+      reason: "transient transport error",
+    },
+  ];
 
   for (const message of collectErrorMessages(error)) {
     const match = message.match(pattern);
     if (match) {
       return match[0];
+    }
+
+    const transientMatch = transientPatterns.find((candidate) => candidate.pattern.test(message));
+    if (transientMatch) {
+      return transientMatch.reason;
     }
   }
 
@@ -1483,9 +1516,9 @@ export async function runDeepAgentWithLogs(
       }
 
       const currentRetry = retryCount + 1;
-      trace.lastNarrative = `检测到兼容端点流式响应错误，准备重试第 ${currentRetry} 次。`;
+      trace.lastNarrative = `检测到可重试的流式响应错误，准备重试第 ${currentRetry} 次。`;
       await appendWorkflowLog(
-        `[host] 检测到流式响应兼容性错误（${retryReason}），准备重试第 ${currentRetry}/${DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT} 次。`,
+        `[host] 检测到可重试流式响应错误（${retryReason}），准备重试第 ${currentRetry}/${DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT} 次。`,
       );
       writeSystemTraceEvent(
         trace.logFilePath,

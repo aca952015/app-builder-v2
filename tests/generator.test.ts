@@ -439,6 +439,86 @@ test("runDeepAgentWithLogs retries stream for compatible stream output errors", 
   }
 });
 
+test("runDeepAgentWithLogs retries stream for transient socket resets", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-stream-reset-retry-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const runtime = buildTestRuntime({
+    outputDirectory: tempRoot,
+    deepagentsDirectory,
+    deepagentsAgentsPath: path.join(deepagentsDirectory, "AGENTS.md"),
+    deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
+    deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
+    deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+    deepagentsConfigPath: path.join(deepagentsDirectory, "config.json"),
+    deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
+    deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
+    deepagentsGeneratePromptSnapshotPath: path.join(deepagentsDirectory, "generate-system-prompt.md"),
+    deepagentsGenerateRepairPromptSnapshotPath: path.join(deepagentsDirectory, "generate-repair-system-prompt.md"),
+    templateDirectory: path.join(deepagentsDirectory, "template"),
+    templatePlanPromptPath: path.join(deepagentsDirectory, "template", "prompts", "plan-system-prompt.md"),
+    templatePlanRepairPromptPath: path.join(deepagentsDirectory, "template", "prompts", "plan-repair-system-prompt.md"),
+    templateGeneratePromptPath: path.join(deepagentsDirectory, "template", "prompts", "generate-system-prompt.md"),
+    templateGenerateRepairPromptPath: path.join(deepagentsDirectory, "template", "prompts", "generate-repair-system-prompt.md"),
+    sourcePrdSnapshotPath: path.join(deepagentsDirectory, "source-prd.md"),
+    deepagentsAnalysisPath: path.join(deepagentsDirectory, "prd-analysis.md"),
+    deepagentsDetailedSpecPath: path.join(deepagentsDirectory, "generated-spec.md"),
+    deepagentsPlanSpecPath: path.join(deepagentsDirectory, "plan-spec.json"),
+    deepagentsPlanValidationPath: path.join(deepagentsDirectory, "plan-validation.json"),
+    deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
+  });
+
+  await mkdir(deepagentsDirectory, { recursive: true });
+
+  const result = {
+    structuredResponse: {
+      summary: "socket retry ok",
+    },
+  };
+  let streamCalls = 0;
+
+  const agent = {
+    async stream() {
+      streamCalls += 1;
+
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (streamCalls === 1) {
+            const socketError = Object.assign(
+              new Error(
+                "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()",
+              ),
+              {
+                code: "ECONNRESET",
+                path: "https://api.deepseek.com/chat/completions",
+              },
+            );
+            throw Object.assign(new Error("MiddlewareError: upstream stream failed"), {
+              cause: socketError,
+            });
+          }
+
+          yield ["messages", "retry success"];
+          yield ["values", result];
+        },
+      };
+    },
+  };
+
+  try {
+    const resolved = await runDeepAgentWithLogs(agent, { messages: [] }, runtime, "generate", "deepagents generation");
+
+    assert.equal(streamCalls, 2);
+    assert.equal(resolved, result);
+
+    const traceLog = await readFile(runtime.deepagentsLogPath, "utf8");
+    assert.match(traceLog, /stream-retry/);
+    assert.match(traceLog, /socket connection closed unexpectedly|ECONNRESET/);
+  } finally {
+    await closeWorkflowBoard();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("resolveSpawnCommand finds Windows command shims through PATHEXT", async (context) => {
   if (process.platform !== "win32") {
     context.skip("Windows-only command shim resolution");

@@ -390,6 +390,13 @@ test("extractCompatibleStreamErrorReason finds nested compatible stream errors",
   assert.equal(extractCompatibleStreamErrorReason(error), "output new_sensitive (1027)");
 });
 
+test("extractCompatibleStreamErrorReason finds OpenAI SDK connection errors", () => {
+  const error = new Error("middleware failed") as Error & { cause?: unknown };
+  error.cause = new Error("Connection error.");
+
+  assert.equal(extractCompatibleStreamErrorReason(error), "connection error");
+});
+
 test("createTodoBoardRenderer can stream incremental logs in tty log mode", async () => {
   const writes: string[] = [];
   const stdout = {
