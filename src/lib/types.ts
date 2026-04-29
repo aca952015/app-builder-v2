@@ -171,7 +171,7 @@ export type SessionValidationResult = {
   runtimeValidationLogPath?: string;
   runtimeInteractionValidationPath?: string;
   workflowPhase: WorkflowPhase;
-  resumedFromPhase?: Extract<WorkflowPhase, "plan_repair" | "generate_repair">;
+  resumedFromPhase?: WorkflowPhase;
 };
 
 export type PlanResult = {

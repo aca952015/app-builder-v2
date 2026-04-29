@@ -169,6 +169,15 @@ class CliTestGenerator implements TextGenerator {
   }
 }
 
+class CountingCliGenerator extends CliTestGenerator {
+  generateAttempts = 0;
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    this.generateAttempts += 1;
+    return await super.generateProject(planSpec, runtime);
+  }
+}
+
 class SuccessfulCliValidator implements GeneratedAppValidator {
   async validate(_outputDirectory: string, runtime: TextGeneratorRuntime) {
     await writeFile(runtime.deepagentsRuntimeValidationLogPath, "cli validate ok\n", "utf8");
@@ -459,6 +468,70 @@ test("runCli validate resolves a unique short session id prefix", async () => {
     assert.equal(stderrLines.length, 0);
     assert.match(stdoutLines.join("\n"), new RegExp(`Session: ${result.sessionId}`));
     assert.match(stdoutLines.join("\n"), /Validation passed\./);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runCli generate --resume resumes a plan-complete session by short id", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-resume-short-id-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+  const generator = new CountingCliGenerator();
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+    const result = await generateApplication({
+      specPath,
+      generator,
+      validator: new SuccessfulCliValidator(),
+    });
+    const configPath = path.join(result.outputDirectory, ".deepagents/config.json");
+    const persistedConfig = JSON.parse(await readFile(configPath, "utf8")) as {
+      workflow?: {
+        phase?: string;
+        completedPhases?: string[];
+      };
+    };
+    persistedConfig.workflow = {
+      phase: "plan",
+      completedPhases: [],
+    };
+    await writeFile(configPath, `${JSON.stringify(persistedConfig, null, 2)}\n`, "utf8");
+
+    generator.generateAttempts = 0;
+    const shortSessionId = result.sessionId.slice(0, 8);
+
+    await runCli(
+      ["generate", "--resume", shortSessionId, "--stdout", "log"],
+      {
+        generator,
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(generator.generateAttempts, 1);
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), /CLI execution parameters:/);
+    assert.match(stdoutLines.join("\n"), /- command: generate/);
+    assert.match(stdoutLines.join("\n"), new RegExp(`- resume: ${shortSessionId}`));
+    assert.match(stdoutLines.join("\n"), new RegExp(`Session: ${result.sessionId}`));
+    assert.match(stdoutLines.join("\n"), /Phase: generate/);
+    assert.match(stdoutLines.join("\n"), /Workflow: complete/);
+    assert.match(stdoutLines.join("\n"), /Resumed from: plan/);
+    assert.match(stdoutLines.join("\n"), /Session resumed\./);
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      /"valid": true/,
+    );
+    assert.match(await readFile(configPath, "utf8"), /"phase": "complete"/);
   } finally {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });

@@ -1,11 +1,18 @@
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-import { generateApplication, validateSessionPhase } from "./generator.js";
+import { generateApplication, resumeSession, validateSessionPhase } from "./generator.js";
 import { resolveModelRoleConfigs } from "./model-config.js";
 import { DEFAULT_TEMPLATE_ID } from "./template-pack.js";
 import { resolveWorkflowStdoutMode } from "./terminal-ui.js";
-import { GenerateAppOptions, GeneratedAppValidator, StdoutMode, TextGenerator, ValidationPhase } from "./types.js";
+import type {
+  GenerateAppOptions,
+  GeneratedAppValidator,
+  SessionValidationResult,
+  StdoutMode,
+  TextGenerator,
+  ValidationPhase,
+} from "./types.js";
 
 function formatValidationStepLine(step: { name: string; ok: boolean; detail: string }): string {
   return `- ${step.ok ? "OK" : "FAIL"} ${step.name}: ${step.detail}`;
@@ -32,6 +39,32 @@ function logCliExecutionParameters(
   }
 }
 
+function printSessionValidationResult(
+  result: SessionValidationResult,
+  stdout: Pick<typeof console, "log">,
+): void {
+  stdout.log(`Session: ${result.sessionId}`);
+  stdout.log(`Phase: ${result.phase}`);
+  stdout.log(`Output: ${result.outputDirectory}`);
+  stdout.log(`Validation artifact: ${result.validationPath}`);
+  if (result.runtimeValidationLogPath) {
+    stdout.log(`Runtime log: ${result.runtimeValidationLogPath}`);
+  }
+  if (result.runtimeInteractionValidationPath) {
+    stdout.log(`Runtime interaction: ${result.runtimeInteractionValidationPath}`);
+  }
+  stdout.log(`Workflow: ${result.workflowPhase}`);
+  if (result.resumedFromPhase) {
+    stdout.log(`Resumed from: ${result.resumedFromPhase}`);
+  }
+  if (result.phase === "generate" && result.steps && result.steps.length > 0) {
+    stdout.log("Validation steps:");
+    for (const step of result.steps) {
+      stdout.log(formatValidationStepLine(step));
+    }
+  }
+}
+
 type CliDeps = {
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
@@ -43,7 +76,9 @@ type CliDeps = {
 function helpText(): string {
   return `Usage:
   app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--force] [--stdout <log|dashboard>]
+  app-builder generate --resume <session-id> [--stdout <log|dashboard>]
   app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--force] [--stdout <log|dashboard>]
+  app-builder -g --resume <session-id> [--stdout <log|dashboard>]
   app-builder validate <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
   app-builder -v <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
 
@@ -122,26 +157,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       ...(deps.validator ? { validator: deps.validator } : {}),
     });
 
-    stdout.log(`Session: ${result.sessionId}`);
-    stdout.log(`Phase: ${result.phase}`);
-    stdout.log(`Output: ${result.outputDirectory}`);
-    stdout.log(`Validation artifact: ${result.validationPath}`);
-    if (result.runtimeValidationLogPath) {
-      stdout.log(`Runtime log: ${result.runtimeValidationLogPath}`);
-    }
-    if (result.runtimeInteractionValidationPath) {
-      stdout.log(`Runtime interaction: ${result.runtimeInteractionValidationPath}`);
-    }
-    stdout.log(`Workflow: ${result.workflowPhase}`);
-    if (result.resumedFromPhase) {
-      stdout.log(`Resumed from: ${result.resumedFromPhase}`);
-    }
-    if (result.phase === "generate" && result.steps && result.steps.length > 0) {
-      stdout.log("Validation steps:");
-      for (const step of result.steps) {
-        stdout.log(formatValidationStepLine(step));
-      }
-    }
+    printSessionValidationResult(result, stdout);
 
     if (!result.valid) {
       for (const reason of result.reasons) {
@@ -161,9 +177,58 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       "app-name": { type: "string" },
       template: { type: "string" },
       force: { type: "boolean" },
+      resume: { type: "string" },
       stdout: { type: "string" },
     },
   });
+
+  const resumeSessionId =
+    parsed.values.resume && parsed.values.resume.trim() !== ""
+      ? parsed.values.resume.trim()
+      : undefined;
+  const stdoutMode: StdoutMode = resolveWorkflowStdoutMode(parsed.values.stdout);
+
+  if (parsed.values.resume !== undefined) {
+    if (!resumeSessionId) {
+      throw new Error("A session id is required when using --resume.");
+    }
+
+    if (parsed.positionals.length > 0) {
+      throw new Error("Do not pass a Markdown spec path when using --resume; pass only --resume <session-id>.");
+    }
+
+    if (parsed.values["app-name"] || parsed.values.template || parsed.values.force === true) {
+      throw new Error("The --app-name, --template, and --force options cannot be used with --resume.");
+    }
+
+    logCliExecutionParameters(stdoutMode, stdout, {
+      command: "generate",
+      resume: resumeSessionId,
+      model: resolveCliModelName(),
+      stdout: stdoutMode,
+      cwd,
+    });
+
+    const result = await resumeSession({
+      sessionId: resumeSessionId,
+      stdoutMode,
+      cwd,
+      ...(deps.generator ? { generator: deps.generator } : {}),
+      ...(deps.validator ? { validator: deps.validator } : {}),
+    });
+
+    printSessionValidationResult(result, stdout);
+
+    if (!result.valid) {
+      for (const reason of result.reasons) {
+        stderr.error(`- ${reason}`);
+      }
+      throw new Error(`Resume failed for session "${result.sessionId}" phase "${result.phase}".`);
+    }
+
+    stdout.log(result.resumedFromPhase ? "Session resumed." : "Session already complete.");
+    return;
+  }
 
   const specPath = parsed.positionals[0];
   if (!specPath) {
@@ -179,7 +244,6 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     parsed.values.template && parsed.values.template.trim() !== ""
       ? parsed.values.template
       : DEFAULT_TEMPLATE_ID;
-  const stdoutMode: StdoutMode = resolveWorkflowStdoutMode(parsed.values.stdout);
 
   const options: GenerateAppOptions = {
     specPath: resolvedSpecPath,

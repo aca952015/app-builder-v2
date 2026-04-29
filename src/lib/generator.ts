@@ -2524,6 +2524,118 @@ export async function validateSessionPhase(options: {
   }
 }
 
+async function summarizeResumedGenerationSession(
+  runtime: TextGeneratorRuntime,
+  resumedFromPhase?: WorkflowPhase,
+): Promise<SessionValidationResult> {
+  const generationValidation = await readPersistedGenerationValidation(runtime.deepagentsGenerationValidationPath);
+  const workflowPhase = await readPersistedWorkflowPhase(runtime.deepagentsConfigPath) ?? "complete";
+  const valid = generationValidation?.valid ?? workflowPhase === "complete";
+  const result: SessionValidationResult = {
+    sessionId: runtime.sessionId,
+    phase: "generate",
+    outputDirectory: runtime.outputDirectory,
+    valid,
+    reasons: generationValidation?.reasons ?? (valid ? [] : [`恢复会话未完成：当前 workflow phase 为 ${workflowPhase}。`]),
+    steps: generationValidation?.steps ?? [],
+    validationPath: runtime.deepagentsGenerationValidationPath,
+    runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
+    runtimeInteractionValidationPath: runtime.deepagentsRuntimeInteractionValidationPath,
+    workflowPhase,
+  };
+
+  if (resumedFromPhase) {
+    result.resumedFromPhase = resumedFromPhase;
+  }
+
+  return result;
+}
+
+export async function resumeSession(options: {
+  sessionId: string;
+  cwd?: string;
+  stdoutMode?: StdoutMode;
+  generator?: TextGenerator;
+  validator?: GeneratedAppValidator;
+}): Promise<SessionValidationResult> {
+  setWorkflowStdoutMode(options.stdoutMode);
+  try {
+    const runtime = await createRuntimeForSession(options.sessionId, options.cwd);
+    const persistedWorkflowPhase = await readPersistedWorkflowPhase(runtime.deepagentsConfigPath);
+
+    if (persistedWorkflowPhase === "complete") {
+      return await summarizeResumedGenerationSession(runtime);
+    }
+
+    const phase = await resolveValidationPhase(runtime);
+    if (phase === "plan") {
+      const validation = await collectPersistedPlanValidation(runtime);
+      await writePlanValidationResult(runtime.deepagentsPlanValidationPath, {
+        valid: validation.reasons.length === 0,
+        reasons: validation.reasons,
+        ...(validation.planSpec ? { planSpecVersion: validation.planSpec.version } : {}),
+      });
+
+      const generator = requireSessionGenerator(runtime, options.generator);
+      const validator = options.validator ?? new ShellGeneratedAppValidator();
+
+      if (validation.reasons.length > 0) {
+        await appendWorkflowLog("[host] resume 检测到计划阶段失败，恢复到计划修复阶段。");
+        try {
+          await continuePlanRepairFlow({
+            runtime,
+            generator,
+            validator,
+            initialRetryReasons: validation.reasons,
+          });
+        } finally {
+          await closeWorkflowBoard();
+        }
+
+        return await summarizeResumedGenerationSession(runtime, "plan_repair");
+      }
+
+      if (!validation.planSpec) {
+        throw new Error("Plan validation passed without a usable artifacts.planSpec.");
+      }
+
+      await appendWorkflowLog("[host] resume 检测到计划阶段已通过，继续生成阶段。");
+      try {
+        await continueGenerateFlow({
+          runtime,
+          generator,
+          validator,
+          approvedPlan: validation.planSpec,
+          initialRetryReasons: [],
+        });
+      } finally {
+        await closeWorkflowBoard();
+      }
+
+      return await summarizeResumedGenerationSession(
+        runtime,
+        persistedWorkflowPhase === "plan_repair" ? "plan_repair" : "plan",
+      );
+    }
+
+    const result = await validateSessionPhase({
+      sessionId: runtime.sessionId,
+      phase: "generate",
+      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(options.stdoutMode ? { stdoutMode: options.stdoutMode } : {}),
+      ...(options.generator ? { generator: options.generator } : {}),
+      ...(options.validator ? { validator: options.validator } : {}),
+    });
+
+    return {
+      ...result,
+      resumedFromPhase: result.resumedFromPhase ?? persistedWorkflowPhase ?? "generate",
+    };
+  } finally {
+    setWorkflowStdoutMode(undefined);
+  }
+}
+
 async function resolveValidationPhase(
   runtime: TextGeneratorRuntime,
   requestedPhase?: ValidationPhase,
