@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { routeToPageFileCandidates } from "./app-router.js";
+import { parseDotEnv } from "./env.js";
 import {
   parseSanitizedModelRoleConfigs,
   resolveModelRoleConfigs,
@@ -773,6 +774,45 @@ function collectMissingDeliveryAcceptanceChecks(
   });
 }
 
+async function collectEnvironmentVariableIssues(
+  outputDirectory: string,
+  planSpec: PlanSpec,
+): Promise<string[]> {
+  const declaredVariables = (planSpec.environmentVariables ?? [])
+    .filter((variable) => (variable.targetFile ?? ".env.example") === ".env.example");
+  if (declaredVariables.length === 0) {
+    return [];
+  }
+
+  const envExamplePath = path.join(outputDirectory, ".env.example");
+  const envExampleContents = await readIfExists(envExamplePath);
+  if (!envExampleContents || envExampleContents.trim().length === 0) {
+    return ["生成阶段未完成：planSpec.environmentVariables 声明了环境变量，但 .env.example 尚未落盘。"];
+  }
+
+  const parsed = parseDotEnv(envExampleContents);
+  const missingNames = declaredVariables
+    .filter((variable) => parsed[variable.name] === undefined)
+    .map((variable) => variable.name);
+  const mismatchedNames = declaredVariables
+    .filter((variable) => {
+      const actual = parsed[variable.name];
+      return actual !== undefined && actual !== variable.value;
+    })
+    .map((variable) => variable.name);
+  const issues: string[] = [];
+
+  if (missingNames.length > 0) {
+    issues.push(`生成阶段未完成：.env.example 缺少 planSpec.environmentVariables 声明的变量：${missingNames.join(", ")}。`);
+  }
+
+  if (mismatchedNames.length > 0) {
+    issues.push(`生成阶段未完成：.env.example 中以下变量的值与 planSpec.environmentVariables 不一致：${mismatchedNames.join(", ")}。`);
+  }
+
+  return issues;
+}
+
 function resolveAppPrefixedPath(outputDirectory: string, filePath: string): string {
   const relativePath = path.relative(outputDirectory, filePath);
   return path.join(outputDirectory, "app", relativePath);
@@ -1371,6 +1411,7 @@ async function collectPersistedGeneratedValidation(
   const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
   await appendIndirectResourceCoverageNotice(coverage.indirectResources);
   const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
+  const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, planSpec);
 
   if (coverage.missingApiPaths.length > 0) {
     reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
@@ -1383,6 +1424,7 @@ async function collectPersistedGeneratedValidation(
   if (missingAcceptanceChecks.length > 0) {
     reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
   }
+  reasons.push(...environmentIssues);
 
   let steps: GenerationValidationStep[] = [];
   if (reasons.length === 0) {
@@ -1430,6 +1472,7 @@ async function validateGeneratedArtifacts(
   const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
   await appendIndirectResourceCoverageNotice(coverage.indirectResources);
   const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
+  const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, planSpec);
   if (coverage.missingPageRoutes.length > 0) {
     reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
   }
@@ -1439,6 +1482,7 @@ async function validateGeneratedArtifacts(
   if (missingAcceptanceChecks.length > 0) {
     reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
   }
+  reasons.push(...environmentIssues);
 
   let steps: GenerationValidationStep[] = [];
   if (reasons.length === 0) {

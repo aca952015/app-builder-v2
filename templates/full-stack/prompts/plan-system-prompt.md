@@ -96,6 +96,9 @@
   - `flow` 类型填流程名
 - 如果 PRD 信息不足，可以做保守默认，但这些默认必须写入 `assumptions`，并体现在 JSON 定义中。
 - 不允许输出“数据模型：无”“后续补充”这类不可执行描述。
+- 如果 PRD 中包含外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须写入 `planSpec.references`，并在 `artifacts.generatedSpec` 中增加 `References` 章节说明。
+- `planSpec.references` 只描述参考资料本身，不要求也不提供 `relatedApis`、`apiPaths` 之类的绑定字段。
+- `references` 不属于宿主强制验收项，不要为了引用资料额外制造 `acceptanceChecks`。
 
 ## 工作方式
 

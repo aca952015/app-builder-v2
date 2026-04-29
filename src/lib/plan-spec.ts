@@ -91,6 +91,19 @@ export const planSpecSchema = z.object({
     name: z.string().min(1),
     steps: z.array(z.string().min(1)).min(1),
   })).min(1),
+  environmentVariables: z.array(z.object({
+    name: z.string().min(1).regex(/^[A-Z][A-Z0-9_]*$/),
+    value: z.string().min(1),
+    description: z.string().min(1).optional(),
+    targetFile: z.literal(".env.example").optional(),
+  })).optional(),
+  references: z.array(z.object({
+    name: z.string().min(1),
+    type: z.enum(["external_api", "external_service", "documentation", "other"]),
+    url: z.string().min(1).optional(),
+    description: z.string().min(1),
+    usage: z.string().min(1).optional(),
+  })).optional(),
   assumptions: z.array(z.string().min(1)).default([]),
   acceptanceChecks: z.array(z.object({
     id: z.string().min(1),

@@ -51,6 +51,9 @@
 - 如需修改现有文件，必须先读再改。
 - 若某项失败来自资源/API/页面映射不完整，优先最小化补全 JSON 结构，再同步 Markdown 文档一致性。
 - 若某个资源实际上只作为嵌套数据间接使用，不应强行补出专有 page/API；应在 `artifacts.planSpec.resources[*].usage` 中显式标为 `indirect`，并同步文档说明。
+- 如果失败项或现有 PRD 镜像涉及外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须补入 `planSpec.references`，并同步 `artifacts.generatedSpec` 的 `References` 章节。
+- `planSpec.references` 只描述参考资料本身，不要求也不提供 `relatedApis`、`apiPaths` 之类的绑定字段。
+- `references` 不属于宿主强制验收项，不要为了引用资料额外制造 `acceptanceChecks`。
 - `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束。
 - 在 `artifacts.planSpec` 重新成为合法 JSON 且通过 `hardConstraints.planSpecSchemaValidation.schema` 校验前，不允许结束修补或返回最终结构化响应。
 - 可选字符串字段无值时必须省略，不能写成空字符串 `""`；必填字符串字段必须提供非空字符串。

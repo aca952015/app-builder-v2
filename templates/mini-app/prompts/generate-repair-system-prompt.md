@@ -11,6 +11,10 @@
 
 - 页面修复必须继续以 `planSpec.pages[*].route` 为准
 - API 修复必须继续以 `planSpec.apis[*].path` 为准
+- `planSpec.references` 是修复时理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构的参考资料；你需要自行判断哪些 reference 与当前失败项相关
+- `references` 不是宿主强制验收项，不要因为某个 reference 未被使用就额外生成无关功能
+- 如果失败项提到 `.env.example`、`planSpec.environmentVariables` 或环境变量缺失/不一致，必须按 `planSpec.environmentVariables` 修补根目录 `/.env.example`
+- 修补 `.env.example` 时必须保留 starter 已有变量，并对每个目标为 `.env.example` 的条目写入精确的 `name=value`
 - 如果失败项来自运行验证，必须结合 `artifacts.runtimeValidationLog` 的真实输出修复，并确保输入里的 `template.runtimeValidation` 步骤可以通过
 - 继续保持 mini-app 的轻量结构，不要为修一个错误引入整套 full-stack 基础设施
 

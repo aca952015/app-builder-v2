@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { routeToAdminPagePath, routeToPageFileCandidates } from "../src/lib/app-router.js";
 import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
-import { type PlanSpec } from "../src/lib/plan-spec.js";
+import { validatePlanSpec, type PlanSpec } from "../src/lib/plan-spec.js";
 import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
 import { buildPlanProjectPayload, buildPlanRepairPayload, runDeepAgentWithLogs } from "../src/lib/text-generator.js";
 import { closeWorkflowBoard } from "../src/lib/terminal-ui.js";
@@ -575,6 +575,43 @@ test("routeToPageFileCandidates normalizes common dynamic route syntaxes to Next
   assert.equal(routeToAdminPagePath("/alarms/:source_Path"), "app/(admin)/alarms/[source_Path]/page.tsx");
 });
 
+test("planSpec schema accepts PRD-derived environment variables and references", () => {
+  const planSpec = buildPlanSpec();
+  planSpec.environmentVariables = [
+    {
+      name: "QWEATHER_API_KEY",
+      value: "e1499e17f3934df58273c9d4ea56bc54",
+      description: "和风天气 API 调用密钥。",
+      targetFile: ".env.example",
+    },
+    {
+      name: "QWEATHER_API_HOST",
+      value: "my6yw2bmj5.re.qweatherapi.com",
+      description: "和风天气 API Host。",
+      targetFile: ".env.example",
+    },
+  ];
+  planSpec.references = [
+    {
+      name: "QWeather 实时天气 API",
+      type: "external_api",
+      url: "https://dev.qweather.com/docs/api/weather/weather-now/",
+      description: "用于理解和风天气实时天气接口的认证、请求参数和响应结构。",
+      usage: "生成阶段自行判断是否用于相关天气 API 实现。",
+    },
+  ];
+
+  const validation = validatePlanSpec(planSpec);
+
+  assert.equal(validation.success, true);
+  if (validation.success) {
+    assert.equal(validation.data.environmentVariables?.length, 2);
+    assert.equal(validation.data.environmentVariables?.[0]?.name, "QWEATHER_API_KEY");
+    assert.equal(validation.data.references?.length, 1);
+    assert.equal(validation.data.references?.[0]?.type, "external_api");
+  }
+});
+
 async function writeImplementedProjectFiles(options: {
   outputDirectory: string;
   planSpec: PlanSpec;
@@ -771,6 +808,100 @@ class StubTextGenerator implements TextGenerator {
 
   async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
     throw new Error("generateRepairProject should not be called in StubTextGenerator");
+  }
+}
+
+function buildWeatherEnvPlanSpec(): PlanSpec {
+  const planSpec = buildIndirectSupportPlanSpec();
+  planSpec.environmentVariables = [
+    {
+      name: "QWEATHER_API_KEY",
+      value: "e1499e17f3934df58273c9d4ea56bc54",
+      description: "和风天气 API 调用密钥。",
+      targetFile: ".env.example",
+    },
+    {
+      name: "QWEATHER_API_HOST",
+      value: "my6yw2bmj5.re.qweatherapi.com",
+      description: "和风天气 API Host。",
+      targetFile: ".env.example",
+    },
+  ];
+  return planSpec;
+}
+
+class EnvRepairTextGenerator implements TextGenerator {
+  generateAttempts = 0;
+  repairAttempts = 0;
+
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildWeatherEnvPlanSpec();
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# 天气分析\n\n需要和风天气环境变量。\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# 天气规格\n\n`.env.example` 必须包含 QWeather 配置。\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+
+    return {
+      summary: "Weather planner wrote env-aware artifacts.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    this.generateAttempts += 1;
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Weather Report\n\nInitial generated app.\n",
+    });
+
+    return {
+      summary: "Initial generation omitted environment variables.",
+      filesWritten: ["app-builder-report.md"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async generateRepairProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    this.repairAttempts += 1;
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Weather Report\n\nRepaired generated app.\n",
+      extraFiles: [
+        {
+          path: ".env.example",
+          contents: [
+            "NEXT_PUBLIC_APP_NAME=Mini App",
+            "QWEATHER_API_KEY=e1499e17f3934df58273c9d4ea56bc54",
+            "QWEATHER_API_HOST=my6yw2bmj5.re.qweatherapi.com",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    return {
+      summary: "Generation repair added environment variables.",
+      filesWritten: ["app-builder-report.md", ".env.example"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in EnvRepairTextGenerator");
   }
 }
 
@@ -1879,6 +2010,44 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
   }
 });
 
+test("generateApplication repairs mini-app .env.example when planSpec declares environment variables", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-env-vars-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new EnvRepairTextGenerator();
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "mini-app",
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const envExample = await readFile(path.join(result.outputDirectory, ".env.example"), "utf8");
+    const planSpecSnapshot = await readFile(
+      path.join(result.outputDirectory, ".deepagents/plan-spec.json"),
+      "utf8",
+    );
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+    const errorLog = await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8");
+
+    assert.equal(generator.generateAttempts, 1);
+    assert.equal(generator.repairAttempts, 1);
+    assert.match(envExample, /^NEXT_PUBLIC_APP_NAME=Mini App$/m);
+    assert.match(envExample, /^QWEATHER_API_KEY=e1499e17f3934df58273c9d4ea56bc54$/m);
+    assert.match(envExample, /^QWEATHER_API_HOST=my6yw2bmj5.re.qweatherapi.com$/m);
+    assert.match(planSpecSnapshot, /"environmentVariables": \[/);
+    assert.match(generationValidation, /"valid": true/);
+    assert.match(errorLog, /\.env\.example 缺少 planSpec\.environmentVariables 声明的变量：QWEATHER_API_KEY, QWEATHER_API_HOST/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication retries the plan phase until plan-spec.json is valid", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-retry-plan-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -2466,6 +2635,8 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /空字符串/);
   assert.ok(payload.planSpecSchema);
+  assert.match(JSON.stringify(payload.planSpecSchema), /references/);
+  assert.doesNotMatch(JSON.stringify(payload.planSpecSchema), /relatedApis/);
 });
 
 test("plan-repair payload preserves the blocking hard constraint for plan-spec schema validation", () => {
@@ -2527,8 +2698,13 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planPromptSource, /`hardConstraints\.planSpecSchemaValidation`/);
   assert.match(planPromptSource, /空字符串/);
   assert.match(planPromptSource, /把 `\/\.deepagents\/\.\.\.` 改成 `\/deepagents\/\.\.\.`/);
+  assert.match(planPromptSource, /planSpec\.references/);
+  assert.match(planPromptSource, /不要求也不提供 `relatedApis`/);
   assert.match(generatePromptSource, /`planSpec` 是唯一事实来源/);
   assert.match(generatePromptSource, /不能重新分析原始 PRD/);
+  assert.match(generatePromptSource, /planSpec\.references/);
+  assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
+  assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
   assert.match(generatePromptSource, /禁止执行：调用任何子代理/);
   assert.match(generatePromptSource, /implementedPages/);
   assert.match(generatePromptSource, /必须先调用一次 `write_todos`/);
@@ -2552,9 +2728,12 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planRepairPromptSource, /禁止执行：调用任何子代理/);
   assert.match(planRepairPromptSource, /只补齐缺失或错误部分/);
   assert.match(planRepairPromptSource, /`\/\.deepagents\/source-prd\.md`/);
+  assert.match(planRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /validationFailures/);
   assert.match(generateRepairPromptSource, /禁止执行：调用任何子代理/);
   assert.match(generateRepairPromptSource, /只补齐缺失实现或错误接线/);
+  assert.match(generateRepairPromptSource, /planSpec\.references/);
+  assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);
   assert.match(generateRepairPromptSource, /页面修复必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/generation-validation\.json`/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/runtime-validation\.log`/);
@@ -2564,4 +2743,43 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generateRepairPromptSource, /`\/app-builder-report\.md`/);
   assert.match(generateRepairPromptSource, /如果现有页面仍使用 mock 数据、演示数组、硬编码业务统计、`Math\.random\(\)` 模拟结果/);
   assert.match(generateRepairPromptSource, /必须改为对接 `planSpec\.apis` 中对应的 Route Handlers/);
+});
+
+test("mini-app prompts preserve PRD environment configuration through planSpec", async () => {
+  const planPromptSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/prompts/plan-system-prompt.md"),
+    "utf8",
+  );
+  const planRepairPromptSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/prompts/plan-repair-system-prompt.md"),
+    "utf8",
+  );
+  const generatePromptSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/prompts/generate-system-prompt.md"),
+    "utf8",
+  );
+  const generateRepairPromptSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/prompts/generate-repair-system-prompt.md"),
+    "utf8",
+  );
+
+  assert.match(planPromptSource, /你是 mini-app 模板的“计划阶段代理”/);
+  assert.match(planPromptSource, /环境配置/);
+  assert.match(planPromptSource, /planSpec\.environmentVariables/);
+  assert.match(planPromptSource, /planSpec\.references/);
+  assert.match(planPromptSource, /不要求也不提供 `relatedApis`/);
+  assert.match(planPromptSource, /targetFile` 写 `\.env\.example`/);
+  assert.match(planRepairPromptSource, /计划修复阶段代理/);
+  assert.match(planRepairPromptSource, /planSpec\.environmentVariables/);
+  assert.match(planRepairPromptSource, /planSpec\.references/);
+  assert.match(generatePromptSource, /planSpec\.environmentVariables/);
+  assert.match(generatePromptSource, /planSpec\.references/);
+  assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
+  assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
+  assert.match(generatePromptSource, /保留 starter 已有变量/);
+  assert.match(generatePromptSource, /filesWritten` 必须包含 `\.env\.example`/);
+  assert.match(generateRepairPromptSource, /planSpec\.environmentVariables/);
+  assert.match(generateRepairPromptSource, /planSpec\.references/);
+  assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);
+  assert.match(generateRepairPromptSource, /精确的 `name=value`/);
 });
