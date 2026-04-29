@@ -22,8 +22,10 @@ import { normalizeSpec } from "./spec-normalizer.js";
 import { copyStarterScaffold, loadTemplatePack, stageTemplatePack } from "./template-pack.js";
 import { DeepAgentsTextGenerator, materializeSessionPromptSnapshots } from "./text-generator.js";
 import {
+  closeRuntimeInteractionValidationSession,
   runInteractiveRuntimeValidation,
   type RuntimeInteractionValidationArtifact,
+  type RuntimeInteractionValidationSession,
 } from "./interactive-runtime-validation.js";
 import {
   appendWorkflowLog,
@@ -1407,11 +1409,38 @@ async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: Plan
   };
 }
 
+function getRuntimeValidationForRuntime(runtime: TextGeneratorRuntime): TemplateRuntimeValidation {
+  return runtime.templateRuntimeValidation ?? defaultTemplateRuntimeValidation();
+}
+
+function createRuntimeWithoutDevServerValidation(runtime: TextGeneratorRuntime): TextGeneratorRuntime {
+  const runtimeValidation = getRuntimeValidationForRuntime(runtime);
+  return {
+    ...runtime,
+    templateRuntimeValidation: {
+      ...runtimeValidation,
+      steps: runtimeValidation.steps.filter((step) => step.kind !== "dev-server"),
+    },
+  };
+}
+
+function createSkippedDevServerValidationSteps(runtime: TextGeneratorRuntime): GenerationValidationStep[] {
+  return getRuntimeValidationForRuntime(runtime)
+    .steps
+    .filter((step) => step.kind === "dev-server")
+    .map((step) => ({
+      name: step.name,
+      ok: true,
+      detail: "已跳过：当前 runtime_validation 阶段复用同一个交互式 dev server/proxy 会话，不再单独启动 dev server。",
+    }));
+}
+
 async function collectPersistedGeneratedValidation(
   outputDirectory: string,
   runtime: TextGeneratorRuntime,
   planSpec: PlanSpec,
   validator: GeneratedAppValidator,
+  options: { skipRuntimeDevServerSteps?: boolean } = {},
 ): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
   await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
 
@@ -1442,9 +1471,23 @@ async function collectPersistedGeneratedValidation(
 
   let steps: GenerationValidationStep[] = [];
   if (reasons.length === 0) {
-    const runtimeValidation = await validator.validate(outputDirectory, runtime);
+    const validationRuntime = options.skipRuntimeDevServerSteps
+      ? createRuntimeWithoutDevServerValidation(runtime)
+      : runtime;
+    const runtimeValidation = await validator.validate(outputDirectory, validationRuntime);
     reasons.push(...runtimeValidation.reasons);
-    steps = runtimeValidation.steps;
+    steps = options.skipRuntimeDevServerSteps
+      ? [
+          ...runtimeValidation.steps,
+          ...createSkippedDevServerValidationSteps(runtime),
+        ]
+      : runtimeValidation.steps;
+    if (options.skipRuntimeDevServerSteps) {
+      await appendRuntimeValidationLog(runtime.deepagentsRuntimeValidationLogPath, [
+        "[skip] dev-server validation steps are owned by the active interactive runtime validation session.",
+        "",
+      ]);
+    }
   } else {
     await fs.writeFile(
       runtime.deepagentsRuntimeValidationLogPath,
@@ -1465,6 +1508,7 @@ async function validateGeneratedArtifacts(
   planSpec: PlanSpec,
   result: GeneratedProject,
   validator: GeneratedAppValidator,
+  options: { skipRuntimeDevServerSteps?: boolean } = {},
 ): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
   await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
 
@@ -1500,9 +1544,23 @@ async function validateGeneratedArtifacts(
 
   let steps: GenerationValidationStep[] = [];
   if (reasons.length === 0) {
-    const runtimeValidation = await validator.validate(outputDirectory, runtime);
+    const validationRuntime = options.skipRuntimeDevServerSteps
+      ? createRuntimeWithoutDevServerValidation(runtime)
+      : runtime;
+    const runtimeValidation = await validator.validate(outputDirectory, validationRuntime);
     reasons.push(...runtimeValidation.reasons);
-    steps = runtimeValidation.steps;
+    steps = options.skipRuntimeDevServerSteps
+      ? [
+          ...runtimeValidation.steps,
+          ...createSkippedDevServerValidationSteps(runtime),
+        ]
+      : runtimeValidation.steps;
+    if (options.skipRuntimeDevServerSteps) {
+      await appendRuntimeValidationLog(runtime.deepagentsRuntimeValidationLogPath, [
+        "[skip] dev-server validation steps are owned by the active interactive runtime validation session.",
+        "",
+      ]);
+    }
   } else {
     await fs.writeFile(
       runtime.deepagentsRuntimeValidationLogPath,
@@ -1995,152 +2053,173 @@ async function completeAfterGenerateValidation(options: {
 
   let retryReasons: string[] = [];
   const maxGenerationRepairs = options.runtime.maxGenerateRetries ?? 0;
+  const runtimeInteractionSession: RuntimeInteractionValidationSession = {};
 
-  while (true) {
-    if (retryReasons.length === 0) {
-      await updateWorkflowState(options.runtime.deepagentsConfigPath, "runtime_validation", ["plan", "generate"]);
-      await appendWorkflowLog("[host] 进入运行验证阶段，启动 dev server 并监听 stdout/stderr。");
-      await updateRuntimeValidationWorkflowBoard({
-        runtime: options.runtime,
-        narrative: "正在启动交互式运行验证。",
-        lifecycle: "generating",
-      });
+  try {
+    while (true) {
+      if (retryReasons.length === 0) {
+        await updateWorkflowState(options.runtime.deepagentsConfigPath, "runtime_validation", ["plan", "generate"]);
+        await appendWorkflowLog("[host] 进入运行验证阶段，启动或复用 dev server，并启动本地请求代理，合并监听 HTTP 响应与 stdout/stderr。");
+        await updateRuntimeValidationWorkflowBoard({
+          runtime: options.runtime,
+          narrative: "正在启动交互式运行验证。",
+          lifecycle: "generating",
+        });
 
-      const validation = await runInteractiveRuntimeValidation({
-        runtime: options.runtime,
-        planSpec: options.approvedPlan,
-        config: options.runtime.templateInteractiveRuntimeValidation,
-        onReady: async ({ devServerUrl, browserOpened, browserOpenError }) => {
-          if (browserOpened) {
-            await appendWorkflowLog(`[host] 已使用默认浏览器打开运行验证地址：${devServerUrl}`);
-            return;
-          }
-          if (browserOpenError) {
-            await appendWorkflowLog(`[host] 默认浏览器打开失败：${browserOpenError}`);
-          }
-          await appendWorkflowLog(`[host] 请在浏览器访问运行验证地址：${devServerUrl}`);
-        },
-        onUpdate: async (update) => {
-          const recentRequests = update.recentRequests.slice(-4).map((requestRecord) => {
-            const status = requestRecord.status === undefined ? "ERR" : String(requestRecord.status);
-            const target = requestRecord.targetLabel ? ` ${requestRecord.targetLabel}` : "";
-            return `${requestRecord.method} ${requestRecord.path} -> ${status}${target}`;
+        const validation = await runInteractiveRuntimeValidation({
+          runtime: options.runtime,
+          planSpec: options.approvedPlan,
+          config: options.runtime.templateInteractiveRuntimeValidation,
+          session: runtimeInteractionSession,
+          onReady: async ({ proxyUrl, devServerUrl, browserOpened, browserOpenReused, browserOpenError }) => {
+            const visitUrl = proxyUrl ?? devServerUrl;
+            if (browserOpenReused && browserOpened) {
+              await appendWorkflowLog(`[host] 继续使用已打开的运行验证地址：${visitUrl}`);
+              return;
+            }
+            if (browserOpenReused) {
+              if (browserOpenError) {
+                await appendWorkflowLog(`[host] 保留上次默认浏览器打开失败结果，不重复启动浏览器：${browserOpenError}`);
+              }
+              await appendWorkflowLog(`[host] 请继续使用运行验证地址：${visitUrl}`);
+              return;
+            }
+            if (browserOpened) {
+              await appendWorkflowLog(`[host] 已使用默认浏览器打开运行验证地址：${visitUrl}`);
+              return;
+            }
+            if (browserOpenError) {
+              await appendWorkflowLog(`[host] 默认浏览器打开失败：${browserOpenError}`);
+            }
+            await appendWorkflowLog(`[host] 请在浏览器访问运行验证地址：${visitUrl}`);
+          },
+          onUpdate: async (update) => {
+            const recentRequests = update.recentRequests.slice(-4).map((requestRecord) => {
+              const status = requestRecord.status === undefined ? "ERR" : String(requestRecord.status);
+              const target = requestRecord.targetLabel ? ` ${requestRecord.targetLabel}` : "";
+              const source = requestRecord.source === "proxy" ? "proxy " : "";
+              const error = requestRecord.errorSummary ? ` ${requestRecord.errorSummary}` : "";
+              return `${source}${requestRecord.method} ${requestRecord.rawPath ?? requestRecord.path} -> ${status}${target}${error}`;
+            });
+            await updateWorkflowBoard({
+              stage: "运行验证阶段",
+              todos: createStepItemsForLifecycle("运行验证阶段", "validating"),
+              artifacts: createArtifactItemsForStage("运行验证阶段", "validating"),
+              narrative: "正在监听代理请求、HTTP 响应和 dev server 输出，并等待静默窗口。",
+              sessionId: options.runtime.sessionId,
+              outputDirectory: options.runtime.outputDirectory,
+              runtimeStatus: {
+                phase: "runtime_validation",
+                effort: undefined,
+              },
+              runtimeInteraction: {
+                devServerUrl: update.devServerUrl,
+                ...(update.browserOpenAttempted !== undefined
+                  ? { browserOpenAttempted: update.browserOpenAttempted }
+                  : {}),
+                ...(update.browserOpened !== undefined ? { browserOpened: update.browserOpened } : {}),
+                ...(update.browserOpenError ? { browserOpenError: update.browserOpenError } : {}),
+                ...(update.proxyUrl ? { proxyUrl: update.proxyUrl } : {}),
+                ...(recentRequests.length > 0
+                  ? {
+                      coverageRatio: update.coverage.ratio,
+                      coveredTargets: update.coverage.coveredTargets,
+                      uncoveredTargets: update.coverage.uncoveredTargets,
+                      recentRequests,
+                    }
+                  : {}),
+                recentDevServerOutput: update.recentDevServerOutput,
+              },
+            });
+          },
+        });
+
+        if (validation.reasons.length === 0) {
+          await appendWorkflowLog("[host] 运行验证阶段通过。");
+          await updateRuntimeValidationWorkflowBoard({
+            runtime: options.runtime,
+            artifact: validation.artifact,
+            narrative: "运行验证阶段已通过。",
+            lifecycle: "verified",
           });
-          await updateWorkflowBoard({
-            stage: "运行验证阶段",
-            todos: createStepItemsForLifecycle("运行验证阶段", "validating"),
-            artifacts: createArtifactItemsForStage("运行验证阶段", "validating"),
-            narrative: "正在监听 dev server 输出并等待静默窗口。",
-            sessionId: options.runtime.sessionId,
-            outputDirectory: options.runtime.outputDirectory,
-            runtimeStatus: {
-              phase: "runtime_validation",
-              effort: undefined,
-            },
-            runtimeInteraction: {
-              devServerUrl: update.devServerUrl,
-              ...(update.browserOpenAttempted !== undefined
-                ? { browserOpenAttempted: update.browserOpenAttempted }
-                : {}),
-              ...(update.browserOpened !== undefined ? { browserOpened: update.browserOpened } : {}),
-              ...(update.browserOpenError ? { browserOpenError: update.browserOpenError } : {}),
-              ...(update.proxyUrl ? { proxyUrl: update.proxyUrl } : {}),
-              ...(recentRequests.length > 0
-                ? {
-                    coverageRatio: update.coverage.ratio,
-                    coveredTargets: update.coverage.coveredTargets,
-                    uncoveredTargets: update.coverage.uncoveredTargets,
-                    recentRequests,
-                  }
-                : {}),
-              recentDevServerOutput: update.recentDevServerOutput,
-            },
-          });
-        },
-      });
+          await markWorkflowComplete(options.runtime, ["plan", "generate", "runtime_validation"]);
+          return;
+        }
 
-      if (validation.reasons.length === 0) {
-        await appendWorkflowLog("[host] 运行验证阶段通过。");
+        retryReasons = validation.reasons;
+        await appendWorkflowLog(`[host] 运行验证阶段失败，待修复问题 ${retryReasons.length} 条。`);
+        await appendValidationFailureDetails(retryReasons);
+        await appendGenerationValidationStepDetails(validation.steps, retryReasons);
         await updateRuntimeValidationWorkflowBoard({
           runtime: options.runtime,
           artifact: validation.artifact,
-          narrative: "运行验证阶段已通过。",
-          lifecycle: "verified",
+          narrative: "运行验证阶段失败，准备调用生成修复。",
+          lifecycle: "validating",
         });
-        await markWorkflowComplete(options.runtime, ["plan", "generate", "runtime_validation"]);
-        return;
       }
 
-      retryReasons = validation.reasons;
-      await appendWorkflowLog(`[host] 运行验证阶段失败，待修复问题 ${retryReasons.length} 条。`);
-      await appendValidationFailureDetails(retryReasons);
-      await appendGenerationValidationStepDetails(validation.steps, retryReasons);
-      await updateRuntimeValidationWorkflowBoard({
-        runtime: options.runtime,
-        artifact: validation.artifact,
-        narrative: "运行验证阶段失败，准备调用生成修复。",
-        lifecycle: "validating",
+      const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "生成修复阶段");
+      if (existingRepairAttempts >= maxGenerationRepairs) {
+        throw new Error(`Runtime interaction validation failed: ${retryReasons.join(" | ")}`);
+      }
+
+      await updateWorkflowState(options.runtime.deepagentsConfigPath, "runtime_validation", ["plan", "generate"]);
+      await appendRetryNote(
+        options.runtime.deepagentsErrorLogPath,
+        existingRepairAttempts + 1,
+        "生成修复阶段",
+        retryReasons,
+      );
+      await appendWorkflowLog(`[host] 运行验证触发生成修复轮次 ${existingRepairAttempts + 1}。`);
+
+      const repairRuntime = createSessionRuntime(options.runtime, {
+        generateAttempt: existingRepairAttempts + 2,
+        retryReasons,
       });
-    }
-
-    const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "生成修复阶段");
-    if (existingRepairAttempts >= maxGenerationRepairs) {
-      throw new Error(`Runtime interaction validation failed: ${retryReasons.join(" | ")}`);
-    }
-
-    await updateWorkflowState(options.runtime.deepagentsConfigPath, "runtime_validation", ["plan", "generate"]);
-    await appendRetryNote(
-      options.runtime.deepagentsErrorLogPath,
-      existingRepairAttempts + 1,
-      "生成修复阶段",
-      retryReasons,
-    );
-    await appendWorkflowLog(`[host] 运行验证触发生成修复轮次 ${existingRepairAttempts + 1}。`);
-
-    const repairRuntime = createSessionRuntime(options.runtime, {
-      generateAttempt: existingRepairAttempts + 2,
-      retryReasons,
-    });
-    let repairedProject: GeneratedProject;
-    try {
-      repairedProject = await options.generator.generateRepairProject(options.approvedPlan, repairRuntime);
-    } catch (error) {
-      const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, options.approvedPlan, error);
-      if (!recovered) {
-        throw error;
+      let repairedProject: GeneratedProject;
+      try {
+        repairedProject = await options.generator.generateRepairProject(options.approvedPlan, repairRuntime);
+      } catch (error) {
+        const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, options.approvedPlan, error);
+        if (!recovered) {
+          throw error;
+        }
+        repairedProject = recovered;
       }
-      repairedProject = recovered;
+
+      await appendWorkflowLog("[host] 运行验证修复输出完成，重新执行生成门禁。");
+      await updateWorkflowBoard({
+        stage: "生成阶段",
+        todos: createStepItemsForLifecycle("生成阶段", "validating"),
+        artifacts: createArtifactItemsForStage("生成阶段", "validating"),
+        narrative: "正在复核运行验证修复后的生成交付物。",
+        sessionId: options.runtime.sessionId,
+        outputDirectory: options.runtime.outputDirectory,
+      });
+      const generationValidation = await validateGeneratedArtifacts(
+        options.runtime.outputDirectory,
+        repairRuntime,
+        options.approvedPlan,
+        repairedProject,
+        options.validator,
+        { skipRuntimeDevServerSteps: true },
+      );
+
+      if (generationValidation.reasons.length === 0) {
+        await appendWorkflowLog("[host] 运行验证修复后的生成门禁通过，继续交互式监听。");
+        retryReasons = [];
+        continue;
+      }
+
+      retryReasons = generationValidation.reasons;
+      await appendWorkflowLog(
+        `[host] 运行验证修复后的生成门禁仍未通过，剩余问题 ${generationValidation.reasons.length} 条。`,
+      );
+      await appendValidationFailureDetails(generationValidation.reasons);
+      await appendGenerationValidationStepDetails(generationValidation.steps, generationValidation.reasons);
     }
-
-    await appendWorkflowLog("[host] 运行验证修复输出完成，重新执行生成门禁。");
-    await updateWorkflowBoard({
-      stage: "生成阶段",
-      todos: createStepItemsForLifecycle("生成阶段", "validating"),
-      artifacts: createArtifactItemsForStage("生成阶段", "validating"),
-      narrative: "正在复核运行验证修复后的生成交付物。",
-      sessionId: options.runtime.sessionId,
-      outputDirectory: options.runtime.outputDirectory,
-    });
-    const generationValidation = await validateGeneratedArtifacts(
-      options.runtime.outputDirectory,
-      repairRuntime,
-      options.approvedPlan,
-      repairedProject,
-      options.validator,
-    );
-
-    if (generationValidation.reasons.length === 0) {
-      await appendWorkflowLog("[host] 运行验证修复后的生成门禁通过，继续交互式监听。");
-      retryReasons = [];
-      continue;
-    }
-
-    retryReasons = generationValidation.reasons;
-    await appendWorkflowLog(
-      `[host] 运行验证修复后的生成门禁仍未通过，剩余问题 ${generationValidation.reasons.length} 条。`,
-    );
-    await appendValidationFailureDetails(generationValidation.reasons);
-    await appendGenerationValidationStepDetails(generationValidation.steps, generationValidation.reasons);
+  } finally {
+    await closeRuntimeInteractionValidationSession(runtimeInteractionSession);
   }
 }
 

@@ -16,7 +16,7 @@
 - 如果失败项提到 `.env.example`、`planSpec.environmentVariables` 或环境变量缺失/不一致，必须按 `planSpec.environmentVariables` 修补根目录 `/.env.example`
 - 修补 `.env.example` 时必须保留 starter 已有变量，并对每个目标为 `.env.example` 的条目写入精确的 `name=value`
 - 如果失败项来自运行验证，必须结合 `artifacts.runtimeValidationLog` 的真实输出修复，并确保输入里的 `template.runtimeValidation` 步骤可以通过
-- 如果失败项来自交互式运行验证，必须结合 `artifacts.runtimeInteractionValidation` 与 `artifacts.runtimeValidationLog` 中记录的 dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线，确保用户访问 dev server URL 时不再产生编译或运行时错误
+- 如果失败项来自交互式运行验证，必须结合 `artifacts.runtimeInteractionValidation` 与 `artifacts.runtimeValidationLog` 中记录的代理 HTTP 请求/响应、5xx 响应体摘要、failureChain、dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线，确保用户访问运行验证代理 URL 时不再产生编译或运行时错误
 - 继续保持 mini-app 的轻量结构，不要为修一个错误引入整套 full-stack 基础设施
 
 ## 完成条件

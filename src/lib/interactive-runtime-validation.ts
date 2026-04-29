@@ -1,9 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import {
+  createServer as createHttpServer,
   request as httpRequest,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse,
 } from "node:http";
-import { createServer as createNetServer } from "node:net";
+import { connect as connectNet, createServer as createNetServer } from "node:net";
+import type { Duplex } from "node:stream";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -17,6 +23,7 @@ import type {
 } from "./types.js";
 
 type RuntimeInteractionTargetKind = "page" | "api";
+type RuntimeInteractionRequestSource = "proxy" | "dev-server-output";
 
 export type RuntimeInteractionTarget = {
   id: string;
@@ -29,13 +36,20 @@ export type RuntimeInteractionTarget = {
 
 export type RuntimeInteractionRequestRecord = {
   timestamp: string;
+  source?: RuntimeInteractionRequestSource;
   method: string;
   path: string;
+  rawPath?: string;
   status?: number;
   targetId?: string;
   targetLabel?: string;
   counted: boolean;
   errorSummary?: string;
+  responseBodySummary?: string;
+  responseHeaders?: Record<string, string>;
+  devServerOutputContext?: string[];
+  durationMs?: number;
+  proxiedUrl?: string;
 };
 
 export type RuntimeInteractionCoverageSummary = {
@@ -64,6 +78,16 @@ export type RuntimeInteractionValidationArtifact = {
   readyTimeoutMs: number;
   coverage: RuntimeInteractionCoverageSummary;
   recentRequests: RuntimeInteractionRequestRecord[];
+  failureChain?: RuntimeInteractionFailureChain;
+};
+
+export type RuntimeInteractionFailureChain = {
+  reason: string;
+  proxyUrl?: string;
+  devServerUrl?: string;
+  request?: RuntimeInteractionRequestRecord;
+  recentRequests: RuntimeInteractionRequestRecord[];
+  recentDevServerOutput: string[];
 };
 
 export type RuntimeInteractionValidationResult = {
@@ -72,11 +96,17 @@ export type RuntimeInteractionValidationResult = {
   artifact: RuntimeInteractionValidationArtifact;
 };
 
-type RuntimeInteractionRecordInput = {
+export type RuntimeInteractionRecordInput = {
+  source?: RuntimeInteractionRequestSource;
   method: string;
   path: string;
   status?: number;
   errorSummary?: string;
+  responseBodySummary?: string;
+  responseHeaders?: Record<string, string>;
+  devServerOutputContext?: string[];
+  durationMs?: number;
+  proxiedUrl?: string;
 };
 
 type RuntimeInteractionReadyInfo = {
@@ -84,6 +114,7 @@ type RuntimeInteractionReadyInfo = {
   devServerUrl: string;
   browserOpenAttempted?: boolean;
   browserOpened?: boolean;
+  browserOpenReused?: boolean;
   browserOpenError?: string;
   targets: RuntimeInteractionTarget[];
 };
@@ -93,6 +124,7 @@ type RuntimeInteractionUpdate = {
   devServerUrl: string;
   browserOpenAttempted?: boolean;
   browserOpened?: boolean;
+  browserOpenReused?: boolean;
   browserOpenError?: string;
   coverage: RuntimeInteractionCoverageSummary;
   recentRequests: RuntimeInteractionRequestRecord[];
@@ -105,11 +137,27 @@ export type BrowserOpenResult = {
   error?: string;
 };
 
+export type RuntimeInteractionValidationSession = {
+  devPort?: number;
+  proxyPort?: number;
+  browserOpenResult?: BrowserOpenResult;
+  browserOpenUrl?: string;
+  devServerProcess?: ChildProcess;
+  devServerOutput?: string;
+  devServerOutputListeners?: Set<(chunk: Buffer) => void>;
+  devServerOutputHandler?: (chunk: Buffer) => void;
+  devServerLogPath?: string;
+};
+
 const MAX_RECORDED_REQUESTS = 100;
 const REQUEST_POLL_INTERVAL_MS = 200;
 const MAX_DEV_SERVER_OUTPUT_CHARS = 40_000;
+const MAX_RESPONSE_BODY_CAPTURE_BYTES = 32_768;
+const MAX_RESPONSE_BODY_SUMMARY_CHARS = 6_000;
 
 const DEV_SERVER_ERROR_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\bblocked cross-origin request\b/i, label: "跨源资源阻止" },
+  { pattern: /\bcross-origin access\b.*\bblocked\b/i, label: "跨源资源阻止" },
   { pattern: /\bfailed to compile\b/i, label: "编译失败" },
   { pattern: /\bcompilation failed\b/i, label: "编译失败" },
   { pattern: /\bbuild failed\b/i, label: "构建失败" },
@@ -229,6 +277,76 @@ async function terminateChildProcess(child: ChildProcess): Promise<void> {
   await exitPromise;
 }
 
+function isChildProcessRunning(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null && child.killed !== true;
+}
+
+function appendBoundedDevServerOutput(current: string | undefined, text: string): string {
+  const output = `${current ?? ""}${text}`;
+  if (output.length <= MAX_DEV_SERVER_OUTPUT_CHARS) {
+    return output;
+  }
+  return output.slice(output.length - MAX_DEV_SERVER_OUTPUT_CHARS);
+}
+
+function ensureSessionOutputListeners(session: RuntimeInteractionValidationSession): Set<(chunk: Buffer) => void> {
+  if (!session.devServerOutputListeners) {
+    session.devServerOutputListeners = new Set();
+  }
+  return session.devServerOutputListeners;
+}
+
+function clearSessionDevServerProcess(session: RuntimeInteractionValidationSession): void {
+  const child = session.devServerProcess;
+  const handler = session.devServerOutputHandler;
+  if (child && handler) {
+    child.stdout?.off("data", handler);
+    child.stderr?.off("data", handler);
+  }
+  delete session.devServerProcess;
+  delete session.devServerOutput;
+  delete session.devServerOutputListeners;
+  delete session.devServerOutputHandler;
+  delete session.devServerLogPath;
+}
+
+function attachDevServerProcessToSession(
+  session: RuntimeInteractionValidationSession,
+  child: ChildProcess,
+  logPath: string,
+): void {
+  clearSessionDevServerProcess(session);
+  session.devServerProcess = child;
+  session.devServerOutput = "";
+  session.devServerLogPath = logPath;
+  session.devServerOutputListeners = new Set();
+
+  const handler = (chunk: Buffer) => {
+    const text = chunk.toString("utf8");
+    session.devServerOutput = appendBoundedDevServerOutput(session.devServerOutput, text);
+    if (session.devServerLogPath) {
+      void fs.appendFile(session.devServerLogPath, text, "utf8");
+    }
+    for (const listener of session.devServerOutputListeners ?? []) {
+      listener(chunk);
+    }
+  };
+
+  session.devServerOutputHandler = handler;
+  child.stdout?.on("data", handler);
+  child.stderr?.on("data", handler);
+}
+
+export async function closeRuntimeInteractionValidationSession(
+  session: RuntimeInteractionValidationSession,
+): Promise<void> {
+  const child = session.devServerProcess;
+  if (child) {
+    await terminateChildProcess(child);
+  }
+  clearSessionDevServerProcess(session);
+}
+
 function resolveDefaultBrowserCommand(url: string): { command: string; args: string[] } {
   if (process.platform === "darwin") {
     return { command: "open", args: [url] };
@@ -310,6 +428,36 @@ function stripAnsi(input: string): string {
   return input.replace(/\u001B\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 
+export function parseDevServerRequestLine(line: string): RuntimeInteractionRecordInput | null {
+  const normalizedLine = stripAnsi(line).trim();
+  const match = normalizedLine.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)\s+(\d{3})(?:\s|$)/i);
+  if (!match) {
+    return null;
+  }
+
+  const [, method, rawPath, rawStatus] = match;
+  if (!method || !rawPath || !rawStatus) {
+    return null;
+  }
+
+  let requestPath = rawPath;
+  if (/^https?:\/\//i.test(rawPath)) {
+    try {
+      const parsed = new URL(rawPath);
+      requestPath = `${parsed.pathname}${parsed.search}`;
+    } catch {
+      requestPath = rawPath;
+    }
+  }
+
+  return {
+    source: "dev-server-output",
+    method: method.toUpperCase(),
+    path: requestPath,
+    status: Number(rawStatus),
+  };
+}
+
 function recentOutputLines(output: string, limit = 12): string[] {
   return output
     .split(/\r?\n/)
@@ -318,7 +466,7 @@ function recentOutputLines(output: string, limit = 12): string[] {
     .slice(-limit);
 }
 
-function detectDevServerOutputFailure(output: string): string | undefined {
+export function detectDevServerOutputFailure(output: string): string | undefined {
   for (const line of recentOutputLines(output, 24)) {
     const matchedPattern = DEV_SERVER_ERROR_PATTERNS.find(({ pattern }) => pattern.test(line));
     if (matchedPattern) {
@@ -355,7 +503,7 @@ async function pingDevServer(port: number): Promise<boolean> {
       {
         host: "127.0.0.1",
         port,
-        path: "/",
+        path: "/__app_builder_ready",
         method: "GET",
         timeout: 1_000,
       },
@@ -488,6 +636,7 @@ function isIgnoredRequestPath(pathname: string): boolean {
   const normalized = normalizeRoutePath(pathname);
   if (
     normalized === "/favicon.ico" ||
+    normalized === "/__app_builder_ready" ||
     normalized === "/robots.txt" ||
     normalized.startsWith("/_next/") ||
     normalized.startsWith("/__nextjs")
@@ -541,6 +690,7 @@ export class RuntimeInteractionCoverageTracker {
     record: RuntimeInteractionRequestRecord;
     repairReason?: string;
   } {
+    const rawPath = input.path;
     const pathname = normalizeRoutePath(input.path);
     const target = matchRuntimeInteractionTarget(input.method, pathname, this.targets);
     const counted = Boolean(target && statusCountsForCoverage(input.status));
@@ -550,12 +700,21 @@ export class RuntimeInteractionCoverageTracker {
 
     const record: RuntimeInteractionRequestRecord = {
       timestamp: new Date().toISOString(),
+      ...(input.source ? { source: input.source } : {}),
       method: input.method.toUpperCase(),
       path: pathname,
+      ...(rawPath !== pathname ? { rawPath } : {}),
       counted,
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(target ? { targetId: target.id, targetLabel: target.label } : {}),
       ...(input.errorSummary ? { errorSummary: input.errorSummary } : {}),
+      ...(input.responseBodySummary ? { responseBodySummary: input.responseBodySummary } : {}),
+      ...(input.responseHeaders ? { responseHeaders: input.responseHeaders } : {}),
+      ...(input.devServerOutputContext && input.devServerOutputContext.length > 0
+        ? { devServerOutputContext: input.devServerOutputContext }
+        : {}),
+      ...(input.durationMs !== undefined ? { durationMs: input.durationMs } : {}),
+      ...(input.proxiedUrl ? { proxiedUrl: input.proxiedUrl } : {}),
     };
     this.requests.push(record);
     if (this.requests.length > MAX_RECORDED_REQUESTS) {
@@ -598,11 +757,24 @@ export class RuntimeInteractionCoverageTracker {
     }
 
     if (record.errorSummary) {
-      return `代理转发失败：${record.method} ${record.path}。${record.errorSummary}`;
+      return [
+        `代理转发失败：${record.method} ${record.rawPath ?? record.path}。${record.errorSummary}`,
+        record.responseBodySummary ? `响应体摘要：${record.responseBodySummary}` : "",
+        record.devServerOutputContext && record.devServerOutputContext.length > 0
+          ? `相邻 stdout/stderr：${record.devServerOutputContext.join(" | ")}`
+          : "",
+      ].filter(Boolean).join(" ");
     }
 
     if (record.status !== undefined && record.status >= 500) {
-      return `请求返回 ${record.status}：${record.method} ${record.path}`;
+      return [
+        `请求返回 ${record.status}：${record.method} ${record.rawPath ?? record.path}`,
+        record.targetLabel ? `匹配目标：${record.targetLabel}。` : "",
+        record.responseBodySummary ? `响应体摘要：${record.responseBodySummary}` : "",
+        record.devServerOutputContext && record.devServerOutputContext.length > 0
+          ? `相邻 stdout/stderr：${record.devServerOutputContext.join(" | ")}`
+          : "",
+      ].filter(Boolean).join(" ");
     }
 
     return undefined;
@@ -621,6 +793,7 @@ function buildRuntimeInteractionArtifact(options: {
   completedAt?: string;
   config: TemplateInteractiveRuntimeValidation;
   tracker: RuntimeInteractionCoverageTracker;
+  failureChain?: RuntimeInteractionFailureChain;
 }): RuntimeInteractionValidationArtifact {
   const artifact: RuntimeInteractionValidationArtifact = {
     valid: options.valid,
@@ -656,6 +829,9 @@ function buildRuntimeInteractionArtifact(options: {
   if (options.completedAt) {
     artifact.completedAt = options.completedAt;
   }
+  if (options.failureChain) {
+    artifact.failureChain = options.failureChain;
+  }
 
   return artifact;
 }
@@ -671,10 +847,324 @@ function errorSummary(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function closeHttpServer(server: HttpServer): Promise<void> {
+  for (const socket of proxyServerSockets.get(server) ?? []) {
+    socket.destroy();
+  }
+
+  await Promise.race([
+    new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    }),
+    sleep(1_000).then(() => undefined),
+  ]);
+}
+
+const proxyUrls = new WeakMap<HttpServer, string>();
+const proxyServerSockets = new WeakMap<HttpServer, Set<Duplex>>();
+
+function setProxyUrlForServer(server: HttpServer, proxyUrl: string): void {
+  proxyUrls.set(server, proxyUrl);
+}
+
+function proxyUrlForServer(server: HttpServer): string {
+  return proxyUrls.get(server) ?? "http://127.0.0.1";
+}
+
+function trackProxyServerSocket(server: HttpServer, socket: Duplex): void {
+  let sockets = proxyServerSockets.get(server);
+  if (!sockets) {
+    sockets = new Set<Duplex>();
+    proxyServerSockets.set(server, sockets);
+  }
+  sockets.add(socket);
+  socket.once("close", () => {
+    sockets.delete(socket);
+  });
+}
+
+function rewriteForwardedUrlHeader(value: string | undefined, proxyUrl: string, devServerUrl: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return value.replaceAll(proxyUrl, devServerUrl);
+}
+
+function buildProxyRequestHeaders(
+  incomingHeaders: IncomingHttpHeaders,
+  options: {
+    devPort: number;
+    proxyUrl: string;
+    devServerUrl: string;
+  },
+): IncomingHttpHeaders {
+  const headers: IncomingHttpHeaders = {
+    ...incomingHeaders,
+    host: `127.0.0.1:${options.devPort}`,
+    "x-forwarded-host": incomingHeaders.host,
+    "x-forwarded-proto": "http",
+  };
+
+  delete headers["accept-encoding"];
+  delete headers.connection;
+  delete headers["proxy-connection"];
+
+  const rewrittenOrigin = rewriteForwardedUrlHeader(
+    Array.isArray(headers.origin) ? headers.origin[0] : headers.origin,
+    options.proxyUrl,
+    options.devServerUrl,
+  );
+  if (rewrittenOrigin) {
+    headers.origin = rewrittenOrigin;
+  }
+
+  const rewrittenReferer = rewriteForwardedUrlHeader(
+    Array.isArray(headers.referer) ? headers.referer[0] : headers.referer,
+    options.proxyUrl,
+    options.devServerUrl,
+  );
+  if (rewrittenReferer) {
+    headers.referer = rewrittenReferer;
+  }
+
+  return headers;
+}
+
+function summarizeResponseHeaders(headers: IncomingHttpHeaders): Record<string, string> {
+  const summary: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined) {
+      continue;
+    }
+
+    const normalizedValue = Array.isArray(value) ? value.join(", ") : String(value);
+    if (normalizedValue.length === 0) {
+      continue;
+    }
+
+    summary[key] = normalizedValue.length > 300 ? `${normalizedValue.slice(0, 297)}...` : normalizedValue;
+    if (Object.keys(summary).length >= 24) {
+      break;
+    }
+  }
+
+  return summary;
+}
+
+function summarizeHttpResponseBody(chunks: Buffer[], totalBytes: number): string | undefined {
+  if (chunks.length === 0) {
+    return undefined;
+  }
+
+  const text = Buffer.concat(chunks).toString("utf8");
+  const collapsed = text
+    .replace(/\u0000/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (collapsed.length === 0) {
+    return totalBytes > 0 ? `[${totalBytes} response bytes captured, no UTF-8 text]` : undefined;
+  }
+
+  const suffix = totalBytes > MAX_RESPONSE_BODY_CAPTURE_BYTES ? ` ... [truncated after ${MAX_RESPONSE_BODY_CAPTURE_BYTES} bytes]` : "";
+  return `${collapsed.slice(0, MAX_RESPONSE_BODY_SUMMARY_CHARS)}${collapsed.length > MAX_RESPONSE_BODY_SUMMARY_CHARS ? " ..." : ""}${suffix}`;
+}
+
+function writeProxyErrorResponse(response: ServerResponse, status: number, body: string): void {
+  if (response.headersSent) {
+    response.destroy();
+    return;
+  }
+
+  response.writeHead(status, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(body);
+}
+
+function writeUpgradeRequest(
+  upstreamSocket: Duplex,
+  request: IncomingMessage,
+  proxyUrl: string,
+  devServerUrl: string,
+  devPort: number,
+): void {
+  const headers = buildProxyRequestHeaders(request.headers, {
+    devPort,
+    proxyUrl,
+    devServerUrl,
+  });
+  const lines = [`${request.method ?? "GET"} ${request.url ?? "/"} HTTP/${request.httpVersion}`];
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        lines.push(`${key}: ${entry}`);
+      }
+      continue;
+    }
+    lines.push(`${key}: ${value}`);
+  }
+  upstreamSocket.write(`${lines.join("\r\n")}\r\n\r\n`);
+}
+
+async function startDevServerProxy(options: {
+  devPort: number;
+  proxyPort?: number;
+  devServerUrl: string;
+  tracker: RuntimeInteractionCoverageTracker;
+  logPath: string;
+  getDevServerOutput: () => string;
+  onActivity: () => void;
+  onFailure: (reason: string, record: RuntimeInteractionRequestRecord) => void;
+  onRecordedRequest: () => void;
+}): Promise<{ server: HttpServer; proxyUrl: string }> {
+  const server = createHttpServer((request, response) => {
+    const startedAt = Date.now();
+    const method = (request.method ?? "GET").toUpperCase();
+    const rawPath = request.url ?? "/";
+    const capturedChunks: Buffer[] = [];
+    let capturedBytes = 0;
+    let totalResponseBytes = 0;
+
+    options.onActivity();
+
+    const recordRequest = async (input: Omit<RuntimeInteractionRecordInput, "source" | "method" | "path" | "durationMs" | "proxiedUrl" | "devServerOutputContext">) => {
+      options.onActivity();
+      const recordResult = options.tracker.record({
+        source: "proxy",
+        method,
+        path: rawPath,
+        durationMs: Date.now() - startedAt,
+        proxiedUrl: `${options.devServerUrl}${rawPath}`,
+        devServerOutputContext: recentOutputLines(options.getDevServerOutput(), 16),
+        ...input,
+      });
+
+      const status = recordResult.record.status === undefined ? "ERR" : String(recordResult.record.status);
+      await appendRuntimeValidationLog(options.logPath, [
+        `[proxy] ${method} ${rawPath} -> ${status}${recordResult.record.targetLabel ? ` (${recordResult.record.targetLabel})` : ""}`,
+        ...(recordResult.record.responseBodySummary ? [`[proxy] response body: ${recordResult.record.responseBodySummary}`] : []),
+        ...(recordResult.record.errorSummary ? [`[proxy] error: ${recordResult.record.errorSummary}`] : []),
+      ]);
+
+      if (recordResult.repairReason) {
+        options.onFailure(recordResult.repairReason, recordResult.record);
+      }
+      options.onRecordedRequest();
+    };
+
+    const proxyRequest = httpRequest(
+      {
+        host: "127.0.0.1",
+        port: options.devPort,
+        method,
+        path: rawPath,
+        headers: buildProxyRequestHeaders(request.headers, {
+          devPort: options.devPort,
+          proxyUrl: proxyUrlForServer(server),
+          devServerUrl: options.devServerUrl,
+        }),
+      },
+      (proxyResponse) => {
+        const headers = { ...proxyResponse.headers };
+        response.writeHead(proxyResponse.statusCode ?? 502, proxyResponse.statusMessage, headers);
+
+        proxyResponse.on("data", (chunk: Buffer) => {
+          totalResponseBytes += chunk.length;
+          if (capturedBytes < MAX_RESPONSE_BODY_CAPTURE_BYTES) {
+            const remaining = MAX_RESPONSE_BODY_CAPTURE_BYTES - capturedBytes;
+            const capturedChunk = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+            capturedChunks.push(capturedChunk);
+            capturedBytes += capturedChunk.length;
+          }
+          response.write(chunk);
+        });
+
+        proxyResponse.once("end", () => {
+          response.end();
+          const responseBodySummary = summarizeHttpResponseBody(capturedChunks, totalResponseBytes);
+          void recordRequest({
+            ...(proxyResponse.statusCode !== undefined ? { status: proxyResponse.statusCode } : {}),
+            responseHeaders: summarizeResponseHeaders(proxyResponse.headers),
+            ...(responseBodySummary ? { responseBodySummary } : {}),
+          });
+        });
+
+        proxyResponse.once("error", (error) => {
+          const detail = `读取 dev server 响应失败：${errorSummary(error)}`;
+          const responseBodySummary = summarizeHttpResponseBody(capturedChunks, totalResponseBytes);
+          writeProxyErrorResponse(response, 502, detail);
+          void recordRequest({
+            status: 502,
+            errorSummary: detail,
+            ...(responseBodySummary ? { responseBodySummary } : {}),
+          });
+        });
+      },
+    );
+
+    proxyRequest.once("timeout", () => {
+      proxyRequest.destroy(new Error(`Proxy request timed out for ${method} ${rawPath}`));
+    });
+    proxyRequest.once("error", (error) => {
+      const detail = errorSummary(error);
+      writeProxyErrorResponse(response, 502, `Proxy failed to reach dev server: ${detail}`);
+      void recordRequest({
+        status: 502,
+        errorSummary: detail,
+      });
+    });
+    proxyRequest.setTimeout(30_000);
+    request.pipe(proxyRequest);
+  });
+
+  const proxyUrlPromise = new Promise<string>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(options.proxyPort ?? 0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("Could not determine runtime proxy port."));
+        return;
+      }
+      resolve(`http://127.0.0.1:${address.port}`);
+    });
+  });
+
+  const proxyUrl = await proxyUrlPromise;
+  setProxyUrlForServer(server, proxyUrl);
+  server.on("connection", (socket) => {
+    trackProxyServerSocket(server, socket);
+  });
+
+  server.on("upgrade", (request, socket, head) => {
+    options.onActivity();
+    trackProxyServerSocket(server, socket);
+    const upstreamSocket = connectNet(options.devPort, "127.0.0.1");
+    trackProxyServerSocket(server, upstreamSocket);
+    upstreamSocket.once("connect", () => {
+      writeUpgradeRequest(upstreamSocket, request, proxyUrl, options.devServerUrl, options.devPort);
+      if (head.length > 0) {
+        upstreamSocket.write(head);
+      }
+      upstreamSocket.pipe(socket);
+      socket.pipe(upstreamSocket);
+    });
+    upstreamSocket.once("error", (error) => {
+      socket.destroy(error);
+    });
+  });
+
+  return { server, proxyUrl };
+}
+
 export async function runInteractiveRuntimeValidation(options: {
   runtime: TextGeneratorRuntime;
   planSpec: PlanSpec;
   config: TemplateInteractiveRuntimeValidation;
+  session?: RuntimeInteractionValidationSession;
   openBrowser?: boolean;
   browserOpener?: (url: string) => BrowserOpenResult | Promise<BrowserOpenResult>;
   onReady?: (info: RuntimeInteractionReadyInfo) => Promise<void> | void;
@@ -717,20 +1207,52 @@ export async function runInteractiveRuntimeValidation(options: {
     };
   }
 
-  const devPort = await reserveFreePort();
+  const devPort = options.session?.devPort ?? await reserveFreePort();
+  if (options.session && options.session.devPort === undefined) {
+    options.session.devPort = devPort;
+  }
+  if (options.session) {
+    options.session.devServerLogPath = options.runtime.deepagentsRuntimeValidationLogPath;
+  }
   const devServerUrl = `http://127.0.0.1:${devPort}`;
+  let proxyUrl: string | undefined;
   let output = "";
   let stopping = false;
   let failureReason: string | null = null;
+  let failureRecord: RuntimeInteractionRequestRecord | undefined;
   let browserOpenResult: BrowserOpenResult | undefined;
-  let lastOutputAt = Date.now();
+  let browserOpenReused = false;
+  let lastActivityAt = Date.now();
   let persistQueue = Promise.resolve();
   let child: ChildProcess | null = null;
+  let proxyServer: HttpServer | null = null;
+  let pendingOutputLine = "";
+  let finished = false;
+  let lastCoverageWaitPersistAt = 0;
+  let removeDevServerOutputListener: (() => void) | undefined;
+  let removeDevServerExitListener: (() => void) | undefined;
+
+  const buildFailureChain = (): RuntimeInteractionFailureChain | undefined => {
+    if (!failureReason) {
+      return undefined;
+    }
+
+    return {
+      reason: failureReason,
+      ...(proxyUrl ? { proxyUrl } : {}),
+      devServerUrl,
+      ...(failureRecord ? { request: failureRecord } : {}),
+      recentRequests: tracker.getRecentRequests(),
+      recentDevServerOutput: recentOutputLines(output, 24),
+    };
+  };
 
   const persist = async (valid: boolean, reasons: string[], completedAt?: string) => {
+    const failureChain = buildFailureChain();
     const artifact = buildRuntimeInteractionArtifact({
       valid,
       reasons,
+      ...(proxyUrl ? { proxyUrl } : {}),
       devServerUrl,
       ...(browserOpenResult ? { browserOpenResult } : {}),
       devServerOutput: output,
@@ -739,16 +1261,27 @@ export async function runInteractiveRuntimeValidation(options: {
       ...(completedAt ? { completedAt } : {}),
       config,
       tracker,
+      ...(failureChain ? { failureChain } : {}),
     });
     await writeRuntimeInteractionArtifact(options.runtime.deepagentsRuntimeInteractionValidationPath, artifact);
     return artifact;
   };
 
   const queuePersist = (valid: boolean, reasons: string[]) => {
+    if (finished) {
+      return persistQueue;
+    }
+
     persistQueue = persistQueue
       .catch(() => undefined)
       .then(() => persist(valid, reasons).then(() => undefined));
     return persistQueue;
+  };
+
+  const finish = async (valid: boolean, reasons: string[]) => {
+    finished = true;
+    await persistQueue;
+    return await persist(valid, reasons, new Date().toISOString());
   };
 
   const publishUpdate = async () => {
@@ -756,13 +1289,15 @@ export async function runInteractiveRuntimeValidation(options: {
       return;
     }
     await options.onUpdate({
+      ...(proxyUrl ? { proxyUrl } : {}),
       devServerUrl,
       ...(browserOpenResult
         ? {
-            browserOpenAttempted: browserOpenResult.attempted,
-            browserOpened: browserOpenResult.opened,
-            ...(browserOpenResult.error ? { browserOpenError: browserOpenResult.error } : {}),
-          }
+          browserOpenAttempted: browserOpenResult.attempted,
+          browserOpened: browserOpenResult.opened,
+          ...(browserOpenReused ? { browserOpenReused } : {}),
+          ...(browserOpenResult.error ? { browserOpenError: browserOpenResult.error } : {}),
+        }
         : {}),
       coverage: tracker.getSummary(),
       recentRequests: tracker.getRecentRequests(),
@@ -770,61 +1305,109 @@ export async function runInteractiveRuntimeValidation(options: {
     });
   };
 
-  await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
-    "=== interactive runtime validation ===",
-    `$ PORT=${devPort} HOSTNAME=127.0.0.1 ${[devServerStep.command, ...devServerStep.args].join(" ")}`,
-    "",
-  ]);
-
-  try {
-    child = await spawnDevServer({
-      step: devServerStep,
-      cwd: options.runtime.outputDirectory,
-      port: devPort,
-    });
-  } catch (error) {
-    const reason = `交互式运行验证无法启动开发服务器：${errorSummary(error)}`;
-    await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
-      `[error] ${reason}`,
-      "",
-    ]);
-    const artifact = await persist(false, [reason], new Date().toISOString());
-    return {
-      reasons: [reason],
-      steps: [{ name: "interactive runtime validation", ok: false, detail: reason }],
-      artifact,
-    };
-  }
-
   const recordDevServerOutput = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
-    output = `${output}${text}`;
-    if (output.length > MAX_DEV_SERVER_OUTPUT_CHARS) {
-      output = output.slice(output.length - MAX_DEV_SERVER_OUTPUT_CHARS);
+    output = appendBoundedDevServerOutput(output, text);
+    lastActivityAt = Date.now();
+
+    const outputWithPending = `${pendingOutputLine}${text}`;
+    const outputLines = outputWithPending.split(/\r?\n/);
+    pendingOutputLine = outputLines.pop() ?? "";
+    for (const line of outputLines) {
+      const requestRecord = parseDevServerRequestLine(line);
+      if (!requestRecord) {
+        continue;
+      }
+
+      const recordResult = tracker.record(requestRecord);
+      if (!failureReason && recordResult.repairReason) {
+        failureReason = recordResult.repairReason;
+        failureRecord = recordResult.record;
+      }
     }
-    lastOutputAt = Date.now();
+
     if (!failureReason) {
       failureReason = detectDevServerOutputFailure(output) ?? null;
     }
-    void fs.appendFile(options.runtime.deepagentsRuntimeValidationLogPath, text, "utf8");
+    if (!options.session) {
+      void fs.appendFile(options.runtime.deepagentsRuntimeValidationLogPath, text, "utf8");
+    }
     void queuePersist(false, failureReason ? [failureReason] : []);
     void publishUpdate();
   };
 
-  child.stdout!.on("data", recordDevServerOutput);
-  child.stderr!.on("data", recordDevServerOutput);
-  child.once("exit", (exitCode, signal) => {
+  await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+    "=== interactive runtime validation ===",
+  ]);
+
+  const existingChild = options.session?.devServerProcess;
+  if (existingChild && !isChildProcessRunning(existingChild) && options.session) {
+    clearSessionDevServerProcess(options.session);
+  }
+
+  const reusableChild = options.session?.devServerProcess;
+  if (reusableChild && isChildProcessRunning(reusableChild)) {
+    child = reusableChild;
+    await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+      `[interactive] Reusing existing dev server process at ${devServerUrl}; command not restarted.`,
+      "",
+    ]);
+  } else {
+    await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+      `$ PORT=${devPort} HOSTNAME=127.0.0.1 ${[devServerStep.command, ...devServerStep.args].join(" ")}`,
+      "",
+    ]);
+    try {
+      child = await spawnDevServer({
+        step: devServerStep,
+        cwd: options.runtime.outputDirectory,
+        port: devPort,
+      });
+      if (options.session) {
+        attachDevServerProcessToSession(options.session, child, options.runtime.deepagentsRuntimeValidationLogPath);
+      }
+    } catch (error) {
+      const reason = `交互式运行验证无法启动开发服务器：${errorSummary(error)}`;
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] ${reason}`,
+        "",
+      ]);
+      const artifact = await persist(false, [reason], new Date().toISOString());
+      return {
+        reasons: [reason],
+        steps: [{ name: "interactive runtime validation", ok: false, detail: reason }],
+        artifact,
+      };
+    }
+  }
+
+  if (options.session) {
+    const listeners = ensureSessionOutputListeners(options.session);
+    listeners.add(recordDevServerOutput);
+    removeDevServerOutputListener = () => listeners.delete(recordDevServerOutput);
+  } else {
+    child.stdout!.on("data", recordDevServerOutput);
+    child.stderr!.on("data", recordDevServerOutput);
+    removeDevServerOutputListener = () => {
+      child?.stdout?.off("data", recordDevServerOutput);
+      child?.stderr?.off("data", recordDevServerOutput);
+    };
+  }
+
+  const onDevServerExit = (exitCode: number | null, signal: NodeJS.Signals | null) => {
     if (stopping) {
       return;
     }
     failureReason = `开发服务器提前退出，exitCode=${exitCode ?? "null"} signal=${signal ?? "null"}。摘要：${summarizeCommandOutput(output)}`;
-  });
+  };
+  child.once("exit", onDevServerExit);
+  removeDevServerExitListener = () => child?.off("exit", onDevServerExit);
 
   try {
     const readyTimeoutAt = Date.now() + config.readyTimeoutMs;
     while (Date.now() < readyTimeoutAt) {
       if (failureReason) {
-        const artifact = await persist(false, [failureReason], new Date().toISOString());
+        const artifact = await finish(false, [failureReason]);
         return {
           reasons: [failureReason],
           steps: [{ name: "interactive runtime validation", ok: false, detail: failureReason }],
@@ -845,7 +1428,48 @@ export async function runInteractiveRuntimeValidation(options: {
         `[error] ${reason}`,
         "",
       ]);
-      const artifact = await persist(false, [reason], new Date().toISOString());
+      const artifact = await finish(false, [reason]);
+      return {
+        reasons: [reason],
+        steps: [{ name: "interactive runtime validation", ok: false, detail: reason }],
+        artifact,
+      };
+    }
+
+    try {
+      const proxy = await startDevServerProxy({
+        devPort,
+        ...(options.session?.proxyPort !== undefined ? { proxyPort: options.session.proxyPort } : {}),
+        devServerUrl,
+        tracker,
+        logPath: options.runtime.deepagentsRuntimeValidationLogPath,
+        getDevServerOutput: () => output,
+        onActivity: () => {
+          lastActivityAt = Date.now();
+        },
+        onFailure: (reason, record) => {
+          if (!failureReason) {
+            failureReason = reason;
+            failureRecord = record;
+          }
+        },
+        onRecordedRequest: () => {
+          void queuePersist(false, failureReason ? [failureReason] : []);
+          void publishUpdate();
+        },
+      });
+      proxyServer = proxy.server;
+      proxyUrl = proxy.proxyUrl;
+      if (options.session && options.session.proxyPort === undefined) {
+        options.session.proxyPort = Number(new URL(proxyUrl).port);
+      }
+    } catch (error) {
+      const reason = `交互式运行验证无法启动本地请求代理：${errorSummary(error)}`;
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] ${reason}`,
+        "",
+      ]);
+      const artifact = await finish(false, [reason]);
       return {
         reasons: [reason],
         steps: [{ name: "interactive runtime validation", ok: false, detail: reason }],
@@ -855,32 +1479,49 @@ export async function runInteractiveRuntimeValidation(options: {
 
     await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
       `[interactive] Dev server ready at ${devServerUrl}.`,
-      `[interactive] Visit dev server URL: ${devServerUrl}`,
-      `[interactive] Dev server stdout/stderr is the repair signal for this phase.`,
+      `[interactive] Proxy ready at ${proxyUrl}.`,
+      `[interactive] Visit proxy URL: ${proxyUrl}`,
+      `[interactive] Runtime repair signal combines proxy HTTP request/response records with dev server stdout/stderr.`,
       `[interactive] Planned targets: ${targets.map((target) => target.label).join(", ")}`,
       "",
     ]);
 
-    if (shouldOpenBrowser(options.openBrowser)) {
-      const opener = options.browserOpener ?? openUrlInDefaultBrowser;
-      browserOpenResult = await opener(devServerUrl);
+    const browserUrl = proxyUrl ?? devServerUrl;
+    if (options.session?.browserOpenResult) {
+      browserOpenResult = options.session.browserOpenResult;
+      browserOpenReused = true;
       await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
         browserOpenResult.opened
-          ? `[interactive] Opened default browser at ${devServerUrl}.`
-          : `[warn] Failed to open default browser at ${devServerUrl}: ${browserOpenResult.error ?? "unknown error"}`,
+          ? `[interactive] Reusing previously opened browser at ${options.session.browserOpenUrl ?? browserUrl}.`
+          : `[interactive] Reusing previous browser open attempt and not spawning another browser process for ${options.session.browserOpenUrl ?? browserUrl}.`,
+        "",
+      ]);
+    } else if (shouldOpenBrowser(options.openBrowser)) {
+      const opener = options.browserOpener ?? openUrlInDefaultBrowser;
+      browserOpenResult = await opener(browserUrl);
+      if (options.session) {
+        options.session.browserOpenResult = browserOpenResult;
+        options.session.browserOpenUrl = browserUrl;
+      }
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        browserOpenResult.opened
+          ? `[interactive] Opened default browser at ${browserUrl}.`
+          : `[warn] Failed to open default browser at ${browserUrl}: ${browserOpenResult.error ?? "unknown error"}`,
         "",
       ]);
     }
 
-    lastOutputAt = Date.now();
+    lastActivityAt = Date.now();
     await persist(false, []);
     await publishUpdate();
     await options.onReady?.({
+      ...(proxyUrl ? { proxyUrl } : {}),
       devServerUrl,
       ...(browserOpenResult
         ? {
             browserOpenAttempted: browserOpenResult.attempted,
             browserOpened: browserOpenResult.opened,
+            ...(browserOpenReused ? { browserOpenReused } : {}),
             ...(browserOpenResult.error ? { browserOpenError: browserOpenResult.error } : {}),
           }
         : {}),
@@ -889,8 +1530,7 @@ export async function runInteractiveRuntimeValidation(options: {
 
     while (true) {
       if (failureReason) {
-        await persistQueue;
-        const artifact = await persist(false, [failureReason], new Date().toISOString());
+        const artifact = await finish(false, [failureReason]);
         await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
           `[error] ${failureReason}`,
           "",
@@ -906,12 +1546,14 @@ export async function runInteractiveRuntimeValidation(options: {
         };
       }
 
-      const idleForMs = Date.now() - lastOutputAt;
-      if (idleForMs >= config.idleTimeoutMs) {
-        await persistQueue;
-        const artifact = await persist(true, [], new Date().toISOString());
+      const idleForMs = Date.now() - lastActivityAt;
+      const coverage = tracker.getSummary();
+      const coverageSatisfied = coverage.ratio >= config.coverageThreshold;
+
+      if (idleForMs >= config.idleTimeoutMs && coverageSatisfied) {
+        const artifact = await finish(true, []);
         await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
-          `[ok] Dev server stayed ready with no error output for ${Math.round(idleForMs / 1000)}s.`,
+          `[ok] Runtime coverage ${coverage.covered}/${coverage.total} (${Math.round(coverage.ratio * 100)}%) reached threshold ${Math.round(config.coverageThreshold * 100)}%, and dev server stayed ready with no error output for ${Math.round(idleForMs / 1000)}s.`,
           "",
         ]);
         return {
@@ -919,17 +1561,32 @@ export async function runInteractiveRuntimeValidation(options: {
           steps: [{
             name: "interactive runtime validation",
             ok: true,
-            detail: `开发服务器 ${devServerUrl} 已稳定 ${Math.round(idleForMs / 1000)}s，未检测到错误输出。`,
+            detail: `运行覆盖率 ${coverage.covered}/${coverage.total} 已达到 ${Math.round(config.coverageThreshold * 100)}%，代理 ${proxyUrl ?? devServerUrl} 已稳定 ${Math.round(idleForMs / 1000)}s，未检测到 HTTP 5xx、代理错误或 dev server 错误输出。`,
           }],
           artifact,
         };
+      }
+
+      if (idleForMs >= config.idleTimeoutMs && !coverageSatisfied) {
+        const now = Date.now();
+        if (now - lastCoverageWaitPersistAt >= 1_000) {
+          lastCoverageWaitPersistAt = now;
+          const reason = `交互式运行验证覆盖率不足：${coverage.covered}/${coverage.total} (${Math.round(coverage.ratio * 100)}%)，需要达到 ${Math.round(config.coverageThreshold * 100)}%。未覆盖：${coverage.uncoveredTargets.join(", ") || "无"}`;
+          await persist(false, [reason]);
+          await publishUpdate();
+        }
       }
 
       await sleep(REQUEST_POLL_INTERVAL_MS);
     }
   } finally {
     stopping = true;
-    if (child) {
+    removeDevServerOutputListener?.();
+    removeDevServerExitListener?.();
+    if (proxyServer) {
+      await closeHttpServer(proxyServer);
+    }
+    if (child && !options.session) {
       await terminateChildProcess(child);
     }
   }

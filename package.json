@@ -2,6 +2,7 @@
   "name": "app-builder-v2",
   "version": "0.1.0",
   "description": "PRD-driven full-stack app generator CLI",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "app-builder": "./dist/src/index.js"

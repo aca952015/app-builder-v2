@@ -791,9 +791,9 @@ export function createDefaultStepItems(stage: WorkflowStage): TodoItem[] {
   if (stage === "运行验证阶段") {
     return [
       { content: "启动生成应用 dev server", status: "in_progress" },
-      { content: "显示 dev server URL 供用户访问", status: "pending" },
-      { content: "收集 dev server stdout/stderr", status: "pending" },
-      { content: "等待输出静默窗口并检查错误", status: "pending" },
+      { content: "启动本地代理并打开验证地址", status: "pending" },
+      { content: "收集代理 HTTP 响应和 stdout/stderr", status: "pending" },
+      { content: "等待请求静默窗口并检查错误链路", status: "pending" },
     ];
   }
 

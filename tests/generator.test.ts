@@ -10,9 +10,13 @@ import { routeToAdminPagePath, routeToPageFileCandidates } from "../src/lib/app-
 import {
   apiFilePathToHttpPath,
   buildRuntimeInteractionTargets,
+  closeRuntimeInteractionValidationSession,
+  detectDevServerOutputFailure,
   matchRuntimeInteractionTarget,
+  parseDevServerRequestLine,
   runInteractiveRuntimeValidation,
   RuntimeInteractionCoverageTracker,
+  type RuntimeInteractionValidationSession,
 } from "../src/lib/interactive-runtime-validation.js";
 import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
 import { validatePlanSpec, type PlanSpec } from "../src/lib/plan-spec.js";
@@ -377,7 +381,12 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
 }
 
 async function requestLocalUrl(url: string, method = "GET"): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
+  const response = await requestLocalResponse(url, method);
+  return response.status;
+}
+
+async function requestLocalResponse(url: string, method = "GET"): Promise<{ status: number; body: string }> {
+  return await new Promise<{ status: number; body: string }>((resolve, reject) => {
     const parsed = new URL(url);
     const req = httpRequest(
       {
@@ -388,8 +397,16 @@ async function requestLocalUrl(url: string, method = "GET"): Promise<number> {
         timeout: 2_000,
       },
       (response) => {
-        response.resume();
-        resolve(response.statusCode ?? 0);
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        response.once("end", () => {
+          resolve({
+            status: response.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
       },
     );
     req.on("timeout", () => {
@@ -736,7 +753,27 @@ test("interactive runtime coverage counts only matched non-404 and non-5xx targe
   assert.deepEqual(summary.coveredTargets.sort(), ["GET /work-orders", "POST /api/work-orders"].sort());
 });
 
-test("interactive runtime exposes dev server and passes after stdout idle", async (context) => {
+test("interactive runtime parses dev server stdout request lines and cross-origin failures", () => {
+  assert.deepEqual(parseDevServerRequestLine(" GET /api/weather/current?city=Beijing 200 in 18ms"), {
+    source: "dev-server-output",
+    method: "GET",
+    path: "/api/weather/current?city=Beijing",
+    status: 200,
+  });
+  assert.deepEqual(parseDevServerRequestLine("\u001b[32mPOST http://127.0.0.1:3000/api/work-orders 201 in 4ms\u001b[0m"), {
+    source: "dev-server-output",
+    method: "POST",
+    path: "/api/work-orders",
+    status: 201,
+  });
+  assert.equal(parseDevServerRequestLine("✓ Ready in 192ms"), null);
+  assert.match(
+    detectDevServerOutputFailure("⚠ Blocked cross-origin request to Next.js dev resource /_next/static/chunks/app.js from \"127.0.0.1\".") ?? "",
+    /跨源资源阻止/,
+  );
+});
+
+test("interactive runtime exposes proxy and passes after request idle", async (context) => {
   if (!await canListenOnLocalhost()) {
     context.skip("local port binding is not available in this sandbox");
     return;
@@ -756,16 +793,21 @@ test("interactive runtime exposes dev server and passes after stdout idle", asyn
     await mkdir(deepagentsDirectory, { recursive: true });
     await writeFile(
       serverPath,
-      [
-        "import http from 'node:http';",
-        "const port = Number(process.env.PORT);",
-        "http.createServer((req, res) => {",
-        "  if (req.url?.startsWith('/work-orders')) { res.writeHead(200); res.end('page'); return; }",
-        "  if (req.url?.startsWith('/api/work-orders')) { res.writeHead(req.method === 'GET' ? 401 : 201); res.end('api'); return; }",
-        "  res.writeHead(404); res.end('missing');",
-        "}).listen(port, '127.0.0.1');",
-        "",
-      ].join("\n"),
+        [
+          "import http from 'node:http';",
+          "const port = Number(process.env.PORT);",
+          "function send(req, res, status, body) {",
+          "  console.log(`${req.method} ${req.url} ${status} in 1ms`);",
+          "  res.writeHead(status);",
+          "  res.end(body);",
+          "}",
+          "http.createServer((req, res) => {",
+          "  if (req.url?.startsWith('/work-orders')) { send(req, res, 200, 'page'); return; }",
+          "  if (req.url?.startsWith('/api/work-orders')) { send(req, res, req.method === 'GET' ? 401 : 201, 'api'); return; }",
+          "  send(req, res, 404, 'missing');",
+          "}).listen(port, '127.0.0.1');",
+          "",
+        ].join("\n"),
       "utf8",
     );
 
@@ -793,24 +835,257 @@ test("interactive runtime exposes dev server and passes after stdout idle", asyn
         openedUrl = url;
         return { attempted: true, opened: true };
       },
-      onReady: async ({ devServerUrl, browserOpened }) => {
+      onReady: async ({ proxyUrl, browserOpened }) => {
         assert.equal(browserOpened, true);
-        assert.equal(await requestLocalUrl(`${devServerUrl}/work-orders`), 200);
-        assert.equal(await requestLocalUrl(`${devServerUrl}/work-orders/abc`), 200);
-        assert.equal(await requestLocalUrl(`${devServerUrl}/api/work-orders`), 401);
-        assert.equal(await requestLocalUrl(`${devServerUrl}/api/work-orders`, "POST"), 201);
+        assert.ok(proxyUrl);
+        assert.match(proxyUrl ?? "", /^http:\/\/127\.0\.0\.1:/);
+        assert.equal(await requestLocalUrl(`${proxyUrl}/work-orders`), 200);
+        assert.equal(await requestLocalUrl(`${proxyUrl}/work-orders/abc`), 200);
+        assert.equal(await requestLocalUrl(`${proxyUrl}/api/work-orders`), 401);
+        assert.equal(await requestLocalUrl(`${proxyUrl}/api/work-orders`, "POST"), 201);
       },
     });
 
     assert.deepEqual(result.reasons, []);
     assert.equal(result.artifact.valid, true);
     assert.match(result.artifact.devServerUrl ?? "", /^http:\/\/127\.0\.0\.1:/);
-    assert.equal(result.artifact.proxyUrl, undefined);
+    assert.match(result.artifact.proxyUrl ?? "", /^http:\/\/127\.0\.0\.1:/);
     assert.equal(result.artifact.browserOpened, true);
-    assert.equal(openedUrl, result.artifact.devServerUrl);
-    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Visit dev server URL/);
+    assert.equal(result.artifact.coverage.covered, 4);
+    assert.equal(result.artifact.coverage.total, 4);
+    assert.equal(openedUrl, result.artifact.proxyUrl);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Visit proxy URL/);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /\[proxy\] GET \/work-orders -> 200/);
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Opened default browser/);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Runtime coverage 4\/4/);
     assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"valid": true/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("interactive runtime captures proxy 5xx response body for repair context", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-proxy-5xx-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "http.createServer((req, res) => {",
+        "  if (req.url?.startsWith('/api/work-orders')) {",
+        "    console.error('API handler failed: missing WorkOrder table');",
+        "    res.writeHead(500, { 'content-type': 'application/json' });",
+        "    res.end(JSON.stringify({ error: 'missing WorkOrder table', route: req.url }));",
+        "    return;",
+        "  }",
+        "  res.writeHead(200);",
+        "  res.end('ok');",
+        "}).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 0,
+        idleTimeoutMs: 20,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+
+    const result = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      openBrowser: false,
+      onReady: async ({ proxyUrl }) => {
+        assert.ok(proxyUrl);
+        const response = await requestLocalResponse(`${proxyUrl}/api/work-orders`);
+        assert.equal(response.status, 500);
+        assert.match(response.body, /missing WorkOrder table/);
+      },
+    });
+
+    assert.equal(result.artifact.valid, false);
+    assert.match(result.reasons.join("\n"), /请求返回 500/);
+    assert.match(result.artifact.proxyUrl ?? "", /^http:\/\/127\.0\.0\.1:/);
+    assert.match(result.artifact.failureChain?.request?.responseBodySummary ?? "", /missing WorkOrder table/);
+    assert.match(result.artifact.failureChain?.recentDevServerOutput.join("\n") ?? "", /API handler failed/);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /\[proxy\] GET \/api\/work-orders -> 500/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"failureChain"/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /missing WorkOrder table/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("interactive runtime reuses ports and does not reopen browser within a session", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-stable-session-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const startCountPath = path.join(tempRoot, "server-starts.txt");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+  const session: RuntimeInteractionValidationSession = {};
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import { existsSync, readFileSync, writeFileSync } from 'node:fs';",
+        "import http from 'node:http';",
+        `const startCountPath = ${JSON.stringify(startCountPath)};`,
+        "const previousStarts = existsSync(startCountPath) ? Number(readFileSync(startCountPath, 'utf8')) : 0;",
+        "writeFileSync(startCountPath, String(previousStarts + 1));",
+        "const port = Number(process.env.PORT);",
+        "http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); }).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 0,
+        idleTimeoutMs: 20,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+    const openedUrls: string[] = [];
+
+    const first = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      session,
+      openBrowser: true,
+      browserOpener: (url) => {
+        openedUrls.push(url);
+        return { attempted: true, opened: true };
+      },
+    });
+
+    const second = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      session,
+      openBrowser: true,
+      browserOpener: (url) => {
+        openedUrls.push(url);
+        return { attempted: true, opened: true };
+      },
+    });
+
+    assert.equal(first.artifact.valid, true);
+    assert.equal(second.artifact.valid, true);
+    assert.equal(first.artifact.devServerUrl, second.artifact.devServerUrl);
+    assert.equal(first.artifact.proxyUrl, second.artifact.proxyUrl);
+    assert.deepEqual(openedUrls, [first.artifact.proxyUrl]);
+    assert.equal(session.devPort, Number(new URL(first.artifact.devServerUrl ?? "").port));
+    assert.equal(session.proxyPort, Number(new URL(first.artifact.proxyUrl ?? "").port));
+    assert.equal(await readFile(startCountPath, "utf8"), "1");
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Reusing previously opened browser/);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Reusing existing dev server process/);
+  } finally {
+    await closeRuntimeInteractionValidationSession(session);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("interactive runtime fails on blocked cross-origin dev resource output", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-cross-origin-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "console.error('⚠ Blocked cross-origin request to Next.js dev resource /_next/static/chunks/app.js from \"127.0.0.1\".');",
+        "http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); }).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 0,
+        idleTimeoutMs: 20,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+
+    const result = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      openBrowser: false,
+    });
+
+    assert.equal(result.artifact.valid, false);
+    assert.match(result.reasons.join("\n"), /跨源资源阻止/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /detectedDevServerError/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
