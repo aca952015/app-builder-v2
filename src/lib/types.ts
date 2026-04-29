@@ -107,7 +107,9 @@ export type TemplateInteractiveRuntimeValidation = {
   devServerStep?: TemplateRuntimeValidationStep;
 };
 
-export type TemplatePhaseEffort = "low" | "medium" | "high";
+export const TEMPLATE_PHASE_EFFORTS = ["low", "medium", "high", "max"] as const;
+
+export type TemplatePhaseEffort = typeof TEMPLATE_PHASE_EFFORTS[number];
 
 export type TemplatePhaseName = "plan" | "planRepair" | "generate" | "generateRepair";
 

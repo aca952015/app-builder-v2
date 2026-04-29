@@ -16,13 +16,15 @@
       border: 0;
       background: white;
     }
-    .validation-complete-panel {
+    .validation-panel {
       position: fixed;
       right: 20px;
       bottom: 20px;
       z-index: 2147483647;
       display: flex;
-      align-items: center;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
       padding: 10px;
       border: 1px solid rgba(15, 23, 42, 0.16);
       border-radius: 8px;
@@ -32,11 +34,14 @@
       color: #0f172a;
       backdrop-filter: blur(10px);
     }
+    .validation-actions {
+      display: flex;
+      gap: 8px;
+    }
     button {
       appearance: none;
       border: 0;
       border-radius: 6px;
-      background: #166534;
       color: white;
       cursor: pointer;
       font: inherit;
@@ -44,12 +49,55 @@
       min-height: 40px;
       padding: 0 16px;
     }
-    button:hover { background: #14532d; }
+    .complete-button { background: #166534; }
+    .complete-button:hover { background: #14532d; }
+    .request-button { background: #1d4ed8; }
+    .request-button:hover { background: #1e40af; }
+    .cancel-button {
+      background: #475569;
+      padding: 0 12px;
+    }
+    .cancel-button:hover { background: #334155; }
     button:disabled { cursor: default; opacity: 0.72; }
+    .request-form {
+      display: none;
+      width: min(420px, calc(100vw - 40px));
+    }
+    .request-form[data-open="true"] {
+      display: grid;
+      gap: 8px;
+    }
+    textarea {
+      width: 100%;
+      min-height: 118px;
+      resize: vertical;
+      border: 1px solid rgba(15, 23, 42, 0.18);
+      border-radius: 6px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.96);
+      color: #0f172a;
+      font: inherit;
+      line-height: 1.5;
+      outline: none;
+    }
+    textarea:focus {
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+    }
+    .request-form-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
     @media (prefers-color-scheme: dark) {
-      .validation-complete-panel {
+      .validation-panel {
         border-color: rgba(148, 163, 184, 0.28);
         background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+      }
+      textarea {
+        border-color: rgba(148, 163, 184, 0.28);
+        background: rgba(15, 23, 42, 0.96);
         color: #f8fafc;
       }
     }
@@ -57,14 +105,30 @@
 </head>
 <body>
   <iframe src="/" title="生成应用运行验证"></iframe>
-  <div class="validation-complete-panel">
-    <button type="button" id="complete-validation">验证完成</button>
+  <div class="validation-panel">
+    <div class="validation-actions">
+      <button type="button" id="open-request" class="request-button">提交问题</button>
+      <button type="button" id="complete-validation" class="complete-button">验证完成</button>
+    </div>
+    <form id="request-form" class="request-form">
+      <textarea id="implementation-requirement" maxlength="6000" placeholder="输入你希望 Agent 修改或补充的要求"></textarea>
+      <div class="request-form-actions">
+        <button type="button" id="cancel-request" class="cancel-button">取消</button>
+        <button type="submit" id="submit-request" class="request-button">提交给 Agent</button>
+      </div>
+    </form>
   </div>
   <script>
-    const button = document.getElementById("complete-validation");
-    button.addEventListener("click", async () => {
-      button.disabled = true;
-      button.textContent = "确认中...";
+    const completeButton = document.getElementById("complete-validation");
+    const openRequestButton = document.getElementById("open-request");
+    const requestForm = document.getElementById("request-form");
+    const requirementInput = document.getElementById("implementation-requirement");
+    const submitRequestButton = document.getElementById("submit-request");
+    const cancelRequestButton = document.getElementById("cancel-request");
+
+    completeButton.addEventListener("click", async () => {
+      completeButton.disabled = true;
+      completeButton.textContent = "确认中...";
       try {
         const response = await fetch("__APP_BUILDER_MANUAL_COMPLETE_PATH__", {
           method: "POST",
@@ -74,11 +138,60 @@
         if (!response.ok) {
           throw new Error("HTTP " + response.status);
         }
-        button.textContent = "已确认";
+        completeButton.textContent = "已确认";
       } catch (error) {
-        button.disabled = false;
-        button.textContent = "确认失败，重试";
+        completeButton.disabled = false;
+        completeButton.textContent = "确认失败，重试";
         console.error("Runtime validation completion failed", error);
+      }
+    });
+
+    openRequestButton.addEventListener("click", () => {
+      requestForm.dataset.open = requestForm.dataset.open === "true" ? "false" : "true";
+      openRequestButton.textContent = requestForm.dataset.open === "true" ? "收起要求" : "提交问题";
+      if (requestForm.dataset.open === "true") {
+        requirementInput.focus();
+      }
+    });
+
+    cancelRequestButton.addEventListener("click", () => {
+      requestForm.dataset.open = "false";
+      openRequestButton.textContent = "提交问题";
+    });
+
+    requestForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const requirement = requirementInput.value.trim();
+      if (!requirement) {
+        submitRequestButton.textContent = "请输入要求";
+        requirementInput.focus();
+        return;
+      }
+
+      submitRequestButton.disabled = true;
+      openRequestButton.disabled = true;
+      completeButton.disabled = true;
+      submitRequestButton.textContent = "提交中...";
+      try {
+        const response = await fetch("__APP_BUILDER_IMPLEMENTATION_REQUEST_PATH__", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            requirement,
+            requestedAt: new Date().toISOString()
+          })
+        });
+        if (!response.ok) {
+          throw new Error("HTTP " + response.status);
+        }
+        submitRequestButton.textContent = "已提交给 Agent";
+        openRequestButton.textContent = "Agent 将开始实现";
+      } catch (error) {
+        submitRequestButton.disabled = false;
+        openRequestButton.disabled = false;
+        completeButton.disabled = false;
+        submitRequestButton.textContent = "提交失败，重试";
+        console.error("Runtime validation implementation request failed", error);
       }
     });
   </script>

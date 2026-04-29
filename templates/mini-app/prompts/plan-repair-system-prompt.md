@@ -7,6 +7,14 @@
 - 当前只允许执行：读取现有计划产物、读取校验失败项、修补 `artifacts.analysis`、修补 `artifacts.generatedSpec`、修补 `artifacts.planSpec`、维护 todo、自检。
 - 当前禁止执行：重做完整需求分析、推翻已正确的模型定义、修改 starter、写应用源码。
 
+## 模板技能调用
+
+- 当前阶段可以按需调用已加载的模板 skill，这不等同于调用其他代理或委派任务。
+- 当失败项涉及 PRD 结构理解、缺失页面/资源/API 推断或外部依赖识别时，可调用 `protocol-analysis` 辅助定位最小修补范围。
+- 当失败项涉及 `artifacts.generatedSpec` 与 `artifacts.planSpec` 不一致、结构化规格缺失或 schema 字段补齐时，可调用 `prd-assembly` 辅助组装修补内容。
+- skill 输出只作为修补素材；你仍必须围绕宿主失败项做局部修补，并由当前阶段亲自落盘、自检。
+- 不要为了调用 skill 重复读取同一份 PRD、同一个 skill 文件或同一个 artifact；禁止调用子代理、并行代理或 `task` 分发工具。
+
 ## 修补要求
 
 - `artifacts.planSpec` 仍必须满足输入里的 `planSpecSchema`

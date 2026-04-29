@@ -36,6 +36,7 @@ import {
   updateWorkflowBoard,
 } from "./terminal-ui.js";
 import {
+  TEMPLATE_PHASE_EFFORTS,
   type GeneratedAppValidator,
   GenerateAppOptions,
   GeneratedProject,
@@ -47,6 +48,7 @@ import {
   type TemplatePhaseMap,
   type TemplateRepairRetries,
   type TemplateInteractiveRuntimeValidation,
+  type TemplatePhaseEffort,
   type TemplateRuntimeValidation,
   type TemplateRuntimeValidationStep,
   TextGenerator,
@@ -1781,14 +1783,17 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
       }
       if (parsed.template?.phases && typeof parsed.template.phases === "object") {
         const phasesCandidate = parsed.template.phases as Record<string, unknown>;
-        const parsePhaseEffort = (value: unknown): { effort?: "low" | "medium" | "high" } => {
+        const parsePhaseEffort = (value: unknown): { effort?: TemplatePhaseEffort } => {
           if (!value || typeof value !== "object" || Array.isArray(value)) {
             return {};
           }
 
           const candidate = value as { effort?: unknown };
-          if (candidate.effort === "low" || candidate.effort === "medium" || candidate.effort === "high") {
-            return { effort: candidate.effort };
+          if (
+            typeof candidate.effort === "string" &&
+            (TEMPLATE_PHASE_EFFORTS as readonly string[]).includes(candidate.effort)
+          ) {
+            return { effort: candidate.effort as TemplatePhaseEffort };
           }
 
           return {};
@@ -2008,6 +2013,9 @@ async function updateRuntimeValidationWorkflowBoard(options: {
         ...(options.artifact.proxyUrl ? { proxyUrl: options.artifact.proxyUrl } : {}),
         ...(options.artifact.validationUrl ? { validationUrl: options.artifact.validationUrl } : {}),
         ...(options.artifact.manualCompleted ? { manualCompleted: true } : {}),
+        ...(options.artifact.implementationRequest
+          ? { implementationRequest: options.artifact.implementationRequest.requirement }
+          : {}),
         ...(options.artifact.devServerOutputSummary ? { devServerOutputSummary: options.artifact.devServerOutputSummary } : {}),
         ...(options.artifact.recentRequests.length > 0
           ? {
@@ -2123,6 +2131,7 @@ async function completeAfterGenerateValidation(options: {
                 ...(update.browserOpenError ? { browserOpenError: update.browserOpenError } : {}),
                 ...(update.proxyUrl ? { proxyUrl: update.proxyUrl } : {}),
                 ...(update.validationUrl ? { validationUrl: update.validationUrl } : {}),
+                ...(update.implementationRequest ? { implementationRequest: update.implementationRequest.requirement } : {}),
                 ...(recentRequests.length > 0
                   ? {
                       coverageRatio: update.coverage.ratio,

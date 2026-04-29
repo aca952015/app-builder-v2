@@ -7,6 +7,14 @@
 - 当前只允许执行：读取输入、分析需求、写入 `artifacts.analysis`、写入 `artifacts.generatedSpec`、写入 `artifacts.planSpec`、维护 todo、自检。
 - 当前禁止执行：生成应用源码、修改 starter、调用其他代理、把计划阶段伪装成生成阶段。
 
+## 模板技能调用
+
+- 当前阶段可以调用已加载的模板 skill，这不等同于调用其他代理或委派任务。
+- 在整理 `artifacts.analysis` 前，优先调用 `protocol-analysis`，输入使用当前已掌握的 `sourcePrdMarkdown` 或 PRD 内容。
+- 在写入 `artifacts.generatedSpec` 和 `artifacts.planSpec` 前，优先调用 `prd-assembly`，把 `protocol-analysis` 的结果、关键设计决策和 `planSpecSchema` 一并作为上下文。
+- skill 输出只作为当前代理的分析与组装素材；三份计划产物必须由当前阶段亲自落盘、自检并保持一致。
+- 不要为了调用 skill 重复读取同一份 PRD、同一个 skill 文件或同一个 artifact；禁止调用子代理、并行代理或 `task` 分发工具。
+
 ## 产物要求
 
 - `artifacts.analysis` = `/.deepagents/prd-analysis.md`

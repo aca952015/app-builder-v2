@@ -4,8 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  TEMPLATE_PHASE_EFFORTS,
   TemplatePhaseConfig,
-  TemplatePhaseEffort,
   TemplatePhaseMap,
   OutputWorkspace,
   TemplateInteractiveRuntimeValidation,
@@ -287,18 +287,20 @@ function parseTemplatePhaseConfig(raw: unknown, fieldName: string): TemplatePhas
 
   const candidate = raw as Record<string, unknown>;
   assertNonEmptyString(candidate.prompt, `${fieldName}.prompt`);
+  const effort = candidate.effort;
   if (
-    candidate.effort !== undefined &&
-    candidate.effort !== "low" &&
-    candidate.effort !== "medium" &&
-    candidate.effort !== "high"
+    effort !== undefined &&
+    (typeof effort !== "string" || !(TEMPLATE_PHASE_EFFORTS as readonly string[]).includes(effort))
   ) {
-    throw new Error(`Template manifest field "${fieldName}.effort" must be "low", "medium", or "high".`);
+    throw new Error(
+      `Template manifest field "${fieldName}.effort" must be one of ${TEMPLATE_PHASE_EFFORTS.map((value) => `"${value}"`).join(", ")}.`,
+    );
   }
+  const parsedEffort = effort as TemplatePhaseConfig["effort"];
 
   return {
     prompt: candidate.prompt,
-    ...(candidate.effort ? { effort: candidate.effort as TemplatePhaseEffort } : {}),
+    ...(parsedEffort ? { effort: parsedEffort } : {}),
   };
 }
 

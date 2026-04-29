@@ -17,6 +17,8 @@
 - 修补 `.env.example` 时必须保留 starter 已有变量，并对每个目标为 `.env.example` 的条目写入精确的 `name=value`
 - 如果失败项来自运行验证，必须结合 `artifacts.runtimeValidationLog` 的真实输出修复，并确保输入里的 `template.runtimeValidation` 步骤可以通过
 - 如果失败项来自交互式运行验证，必须结合 `artifacts.runtimeInteractionValidation` 与 `artifacts.runtimeValidationLog` 中记录的代理 HTTP 请求/响应、5xx 响应体摘要、failureChain、dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线，确保用户访问运行验证代理 URL 时不再产生编译或运行时错误
+- 如果 `validationFailures` 包含“用户在运行验证页提交实现要求”，必须把该要求视为本轮修复目标：在不改写 `planSpec` 的前提下，按现有页面、资源和 API 边界做最小可行实现，并同步更新 `app-builder-report.md`
+- 如果用户要求明显超出当前 `planSpec` 的业务边界，不要重做计划阶段；只实现与现有 app 兼容的部分，并在 `app-builder-report.md` 记录未覆盖原因
 - 继续保持 mini-app 的轻量结构，不要为修一个错误引入整套 full-stack 基础设施
 
 ## 完成条件

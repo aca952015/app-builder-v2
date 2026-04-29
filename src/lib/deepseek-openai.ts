@@ -54,6 +54,7 @@ type ChatCompletionChunkLike = {
 type ToolChoiceParams = {
   tool_choice?: unknown;
 };
+type ModelReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
 type OpenAICompatibleModelFields = BaseChatOpenAIFields & ChatOpenAIFields;
 type ReasoningMessage = BaseMessage & {
@@ -531,6 +532,10 @@ export function shouldUseDeepSeekReasoningContentCompat(modelName: string, baseU
   );
 }
 
+export function resolveModelReasoningEffort(effort: TemplatePhaseEffort): ModelReasoningEffort {
+  return effort === "max" ? "xhigh" : effort;
+}
+
 export function createOpenAICompatibleModel(options: {
   modelName: string;
   effort?: TemplatePhaseEffort;
@@ -541,7 +546,7 @@ export function createOpenAICompatibleModel(options: {
   const fields: OpenAICompatibleModelFields = {
     model,
     temperature: 0,
-    ...(options.effort ? { reasoning: { effort: options.effort } } : {}),
+    ...(options.effort ? { reasoning: { effort: resolveModelReasoningEffort(options.effort) } } : {}),
     ...(options.baseURL ? { configuration: { baseURL: options.baseURL } } : {}),
     ...(options.apiKey ? { apiKey: options.apiKey } : {}),
   };

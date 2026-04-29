@@ -67,6 +67,7 @@ export type RuntimeInteractionValidationArtifact = {
   proxyUrl?: string;
   validationUrl?: string;
   manualCompleted?: boolean;
+  implementationRequest?: RuntimeInteractionImplementationRequest;
   devServerUrl?: string;
   browserOpenAttempted?: boolean;
   browserOpened?: boolean;
@@ -82,6 +83,12 @@ export type RuntimeInteractionValidationArtifact = {
   coverage: RuntimeInteractionCoverageSummary;
   recentRequests: RuntimeInteractionRequestRecord[];
   failureChain?: RuntimeInteractionFailureChain;
+};
+
+export type RuntimeInteractionImplementationRequest = {
+  source: "/validate";
+  requestedAt: string;
+  requirement: string;
 };
 
 export type RuntimeInteractionFailureChain = {
@@ -127,6 +134,7 @@ type RuntimeInteractionReadyInfo = {
 type RuntimeInteractionUpdate = {
   proxyUrl?: string;
   validationUrl?: string;
+  implementationRequest?: RuntimeInteractionImplementationRequest;
   devServerUrl: string;
   browserOpenAttempted?: boolean;
   browserOpened?: boolean;
@@ -160,10 +168,14 @@ const REQUEST_POLL_INTERVAL_MS = 200;
 const MAX_DEV_SERVER_OUTPUT_CHARS = 40_000;
 const MAX_RESPONSE_BODY_CAPTURE_BYTES = 32_768;
 const MAX_RESPONSE_BODY_SUMMARY_CHARS = 6_000;
+const MAX_IMPLEMENTATION_REQUEST_BYTES = 16_384;
+const MAX_IMPLEMENTATION_REQUEST_CHARS = 6_000;
 const VALIDATION_PAGE_PATH = "/validate";
 const MANUAL_VALIDATION_COMPLETE_PATH = "/__app_builder_validate_complete";
+const IMPLEMENTATION_REQUEST_PATH = "/__app_builder_validate_request";
 const VALIDATION_PAGE_TEMPLATE_FILENAME = "runtime-validation-page.html";
 const MANUAL_VALIDATION_COMPLETE_PATH_PLACEHOLDER = "__APP_BUILDER_MANUAL_COMPLETE_PATH__";
+const IMPLEMENTATION_REQUEST_PATH_PLACEHOLDER = "__APP_BUILDER_IMPLEMENTATION_REQUEST_PATH__";
 
 const DEV_SERVER_ERROR_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bblocked cross-origin request\b/i, label: "跨源资源阻止" },
@@ -432,6 +444,11 @@ function summarizeCommandOutput(output: string): string {
 
   const excerpt = lines.slice(-8).join(" | ");
   return excerpt.length > 400 ? `${excerpt.slice(0, 397)}...` : excerpt;
+}
+
+function summarizeImplementationRequirement(requirement: string): string {
+  const summary = requirement.replace(/\s+/g, " ").trim();
+  return summary.length > 500 ? `${summary.slice(0, 497)}...` : summary;
 }
 
 function stripAnsi(input: string): string {
@@ -799,6 +816,7 @@ function buildRuntimeInteractionArtifact(options: {
   proxyUrl?: string;
   validationUrl?: string;
   manualCompleted?: boolean;
+  implementationRequest?: RuntimeInteractionImplementationRequest;
   devServerUrl?: string;
   browserOpenResult?: BrowserOpenResult;
   devServerOutput?: string;
@@ -828,6 +846,9 @@ function buildRuntimeInteractionArtifact(options: {
   }
   if (options.manualCompleted) {
     artifact.manualCompleted = true;
+  }
+  if (options.implementationRequest) {
+    artifact.implementationRequest = options.implementationRequest;
   }
   if (options.devServerUrl) {
     artifact.devServerUrl = options.devServerUrl;
@@ -1041,7 +1062,9 @@ async function readValidationPageTemplate(): Promise<string> {
 
 async function buildValidationPageHtml(): Promise<string> {
   const template = await readValidationPageTemplate();
-  return template.replaceAll(MANUAL_VALIDATION_COMPLETE_PATH_PLACEHOLDER, MANUAL_VALIDATION_COMPLETE_PATH);
+  return template
+    .replaceAll(MANUAL_VALIDATION_COMPLETE_PATH_PLACEHOLDER, MANUAL_VALIDATION_COMPLETE_PATH)
+    .replaceAll(IMPLEMENTATION_REQUEST_PATH_PLACEHOLDER, IMPLEMENTATION_REQUEST_PATH);
 }
 
 function writeValidationPageResponse(response: ServerResponse, html: string): void {
@@ -1058,6 +1081,80 @@ function writeManualValidationCompleteResponse(response: ServerResponse): void {
     "cache-control": "no-store",
   });
   response.end(JSON.stringify({ ok: true, manualCompleted: true }));
+}
+
+function writeJsonResponse(response: ServerResponse, status: number, body: Record<string, unknown>): void {
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(JSON.stringify(body));
+}
+
+async function readJsonRequestBody(request: IncomingMessage, maxBytes: number): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > maxBytes) {
+      throw new Error(`Request body exceeds ${maxBytes} bytes.`);
+    }
+    chunks.push(buffer);
+  }
+
+  if (chunks.length === 0) {
+    return {};
+  }
+
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function parseImplementationRequest(raw: unknown): RuntimeInteractionImplementationRequest {
+  const candidate = raw && typeof raw === "object" ? raw as { requirement?: unknown; prompt?: unknown; requestedAt?: unknown } : {};
+  const rawRequirement = typeof candidate.requirement === "string"
+    ? candidate.requirement
+    : typeof candidate.prompt === "string"
+      ? candidate.prompt
+      : "";
+  const requirement = rawRequirement.trim();
+
+  if (!requirement) {
+    throw new Error("Requirement is required.");
+  }
+
+  return {
+    source: "/validate",
+    requestedAt: typeof candidate.requestedAt === "string" && candidate.requestedAt.trim() !== ""
+      ? candidate.requestedAt
+      : new Date().toISOString(),
+    requirement: requirement.length > MAX_IMPLEMENTATION_REQUEST_CHARS
+      ? requirement.slice(0, MAX_IMPLEMENTATION_REQUEST_CHARS)
+      : requirement,
+  };
+}
+
+async function handleImplementationRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  onImplementationRequest: (implementationRequest: RuntimeInteractionImplementationRequest) => void,
+): Promise<void> {
+  try {
+    const payload = await readJsonRequestBody(request, MAX_IMPLEMENTATION_REQUEST_BYTES);
+    const implementationRequest = parseImplementationRequest(payload);
+    onImplementationRequest(implementationRequest);
+    writeJsonResponse(response, 200, {
+      ok: true,
+      implementationRequested: true,
+      requirement: implementationRequest.requirement,
+    });
+  } catch (error) {
+    writeJsonResponse(response, 400, {
+      ok: false,
+      error: errorSummary(error),
+    });
+  }
 }
 
 function writeUpgradeRequest(
@@ -1098,6 +1195,7 @@ async function startDevServerProxy(options: {
   onActivity: () => void;
   onFailure: (reason: string, record: RuntimeInteractionRequestRecord) => void;
   onManualComplete: () => void;
+  onImplementationRequest: (implementationRequest: RuntimeInteractionImplementationRequest) => void;
   onRecordedRequest: () => void;
 }): Promise<{ server: HttpServer; proxyUrl: string }> {
   const validationPageHtml = await buildValidationPageHtml();
@@ -1140,6 +1238,21 @@ async function startDevServerProxy(options: {
       options.onManualComplete();
       writeManualValidationCompleteResponse(response);
       request.resume();
+      return;
+    }
+
+    if (hostPath === IMPLEMENTATION_REQUEST_PATH) {
+      if (method !== "POST") {
+        response.writeHead(405, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+          allow: "POST",
+        });
+        response.end(JSON.stringify({ ok: false, error: "Method not allowed." }));
+        request.resume();
+        return;
+      }
+      void handleImplementationRequest(request, response, options.onImplementationRequest);
       return;
     }
 
@@ -1337,6 +1450,7 @@ export async function runInteractiveRuntimeValidation(options: {
   let failureRecord: RuntimeInteractionRequestRecord | undefined;
   let manualCompletionRequested = false;
   let manualCompleted = false;
+  let implementationRequest: RuntimeInteractionImplementationRequest | undefined;
   let browserOpenResult: BrowserOpenResult | undefined;
   let browserOpenReused = false;
   let lastActivityAt = Date.now();
@@ -1374,6 +1488,7 @@ export async function runInteractiveRuntimeValidation(options: {
       ...(proxyUrl ? { proxyUrl } : {}),
       ...(validationUrl ? { validationUrl } : {}),
       ...(manualCompleted ? { manualCompleted } : {}),
+      ...(implementationRequest ? { implementationRequest } : {}),
       devServerUrl,
       ...(browserOpenResult ? { browserOpenResult } : {}),
       devServerOutput: output,
@@ -1412,6 +1527,7 @@ export async function runInteractiveRuntimeValidation(options: {
     await options.onUpdate({
       ...(proxyUrl ? { proxyUrl } : {}),
       ...(validationUrl ? { validationUrl } : {}),
+      ...(implementationRequest ? { implementationRequest } : {}),
       devServerUrl,
       ...(browserOpenResult
         ? {
@@ -1578,6 +1694,9 @@ export async function runInteractiveRuntimeValidation(options: {
         onManualComplete: () => {
           manualCompletionRequested = true;
         },
+        onImplementationRequest: (request) => {
+          implementationRequest = request;
+        },
         onRecordedRequest: () => {
           void queuePersist(false, failureReason ? [failureReason] : []);
           void publishUpdate();
@@ -1670,6 +1789,25 @@ export async function runInteractiveRuntimeValidation(options: {
             name: "interactive runtime validation",
             ok: true,
             detail: `运行验证已由用户在 ${validationUrl ?? proxyUrl ?? devServerUrl} 人工确认完成。`,
+          }],
+          artifact,
+        };
+      }
+
+      if (implementationRequest) {
+        const requirementSummary = summarizeImplementationRequirement(implementationRequest.requirement);
+        const reason = `用户在运行验证页提交实现要求：${requirementSummary}`;
+        const artifact = await finish(false, [reason]);
+        await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+          `[repair] Runtime validation implementation request from /validate: ${requirementSummary}`,
+          "",
+        ]);
+        return {
+          reasons: [reason],
+          steps: [{
+            name: "interactive runtime validation",
+            ok: false,
+            detail: reason,
           }],
           artifact,
         };

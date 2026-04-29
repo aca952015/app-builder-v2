@@ -49,6 +49,8 @@
 - 以 `validationFailures` 和 `artifacts.generationValidation` 中的失败项为唯一修补目标。
 - 如果失败项来自宿主运行验证，你必须结合 `artifacts.runtimeValidationLog` 中的真实命令输出修复问题，目标是让宿主重新执行输入里的 `template.runtimeValidation` 步骤时可以通过；若 `copyEnvExample` 未禁用，也要兼容宿主先准备 `.env`。
 - 如果失败项来自交互式运行验证，你必须读取 `artifacts.runtimeInteractionValidation` 和 `artifacts.runtimeValidationLog`，按其中记录的代理 HTTP 请求/响应、5xx 响应体摘要、failureChain、dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线；目标是让用户访问运行验证代理 URL 时不再产生编译或运行时错误。
+- 如果 `validationFailures` 包含“用户在运行验证页提交实现要求”，必须把该要求视为本轮修复目标：在不改写 `planSpec` 的前提下，按现有页面、资源和 API 边界做最小可行实现，并同步更新 `app-builder-report.md`。
+- 如果用户要求明显超出当前 `planSpec` 的业务边界，不要回退计划阶段或重做整站；只实现与现有 app 兼容的部分，并在 `app-builder-report.md` 记录未覆盖原因。
 - 如果失败根因来自 starter 自带的持久化、鉴权或启动契约被局部改坏，你必须沿依赖链同步修补所有受影响的 Prisma 配置、schema、seed、脚本、认证/会话和默认入口数据，直到整条链路重新一致。
 - 只补齐缺失实现或错误接线，不得整轮重做已经正确的代码。
 - 如需修改现有文件，必须先读再改。

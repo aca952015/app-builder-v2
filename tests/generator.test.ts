@@ -385,7 +385,11 @@ async function requestLocalUrl(url: string, method = "GET"): Promise<number> {
   return response.status;
 }
 
-async function requestLocalResponse(url: string, method = "GET"): Promise<{ status: number; body: string }> {
+async function requestLocalResponse(
+  url: string,
+  method = "GET",
+  body?: string,
+): Promise<{ status: number; body: string }> {
   return await new Promise<{ status: number; body: string }>((resolve, reject) => {
     const parsed = new URL(url);
     const req = httpRequest(
@@ -395,6 +399,14 @@ async function requestLocalResponse(url: string, method = "GET"): Promise<{ stat
         path: `${parsed.pathname}${parsed.search}`,
         method,
         timeout: 2_000,
+        ...(body
+          ? {
+              headers: {
+                "content-type": "application/json",
+                "content-length": Buffer.byteLength(body),
+              },
+            }
+          : {}),
       },
       (response) => {
         const chunks: Buffer[] = [];
@@ -413,6 +425,9 @@ async function requestLocalResponse(url: string, method = "GET"): Promise<{ stat
       req.destroy(new Error(`Timed out requesting ${method} ${url}`));
     });
     req.on("error", reject);
+    if (body) {
+      req.write(body);
+    }
     req.end();
   });
 }
@@ -941,6 +956,93 @@ test("interactive runtime validate page can manually complete without coverage p
     assert.equal(result.artifact.recentRequests.length, 0);
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Runtime validation manually completed from \/validate/);
     assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"manualCompleted": true/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("interactive runtime validate page can submit implementation requests for repair", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-implementation-request-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "http.createServer((_req, res) => {",
+        "  res.writeHead(200, { 'content-type': 'text/plain' });",
+        "  res.end('ok');",
+        "}).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 1,
+        idleTimeoutMs: 60_000,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+    const requirement = "把工单详情页增加一个状态更新时间字段";
+
+    const result = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      openBrowser: false,
+      onReady: async ({ proxyUrl, validationUrl }) => {
+        assert.ok(proxyUrl);
+        assert.ok(validationUrl);
+        const validationPage = await requestLocalResponse(validationUrl);
+        assert.equal(validationPage.status, 200);
+        assert.match(validationPage.body, /提交问题/);
+        assert.match(validationPage.body, /输入你希望 Agent 修改或补充的要求/);
+        assert.match(validationPage.body, /\/__app_builder_validate_request/);
+
+        const requestResponse = await requestLocalResponse(
+          `${proxyUrl}/__app_builder_validate_request`,
+          "POST",
+          JSON.stringify({ requirement, requestedAt: "2026-04-29T00:00:00.000Z" }),
+        );
+        assert.equal(requestResponse.status, 200);
+        assert.match(requestResponse.body, /"implementationRequested":true/);
+      },
+    });
+
+    assert.equal(result.artifact.valid, false);
+    assert.match(result.reasons.join("\n"), /用户在运行验证页提交实现要求/);
+    assert.match(result.reasons.join("\n"), new RegExp(requirement));
+    assert.equal(result.artifact.implementationRequest?.requirement, requirement);
+    assert.equal(result.artifact.implementationRequest?.source, "/validate");
+    assert.equal(result.artifact.coverage.covered, 0);
+    assert.equal(result.artifact.coverage.total, 4);
+    assert.equal(result.artifact.recentRequests.length, 0);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /implementation request from \/validate/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"implementationRequest"/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), new RegExp(requirement));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -3283,7 +3385,22 @@ test("full-stack template starter copies scaffold files into the output root", a
 
 test("mini-app template enables interactive runtime validation", async () => {
   const template = await loadTemplatePack("mini-app");
+  const planPrompt = await readFile(template.planPromptPath, "utf8");
+  const planRepairPrompt = await readFile(template.planRepairPromptPath, "utf8");
 
+  assert.equal(template.phases.plan.effort, "max");
+  assert.equal(template.phases.planRepair.effort, "max");
+  assert.equal(template.phases.generate.effort, "max");
+  assert.equal(template.phases.generateRepair.effort, "max");
+  assert.equal(template.skillsDirectory, path.join(process.cwd(), "templates/mini-app/skills"));
+  assert.match(planPrompt, /模板技能调用/);
+  assert.match(planPrompt, /`protocol-analysis`/);
+  assert.match(planPrompt, /`prd-assembly`/);
+  assert.match(planRepairPrompt, /模板技能调用/);
+  assert.match(planRepairPrompt, /`protocol-analysis`/);
+  assert.match(planRepairPrompt, /`prd-assembly`/);
+  await access(path.join(template.skillsDirectory ?? "", "protocol-analysis/SKILL.md"));
+  await access(path.join(template.skillsDirectory ?? "", "prd-assembly/SKILL.md"));
   assert.equal(template.interactiveRuntimeValidation.enabled, true);
   assert.equal(template.interactiveRuntimeValidation.coverageThreshold, 0.8);
   assert.equal(template.interactiveRuntimeValidation.idleTimeoutMs, 10_000);

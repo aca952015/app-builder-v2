@@ -11,22 +11,23 @@
   "phases": {
     "plan": {
       "prompt": "prompts/plan-system-prompt.md",
-      "effort": "high"
+      "effort": "max"
     },
     "planRepair": {
       "prompt": "prompts/plan-repair-system-prompt.md",
-      "effort": "high"
+      "effort": "max"
     },
     "generate": {
       "prompt": "prompts/generate-system-prompt.md",
-      "effort": "medium"
+      "effort": "max"
     },
     "generateRepair": {
       "prompt": "prompts/generate-repair-system-prompt.md",
-      "effort": "high"
+      "effort": "max"
     }
   },
   "referencesDir": "references",
+  "skillsDir": "skills",
   "starterDir": "starter",
   "runtimeValidation": {
     "copyEnvExample": true,

@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import {
   convertMessagesToDeepSeekCompletionsMessageParams,
   normalizeOpenAICompatibleModelName,
+  resolveModelReasoningEffort,
   sanitizeDeepSeekCompletionsParams,
   shouldUseDeepSeekReasoningContentCompat,
 } from "../src/lib/deepseek-openai.js";
@@ -223,6 +224,12 @@ test("shouldUseDeepSeekReasoningContentCompat detects DeepSeek model or endpoint
   assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:deepseek-v4-pro"), true);
   assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:gpt-4.1-mini", "https://api.deepseek.com"), true);
   assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:gpt-4.1-mini", "https://api.openai.com/v1"), false);
+});
+
+test("resolveModelReasoningEffort maps template max to model xhigh", () => {
+  assert.equal(resolveModelReasoningEffort("low"), "low");
+  assert.equal(resolveModelReasoningEffort("high"), "high");
+  assert.equal(resolveModelReasoningEffort("max"), "xhigh");
 });
 
 test("sanitizeDeepSeekCompletionsParams removes forced tool choice", () => {
@@ -752,6 +759,7 @@ test("renderTodoBoardToString can render interactive runtime validation details"
       devServerUrl: "http://127.0.0.1:4321",
       browserOpenAttempted: true,
       browserOpened: true,
+      implementationRequest: "把详情页增加状态更新时间字段",
       devServerOutputSummary: "ready - started server",
       recentDevServerOutput: ["ready - started server"],
     },
@@ -763,6 +771,7 @@ test("renderTodoBoardToString can render interactive runtime validation details"
   assert.match(output, /Dev server URL：http:\/\/127\.0\.0\.1:4321/);
   assert.match(output, /代理 URL：http:\/\/127\.0\.0\.1:4321/);
   assert.match(output, /浏览器：已自动打开默认浏览器/);
+  assert.match(output, /用户要求：把详情页增加状态更新时间字段/);
   assert.match(output, /输出摘要：ready - started server/);
   assert.match(output, /runtime-interaction-validation\.json/);
   assert.match(output, /ready - started server/);

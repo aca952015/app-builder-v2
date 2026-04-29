@@ -42,6 +42,7 @@ export type TodoBoardState = {
     proxyUrl?: string;
     validationUrl?: string;
     manualCompleted?: boolean;
+    implementationRequest?: string;
     devServerUrl?: string;
     browserOpenAttempted?: boolean;
     browserOpened?: boolean;
@@ -548,6 +549,9 @@ function buildRuntimeInteractionLines(state: TodoBoardState): string[] {
   }
   if (interaction.manualCompleted) {
     lines.push("  人工确认：已完成");
+  }
+  if (interaction.implementationRequest) {
+    lines.push(`  用户要求：${interaction.implementationRequest}`);
   }
   if (interaction.devServerOutputSummary) {
     lines.push(`  输出摘要：${interaction.devServerOutputSummary}`);
