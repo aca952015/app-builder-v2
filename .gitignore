@@ -3,6 +3,7 @@ node_modules
 .tmp
 generated
 
+.DS_Store
 .*/
 .omx/
 .out/
@@ -10,4 +11,3 @@ generated
 !.codex/skills/
 
 .env
-
