@@ -19,6 +19,7 @@ export function buildSessionPolicyDocument(): string {
     "  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`",
     "  - `artifacts.generationValidation` = `/.deepagents/generation-validation.json`",
     "  - `artifacts.runtimeValidationLog` = `/.deepagents/runtime-validation.log`",
+    "  - `artifacts.runtimeInteractionValidation` = `/.deepagents/runtime-interaction-validation.json`",
     "  - `artifacts.errorLog` = `/.deepagents/error.log`",
     "- Input `artifacts.*` values are the only source of truth. Do not infer, rename, shorten, or relocate them.",
     "- Do not delegate to child agents or task-style fanout tools inside DeepAgents stages.",

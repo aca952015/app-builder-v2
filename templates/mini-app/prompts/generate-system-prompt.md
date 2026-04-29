@@ -36,3 +36,5 @@
 宿主随后会按输入里的 `template.runtimeValidation` 执行运行验证；若 `copyEnvExample` 未禁用，还会先准备 `.env`。
 
 你生成的代码必须让这些步骤可通过。
+
+如果输入里的 `template.interactiveRuntimeValidation.enabled` 为 true，宿主还会在生成门禁通过后启动 dev server，并用本机默认浏览器打开真实 dev server URL；宿主会收集 dev server stdout/stderr 判断是否需要修复。页面必须支持真实用户操作触发 API，而不是只输出静态占位内容。

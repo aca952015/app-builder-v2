@@ -129,6 +129,9 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     if (result.runtimeValidationLogPath) {
       stdout.log(`Runtime log: ${result.runtimeValidationLogPath}`);
     }
+    if (result.runtimeInteractionValidationPath) {
+      stdout.log(`Runtime interaction: ${result.runtimeInteractionValidationPath}`);
+    }
     stdout.log(`Workflow: ${result.workflowPhase}`);
     if (result.resumedFromPhase) {
       stdout.log(`Resumed from: ${result.resumedFromPhase}`);

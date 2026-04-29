@@ -48,5 +48,11 @@
         "kind": "dev-server"
       }
     ]
+  },
+  "interactiveRuntimeValidation": {
+    "enabled": true,
+    "coverageThreshold": 0.8,
+    "idleTimeoutMs": 10000,
+    "readyTimeoutMs": 90000
   }
 }

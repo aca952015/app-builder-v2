@@ -559,6 +559,24 @@ test("createArtifactItemsForStage returns key artifacts for each workflow stage"
       { label: ".deepagents/generation-validation.json", status: "verified" },
     ],
   );
+
+  assert.deepEqual(
+    createArtifactItemsForStage("运行验证阶段", "validating").map((item) => ({
+      label: item.label,
+      status: item.status,
+    })),
+    [
+      { label: ".deepagents/prd-analysis.md", status: "verified" },
+      { label: ".deepagents/generated-spec.md", status: "verified" },
+      { label: ".deepagents/plan-spec.json", status: "verified" },
+      { label: ".deepagents/plan-validation.json", status: "verified" },
+      { label: "app/api/**", status: "verified" },
+      { label: "app/** 页面与布局", status: "verified" },
+      { label: "app-builder-report.md", status: "verified" },
+      { label: ".deepagents/generation-validation.json", status: "verified" },
+      { label: ".deepagents/runtime-interaction-validation.json", status: "validating" },
+    ],
+  );
 });
 
 test("createStepItemsForLifecycle returns a verified completion checklist for the complete stage", () => {
@@ -719,6 +737,31 @@ test("renderTodoBoardToString can render the completion stage", () => {
   assert.match(output, /生成阶段产物已通过宿主校验/);
   assert.match(output, /工作流状态已切换为 complete/);
   assert.doesNotMatch(output, /\[待生成\]/);
+});
+
+test("renderTodoBoardToString can render interactive runtime validation details", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "运行验证阶段",
+    sessionId: "12345678-90ab-cdef-1234-567890abcdef",
+    todos: createStepItemsForLifecycle("运行验证阶段", "validating"),
+    artifacts: createArtifactItemsForStage("运行验证阶段", "validating"),
+    narrative: "正在监听 dev server 输出。",
+    runtimeInteraction: {
+      devServerUrl: "http://127.0.0.1:4321",
+      browserOpenAttempted: true,
+      browserOpened: true,
+      devServerOutputSummary: "ready - started server",
+      recentDevServerOutput: ["ready - started server"],
+    },
+  }, 140));
+
+  assert.match(output, /计划阶段 -> 生成阶段 -> 运行验证阶段 -> 完成阶段/);
+  assert.match(output, /运行验证：/);
+  assert.match(output, /Dev server URL：http:\/\/127\.0\.0\.1:4321/);
+  assert.match(output, /浏览器：已自动打开默认浏览器/);
+  assert.match(output, /输出摘要：ready - started server/);
+  assert.match(output, /runtime-interaction-validation\.json/);
+  assert.match(output, /ready - started server/);
 });
 
 test("buildTodoBoardLines appends a horizontal runtime bar for plain-text rendering", () => {

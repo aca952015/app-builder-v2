@@ -8,7 +8,7 @@ import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { routeToPageFileCandidates } from "./app-router.js";
 import type { RuntimeStatus, StdoutMode } from "./types.js";
 
-export type WorkflowStage = "计划阶段" | "生成阶段" | "完成阶段";
+export type WorkflowStage = "计划阶段" | "生成阶段" | "运行验证阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export type ArtifactStatus = "pending" | "generating" | "generated" | "validating" | "verified";
 export type WorkflowStageMarker = WorkflowStage;
@@ -38,6 +38,19 @@ export type TodoBoardState = {
     outputTokens?: number | undefined;
     outputTokensEstimated?: boolean | undefined;
   } | undefined;
+  runtimeInteraction?: {
+    proxyUrl?: string;
+    devServerUrl?: string;
+    browserOpenAttempted?: boolean;
+    browserOpened?: boolean;
+    browserOpenError?: string;
+    devServerOutputSummary?: string;
+    coverageRatio?: number;
+    coveredTargets?: string[];
+    uncoveredTargets?: string[];
+    recentRequests?: string[];
+    recentDevServerOutput?: string[];
+  } | undefined;
 };
 
 export type TodoBoardRenderer = {
@@ -45,7 +58,8 @@ export type TodoBoardRenderer = {
   stop(): Promise<void>;
 };
 
-const WORKFLOW_STAGE_SEQUENCE: WorkflowStageMarker[] = ["计划阶段", "生成阶段", "完成阶段"];
+const WORKFLOW_STAGE_SEQUENCE: WorkflowStageMarker[] = ["计划阶段", "生成阶段", "运行验证阶段", "完成阶段"];
+const DEFAULT_WORKFLOW_STAGE_SEQUENCE: WorkflowStageMarker[] = ["计划阶段", "生成阶段", "完成阶段"];
 type WorkflowLogPrefixColor = "cyan" | "yellow" | "magenta" | "blue" | "green" | "red" | "gray";
 const DEFAULT_STDOUT_MODE: StdoutMode = "dashboard";
 const VALID_STDOUT_MODES = new Set<StdoutMode>(["dashboard", "log"]);
@@ -116,7 +130,10 @@ export function formatArtifactHeader(): string {
 }
 
 export function formatWorkflowStageLine(activeStage: WorkflowStageMarker): string {
-  return WORKFLOW_STAGE_SEQUENCE
+  const sequence = activeStage === "运行验证阶段"
+    ? WORKFLOW_STAGE_SEQUENCE
+    : DEFAULT_WORKFLOW_STAGE_SEQUENCE;
+  return sequence
     .map((stage) => (stage === activeStage ? `[${stage}]` : stage))
     .join(" -> ");
 }
@@ -502,6 +519,56 @@ function buildStatusBarLine(state: TodoBoardState): string {
     .join(" | ");
 }
 
+function formatPercent(value: number): string {
+  return `${Math.round(value * 100)}%`;
+}
+
+function buildRuntimeInteractionLines(state: TodoBoardState): string[] {
+  const interaction = state.runtimeInteraction;
+  if (!interaction) {
+    return [];
+  }
+
+  const lines = ["运行验证："];
+  if (interaction.devServerUrl) {
+    lines.push(`  Dev server URL：${interaction.devServerUrl}`);
+  }
+  if (interaction.browserOpened === true) {
+    lines.push("  浏览器：已自动打开默认浏览器");
+  } else if (interaction.browserOpenAttempted) {
+    lines.push(`  浏览器：打开失败${interaction.browserOpenError ? `（${interaction.browserOpenError}）` : ""}`);
+  }
+  if (interaction.proxyUrl) {
+    lines.push(`  代理 URL：${interaction.proxyUrl}`);
+  }
+  if (interaction.devServerOutputSummary) {
+    lines.push(`  输出摘要：${interaction.devServerOutputSummary}`);
+  }
+  if (typeof interaction.coverageRatio === "number" && Number.isFinite(interaction.coverageRatio)) {
+    lines.push(`  覆盖率：${formatPercent(interaction.coverageRatio)}`);
+  }
+  if (interaction.coveredTargets && interaction.coveredTargets.length > 0) {
+    lines.push(`  已覆盖：${interaction.coveredTargets.slice(0, 4).join(", ")}`);
+  }
+  if (interaction.uncoveredTargets && interaction.uncoveredTargets.length > 0) {
+    lines.push(`  未覆盖：${interaction.uncoveredTargets.slice(0, 4).join(", ")}`);
+  }
+  if (interaction.recentRequests && interaction.recentRequests.length > 0) {
+    lines.push("  最近请求：");
+    for (const requestLine of interaction.recentRequests.slice(-4)) {
+      lines.push(`    ${requestLine}`);
+    }
+  }
+  if (interaction.recentDevServerOutput && interaction.recentDevServerOutput.length > 0) {
+    lines.push("  最近输出：");
+    for (const outputLine of interaction.recentDevServerOutput.slice(-4)) {
+      lines.push(`    ${outputLine}`);
+    }
+  }
+
+  return lines;
+}
+
 export function buildTodoBoardLines(state: TodoBoardState): string[] {
   if (state.todos.length === 0 && state.artifacts.length === 0) {
     return [buildActionLine(state), "", buildStatusBarLine(state)];
@@ -527,6 +594,11 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
     for (const artifact of state.artifacts) {
       lines.push(`  ${renderArtifactStatus(artifact.status)} ${artifact.label}`);
     }
+  }
+  const runtimeInteractionLines = buildRuntimeInteractionLines(state);
+  if (runtimeInteractionLines.length > 0) {
+    lines.push("");
+    lines.push(...runtimeInteractionLines);
   }
   if (state.logs && state.logs.length > 0) {
     const { execution, repair } = splitVisibleLogs(state.logs);
@@ -655,6 +727,33 @@ function createActionElement(state: TodoBoardState) {
   );
 }
 
+function createRuntimeInteractionElement(state: TodoBoardState): React.ReactNode | null {
+  const lines = buildRuntimeInteractionLines(state);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  return React.createElement(
+    Box,
+    {
+      key: "runtime-interaction",
+      flexDirection: "column",
+      marginTop: 1,
+    },
+    lines.map((line, index) =>
+      React.createElement(
+        Text,
+        {
+          key: `runtime-interaction-${index}`,
+          color: index === 0 ? "blue" : "white",
+          bold: index === 0,
+        },
+        line,
+      )
+    ),
+  );
+}
+
 export function renderArtifactStatus(status: ArtifactStatus): string {
   switch (status) {
     case "verified":
@@ -686,6 +785,15 @@ export function createDefaultStepItems(stage: WorkflowStage): TodoItem[] {
       { content: "生成阶段产物已通过宿主校验", status: "pending" },
       { content: "验证记录与交付报告已确认落盘", status: "pending" },
       { content: "工作流状态已切换为 complete", status: "pending" },
+    ];
+  }
+
+  if (stage === "运行验证阶段") {
+    return [
+      { content: "启动生成应用 dev server", status: "in_progress" },
+      { content: "显示 dev server URL 供用户访问", status: "pending" },
+      { content: "收集 dev server stdout/stderr", status: "pending" },
+      { content: "等待输出静默窗口并检查错误", status: "pending" },
     ];
   }
 
@@ -722,7 +830,7 @@ export function createArtifactItemsForStage(stage: WorkflowStage, status: Artifa
     { label: ".deepagents/plan-validation.json", status: stage === "计划阶段" ? status : "verified" },
   ];
 
-  const generationArtifactStatus = stage === "计划阶段" ? "pending" : stage === "完成阶段" ? "verified" : status;
+  const generationArtifactStatus = stage === "计划阶段" ? "pending" : stage === "运行验证阶段" ? "verified" : stage === "完成阶段" ? "verified" : status;
   const generationArtifacts: ArtifactItem[] = [
     { label: "app/api/**", status: generationArtifactStatus },
     { label: "app/** 页面与布局", status: generationArtifactStatus },
@@ -730,13 +838,20 @@ export function createArtifactItemsForStage(stage: WorkflowStage, status: Artifa
     { label: ".deepagents/generation-validation.json", status: generationArtifactStatus },
   ];
 
-  return [...planArtifacts, ...generationArtifacts];
+  const runtimeValidationArtifacts: ArtifactItem[] = stage === "运行验证阶段"
+    ? [{ label: ".deepagents/runtime-interaction-validation.json", status }]
+    : [];
+
+  return [...planArtifacts, ...generationArtifacts, ...runtimeValidationArtifacts];
 }
 
 function createWorkflowBoardElement(state: TodoBoardState) {
   const borderColor = borderColorForStage(state.stage);
   const sessionLabel = formatShortSessionId(state.sessionId);
   const splitLogs = splitVisibleLogs(state.logs ?? []);
+  const workflowStageSequence = state.stage === "运行验证阶段" || state.runtimeInteraction
+    ? WORKFLOW_STAGE_SEQUENCE
+    : DEFAULT_WORKFLOW_STAGE_SEQUENCE;
   const renderLogColumn = (
     title: string,
     logLines: string[],
@@ -841,7 +956,7 @@ function createWorkflowBoardElement(state: TodoBoardState) {
               flexGrow: 1,
               flexWrap: "wrap",
             },
-            WORKFLOW_STAGE_SEQUENCE.flatMap((stage, index) => {
+            workflowStageSequence.flatMap((stage, index) => {
               const stageProps =
                 stage === state.stage
                   ? {
@@ -864,7 +979,7 @@ function createWorkflowBoardElement(state: TodoBoardState) {
                 ),
               ];
 
-              if (index < WORKFLOW_STAGE_SEQUENCE.length - 1) {
+              if (index < workflowStageSequence.length - 1) {
                 nodes.push(
                   React.createElement(
                     Text,
@@ -980,6 +1095,7 @@ function createWorkflowBoardElement(state: TodoBoardState) {
         ],
       ),
       createActionElement(state),
+      createRuntimeInteractionElement(state),
       React.createElement(
         Box,
         {
@@ -1322,6 +1438,12 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
           ...state.streamProgress,
         }
       : activeWorkflowState?.streamProgress,
+    runtimeInteraction: state.runtimeInteraction
+      ? {
+          ...activeWorkflowState?.runtimeInteraction,
+          ...state.runtimeInteraction,
+        }
+      : activeWorkflowState?.runtimeInteraction,
   };
   activeWorkflowState = nextWorkflowState;
   activeWorkflowLogs = trimWorkflowLogs(nextWorkflowState.logs ?? []);

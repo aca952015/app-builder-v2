@@ -8,6 +8,7 @@ import {
   TemplatePhaseEffort,
   TemplatePhaseMap,
   OutputWorkspace,
+  TemplateInteractiveRuntimeValidation,
   TemplateLock,
   TemplatePack,
   TemplateRepairRetries,
@@ -27,6 +28,13 @@ const defaultRuntimeValidation: TemplateRuntimeValidation = {
 const defaultRepairRetries: TemplateRepairRetries = {
   plan: 2,
   generate: 2,
+};
+
+const defaultInteractiveRuntimeValidation: Omit<TemplateInteractiveRuntimeValidation, "devServerStep"> = {
+  enabled: false,
+  coverageThreshold: 0.8,
+  idleTimeoutMs: 10_000,
+  readyTimeoutMs: 90_000,
 };
 
 export const DEFAULT_TEMPLATE_ID = "full-stack";
@@ -98,6 +106,7 @@ type TemplateManifest = {
   starterDir?: string;
   repairRetries?: TemplateRepairRetries;
   runtimeValidation?: TemplateRuntimeValidation;
+  interactiveRuntimeValidation?: TemplateInteractiveRuntimeValidation;
 };
 
 function assertNonEmptyString(value: unknown, fieldName: string): asserts value is string {
@@ -166,6 +175,85 @@ function parseRuntimeValidation(raw: unknown): TemplateRuntimeValidation {
   return {
     ...(typeof validation.copyEnvExample === "boolean" ? { copyEnvExample: validation.copyEnvExample } : {}),
     steps: validation.steps.map((step, index) => parseRuntimeValidationStep(step, index)),
+  };
+}
+
+function parsePositiveIntegerField(
+  value: unknown,
+  fieldName: string,
+  defaultValue: number,
+): number {
+  if (value === undefined) {
+    return defaultValue;
+  }
+
+  if (!Number.isInteger(value) || Number(value) <= 0) {
+    throw new Error(`Template manifest field "${fieldName}" must be a positive integer.`);
+  }
+
+  return Number(value);
+}
+
+function parseCoverageThreshold(value: unknown): number {
+  if (value === undefined) {
+    return defaultInteractiveRuntimeValidation.coverageThreshold;
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error('Template manifest field "interactiveRuntimeValidation.coverageThreshold" must be a number between 0 and 1.');
+  }
+
+  return value;
+}
+
+function parseInteractiveRuntimeValidation(
+  raw: unknown,
+  runtimeValidation: TemplateRuntimeValidation,
+): TemplateInteractiveRuntimeValidation {
+  if (raw === undefined) {
+    return { ...defaultInteractiveRuntimeValidation };
+  }
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error('Template manifest field "interactiveRuntimeValidation" must be an object.');
+  }
+
+  const validation = raw as Record<string, unknown>;
+  const enabled = validation.enabled === true;
+  const coverageThreshold = parseCoverageThreshold(validation.coverageThreshold);
+  const idleTimeoutMs = parsePositiveIntegerField(
+    validation.idleTimeoutMs,
+    "interactiveRuntimeValidation.idleTimeoutMs",
+    defaultInteractiveRuntimeValidation.idleTimeoutMs,
+  );
+  const readyTimeoutMs = parsePositiveIntegerField(
+    validation.readyTimeoutMs,
+    "interactiveRuntimeValidation.readyTimeoutMs",
+    defaultInteractiveRuntimeValidation.readyTimeoutMs,
+  );
+
+  if (!enabled) {
+    return {
+      enabled,
+      coverageThreshold,
+      idleTimeoutMs,
+      readyTimeoutMs,
+    };
+  }
+
+  const devServerStep = runtimeValidation.steps.find((step) => step.kind === "dev-server");
+  if (!devServerStep) {
+    throw new Error(
+      'Template manifest field "interactiveRuntimeValidation.enabled" requires runtimeValidation.steps to include a step with kind "dev-server".',
+    );
+  }
+
+  return {
+    enabled,
+    coverageThreshold,
+    idleTimeoutMs,
+    readyTimeoutMs,
+    devServerStep: JSON.parse(JSON.stringify(devServerStep)) as TemplateRuntimeValidationStep,
   };
 }
 
@@ -239,6 +327,7 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
   assertNonEmptyString(manifest.version, "version");
   assertNonEmptyString(manifest.projectRenderer, "projectRenderer");
 
+  const runtimeValidation = parseRuntimeValidation(manifest.runtimeValidation);
   const parsed: TemplateManifest = {
     id: manifest.id,
     name: manifest.name,
@@ -246,7 +335,11 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
     projectRenderer: manifest.projectRenderer,
     phases: parseTemplatePhases(manifest.phases),
     repairRetries: parseRepairRetries(manifest.repairRetries),
-    runtimeValidation: parseRuntimeValidation(manifest.runtimeValidation),
+    runtimeValidation,
+    interactiveRuntimeValidation: parseInteractiveRuntimeValidation(
+      manifest.interactiveRuntimeValidation,
+      runtimeValidation,
+    ),
   };
 
   if (typeof manifest.description === "string" && manifest.description.trim() !== "") {
@@ -350,6 +443,7 @@ export async function loadTemplatePack(templateId = DEFAULT_TEMPLATE_ID): Promis
     repairRetries: manifest.repairRetries ?? { ...defaultRepairRetries },
     phases: manifest.phases,
     runtimeValidation: manifest.runtimeValidation ?? defaultRuntimeValidation,
+    interactiveRuntimeValidation: manifest.interactiveRuntimeValidation ?? { ...defaultInteractiveRuntimeValidation },
     hash: await hashDirectory(directory),
   };
 }
@@ -412,6 +506,7 @@ export async function stageTemplatePack(
     repairRetries: template.repairRetries,
     phases: template.phases,
     runtimeValidation: template.runtimeValidation,
+    interactiveRuntimeValidation: template.interactiveRuntimeValidation,
     hash: template.hash,
     stagedAt: new Date().toISOString(),
     workspaceTemplateDirectory: path.relative(workspace.outputDirectory, workspace.deepagentsDirectory).split(path.sep).join("/"),

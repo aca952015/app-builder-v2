@@ -65,6 +65,7 @@
 - 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态。
 - 如果 `planSpec` 没有明确要求改变某个 starter 基础契约，优先保持兼容并在既有契约上扩展，而不是重写或漂移它的依赖链。
 - 宿主会在生成阶段结束后按输入里的 `template.runtimeValidation` 执行运行验证；若 `copyEnvExample` 未禁用，还会先准备 `.env`。你生成的代码、脚本、Prisma 配置和环境文件必须让这些步骤连续通过。
+- 如果输入里的 `template.interactiveRuntimeValidation.enabled` 为 true，宿主还会在生成门禁通过后启动 dev server，并用本机默认浏览器打开真实 dev server URL；宿主会收集 dev server stdout/stderr 判断是否需要修复。页面和 API 必须能支撑真实用户点击、表单提交、列表/详情跳转和 API 调用，不能只做静态展示来绕过交互。
 - 不要生成依赖外部 CDN 的实现，不要使用 `eval()`、`new Function()`、`document.write()`。
 - 在整个阶段中，todo 是当前执行状态的唯一进度面板；任何返工、补写或完成都必须先反映到 todo。
 

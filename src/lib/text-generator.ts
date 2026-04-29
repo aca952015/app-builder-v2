@@ -223,6 +223,7 @@ export function buildPlanProjectPayload(
       version: runtime.templateVersion,
       directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
       runtimeValidation: runtime.templateRuntimeValidation,
+      interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
     },
     planPolicy: {
       planSpecVersion: 1,
@@ -239,6 +240,7 @@ export function buildPlanProjectPayload(
       planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
       planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
       generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
+      runtimeInteractionValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeInteractionValidationPath),
       errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
     },
     planSpecSchema: z.toJSONSchema(planSpecSchema),
@@ -255,6 +257,7 @@ export function buildPlanRepairPayload(runtime: TextGeneratorRuntime): Record<st
       version: runtime.templateVersion,
       directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
       runtimeValidation: runtime.templateRuntimeValidation,
+      interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
     },
     planRepairPolicy: {
       planSpecVersion: 1,
@@ -1736,6 +1739,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             version: runtime.templateVersion,
             directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
             runtimeValidation: runtime.templateRuntimeValidation,
+            interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
           },
           generationPolicy: {
             dataMode: "rest_api",
@@ -1751,6 +1755,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
             generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
             runtimeValidationLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeValidationLogPath),
+            runtimeInteractionValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeInteractionValidationPath),
             planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
             report: "/app-builder-report.md",
             errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
@@ -1784,6 +1789,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             version: runtime.templateVersion,
             directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
             runtimeValidation: runtime.templateRuntimeValidation,
+            interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
           },
           generationRepairPolicy: {
             dataMode: "rest_api",
@@ -1797,6 +1803,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
             generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
             runtimeValidationLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeValidationLogPath),
+            runtimeInteractionValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeInteractionValidationPath),
             planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
             report: "/app-builder-report.md",
             errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),

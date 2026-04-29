@@ -99,6 +99,14 @@ export type TemplateRuntimeValidation = {
   steps: TemplateRuntimeValidationStep[];
 };
 
+export type TemplateInteractiveRuntimeValidation = {
+  enabled: boolean;
+  coverageThreshold: number;
+  idleTimeoutMs: number;
+  readyTimeoutMs: number;
+  devServerStep?: TemplateRuntimeValidationStep;
+};
+
 export type TemplatePhaseEffort = "low" | "medium" | "high";
 
 export type TemplatePhaseName = "plan" | "planRepair" | "generate" | "generateRepair";
@@ -122,7 +130,13 @@ export type GeneratedAppValidator = {
   }>;
 };
 
-export type WorkflowPhase = "plan" | "plan_repair" | "generate" | "generate_repair" | "complete";
+export type WorkflowPhase =
+  | "plan"
+  | "plan_repair"
+  | "generate"
+  | "generate_repair"
+  | "runtime_validation"
+  | "complete";
 export type ValidationPhase = "plan" | "generate";
 
 export type RuntimeUsageSummary = {
@@ -155,6 +169,7 @@ export type SessionValidationResult = {
   steps?: GenerationValidationStep[];
   validationPath: string;
   runtimeValidationLogPath?: string;
+  runtimeInteractionValidationPath?: string;
   workflowPhase: WorkflowPhase;
   resumedFromPhase?: Extract<WorkflowPhase, "plan_repair" | "generate_repair">;
 };
@@ -207,6 +222,7 @@ export type TemplatePack = {
   repairRetries: TemplateRepairRetries;
   phases: TemplatePhaseMap;
   runtimeValidation: TemplateRuntimeValidation;
+  interactiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
   hash: string;
 };
 
@@ -219,6 +235,7 @@ export type TemplateLock = {
   repairRetries: TemplateRepairRetries;
   phases: TemplatePhaseMap;
   runtimeValidation: TemplateRuntimeValidation;
+  interactiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
   hash: string;
   stagedAt: string;
   workspaceTemplateDirectory: string;
@@ -232,6 +249,7 @@ export type OutputWorkspace = {
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
   deepagentsRuntimeValidationLogPath: string;
+  deepagentsRuntimeInteractionValidationPath: string;
   deepagentsConfigPath: string;
   deepagentsPlanPromptSnapshotPath: string;
   deepagentsPlanRepairPromptSnapshotPath: string;
@@ -255,6 +273,7 @@ export type TextGeneratorRuntime = {
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
   deepagentsRuntimeValidationLogPath: string;
+  deepagentsRuntimeInteractionValidationPath: string;
   deepagentsConfigPath: string;
   deepagentsPlanPromptSnapshotPath: string;
   deepagentsPlanRepairPromptSnapshotPath: string;
@@ -281,6 +300,7 @@ export type TextGeneratorRuntime = {
   retryReasons?: string[];
   templatePhases: TemplatePhaseMap;
   templateRuntimeValidation: TemplateRuntimeValidation;
+  templateInteractiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
   modelRoles: ModelRoleConfigMap;
 };
 

@@ -322,6 +322,52 @@ async function getOnlySessionId(tempRoot: string): Promise<string> {
   return sessionId;
 }
 
+async function writeCliMiniAppTemplate(root: string): Promise<void> {
+  const templateDirectory = path.join(root, "templates", "mini-app");
+  const promptsDirectory = path.join(templateDirectory, "prompts");
+  await mkdir(promptsDirectory, { recursive: true });
+
+  for (const promptName of [
+    "plan-system-prompt.md",
+    "plan-repair-system-prompt.md",
+    "generate-system-prompt.md",
+    "generate-repair-system-prompt.md",
+  ]) {
+    await writeFile(path.join(promptsDirectory, promptName), `# ${promptName}\n`, "utf8");
+  }
+
+  await writeFile(
+    path.join(templateDirectory, "template.json"),
+    `${JSON.stringify({
+      id: "mini-app",
+      name: "Mini App",
+      version: "1.0.0",
+      projectRenderer: "mini-app",
+      repairRetries: {
+        plan: 2,
+        generate: 2,
+      },
+      phases: {
+        plan: { prompt: "prompts/plan-system-prompt.md", effort: "high" },
+        planRepair: { prompt: "prompts/plan-repair-system-prompt.md", effort: "high" },
+        generate: { prompt: "prompts/generate-system-prompt.md", effort: "medium" },
+        generateRepair: { prompt: "prompts/generate-repair-system-prompt.md", effort: "high" },
+      },
+      runtimeValidation: {
+        copyEnvExample: true,
+        steps: [
+          { name: "pnpm install", command: "pnpm", args: ["install"] },
+          { name: "pnpm dev", command: "pnpm", args: ["dev"], kind: "dev-server" },
+        ],
+      },
+      interactiveRuntimeValidation: {
+        enabled: false,
+      },
+    }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 test("runCli validate can validate an existing generate session by session id", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-"));
   const previousCwd = process.cwd();
@@ -507,6 +553,7 @@ test("runCli prints generate execution parameters before running", async () => {
   const stdoutLines: string[] = [];
   const stderrLines: string[] = [];
 
+  await writeCliMiniAppTemplate(tempRoot);
   process.chdir(tempRoot);
 
   try {
