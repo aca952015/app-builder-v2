@@ -850,15 +850,97 @@ test("interactive runtime exposes proxy and passes after request idle", async (c
     assert.equal(result.artifact.valid, true);
     assert.match(result.artifact.devServerUrl ?? "", /^http:\/\/127\.0\.0\.1:/);
     assert.match(result.artifact.proxyUrl ?? "", /^http:\/\/127\.0\.0\.1:/);
+    assert.equal(result.artifact.validationUrl, `${result.artifact.proxyUrl}/validate`);
     assert.equal(result.artifact.browserOpened, true);
     assert.equal(result.artifact.coverage.covered, 4);
     assert.equal(result.artifact.coverage.total, 4);
-    assert.equal(openedUrl, result.artifact.proxyUrl);
-    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Visit proxy URL/);
+    assert.equal(openedUrl, result.artifact.validationUrl);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Visit validation URL/);
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /\[proxy\] GET \/work-orders -> 200/);
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Opened default browser/);
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Runtime coverage 4\/4/);
     assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"valid": true/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("interactive runtime validate page can manually complete without coverage pollution", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-manual-complete-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "http.createServer((_req, res) => {",
+        "  res.writeHead(200, { 'content-type': 'text/plain' });",
+        "  res.end('ok');",
+        "}).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 1,
+        idleTimeoutMs: 60_000,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+
+    const result = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      openBrowser: false,
+      onReady: async ({ proxyUrl, validationUrl }) => {
+        assert.ok(proxyUrl);
+        assert.ok(validationUrl);
+        assert.equal(validationUrl, `${proxyUrl}/validate`);
+        const validationPage = await requestLocalResponse(validationUrl);
+        assert.equal(validationPage.status, 200);
+        assert.match(validationPage.body, /<iframe[^>]+src="\/"/);
+        assert.match(validationPage.body, /验证完成/);
+        assert.match(validationPage.body, /\/__app_builder_validate_complete/);
+
+        const completeResponse = await requestLocalResponse(`${proxyUrl}/__app_builder_validate_complete`, "POST");
+        assert.equal(completeResponse.status, 200);
+        assert.match(completeResponse.body, /"manualCompleted":true/);
+      },
+    });
+
+    assert.deepEqual(result.reasons, []);
+    assert.equal(result.artifact.valid, true);
+    assert.equal(result.artifact.manualCompleted, true);
+    assert.match(result.artifact.validationUrl ?? "", /\/validate$/);
+    assert.equal(result.artifact.coverage.covered, 0);
+    assert.equal(result.artifact.coverage.total, 4);
+    assert.equal(result.artifact.recentRequests.length, 0);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Runtime validation manually completed from \/validate/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"manualCompleted": true/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -1020,7 +1102,9 @@ test("interactive runtime reuses ports and does not reopen browser within a sess
     assert.equal(second.artifact.valid, true);
     assert.equal(first.artifact.devServerUrl, second.artifact.devServerUrl);
     assert.equal(first.artifact.proxyUrl, second.artifact.proxyUrl);
-    assert.deepEqual(openedUrls, [first.artifact.proxyUrl]);
+    assert.equal(first.artifact.validationUrl, `${first.artifact.proxyUrl}/validate`);
+    assert.equal(second.artifact.validationUrl, first.artifact.validationUrl);
+    assert.deepEqual(openedUrls, [first.artifact.validationUrl]);
     assert.equal(session.devPort, Number(new URL(first.artifact.devServerUrl ?? "").port));
     assert.equal(session.proxyPort, Number(new URL(first.artifact.proxyUrl ?? "").port));
     assert.equal(await readFile(startCountPath, "utf8"), "1");

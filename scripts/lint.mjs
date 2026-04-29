@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 const ROOT = process.cwd();
-const EXTS = new Set([".ts", ".md", ".json", ".mjs"]);
+const EXTS = new Set([".ts", ".md", ".json", ".mjs", ".html"]);
 const IGNORE = new Set(["dist", "node_modules", ".tmp", ".out", "generated", ".omx", ".bg-shell", ".gsd", "prds"]);
 
 async function collectFiles(dir) {

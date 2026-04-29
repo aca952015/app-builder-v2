@@ -2006,6 +2006,8 @@ async function updateRuntimeValidationWorkflowBoard(options: {
         ...(options.artifact.browserOpened !== undefined ? { browserOpened: options.artifact.browserOpened } : {}),
         ...(options.artifact.browserOpenError ? { browserOpenError: options.artifact.browserOpenError } : {}),
         ...(options.artifact.proxyUrl ? { proxyUrl: options.artifact.proxyUrl } : {}),
+        ...(options.artifact.validationUrl ? { validationUrl: options.artifact.validationUrl } : {}),
+        ...(options.artifact.manualCompleted ? { manualCompleted: true } : {}),
         ...(options.artifact.devServerOutputSummary ? { devServerOutputSummary: options.artifact.devServerOutputSummary } : {}),
         ...(options.artifact.recentRequests.length > 0
           ? {
@@ -2071,8 +2073,8 @@ async function completeAfterGenerateValidation(options: {
           planSpec: options.approvedPlan,
           config: options.runtime.templateInteractiveRuntimeValidation,
           session: runtimeInteractionSession,
-          onReady: async ({ proxyUrl, devServerUrl, browserOpened, browserOpenReused, browserOpenError }) => {
-            const visitUrl = proxyUrl ?? devServerUrl;
+          onReady: async ({ proxyUrl, validationUrl, devServerUrl, browserOpened, browserOpenReused, browserOpenError }) => {
+            const visitUrl = validationUrl ?? proxyUrl ?? devServerUrl;
             if (browserOpenReused && browserOpened) {
               await appendWorkflowLog(`[host] 继续使用已打开的运行验证地址：${visitUrl}`);
               return;
@@ -2120,6 +2122,7 @@ async function completeAfterGenerateValidation(options: {
                 ...(update.browserOpened !== undefined ? { browserOpened: update.browserOpened } : {}),
                 ...(update.browserOpenError ? { browserOpenError: update.browserOpenError } : {}),
                 ...(update.proxyUrl ? { proxyUrl: update.proxyUrl } : {}),
+                ...(update.validationUrl ? { validationUrl: update.validationUrl } : {}),
                 ...(recentRequests.length > 0
                   ? {
                       coverageRatio: update.coverage.ratio,

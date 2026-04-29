@@ -40,6 +40,8 @@ export type TodoBoardState = {
   } | undefined;
   runtimeInteraction?: {
     proxyUrl?: string;
+    validationUrl?: string;
+    manualCompleted?: boolean;
     devServerUrl?: string;
     browserOpenAttempted?: boolean;
     browserOpened?: boolean;
@@ -530,6 +532,9 @@ function buildRuntimeInteractionLines(state: TodoBoardState): string[] {
   }
 
   const lines = ["运行验证："];
+  if (interaction.validationUrl) {
+    lines.push(`  验证 URL：${interaction.validationUrl}`);
+  }
   if (interaction.devServerUrl) {
     lines.push(`  Dev server URL：${interaction.devServerUrl}`);
   }
@@ -540,6 +545,9 @@ function buildRuntimeInteractionLines(state: TodoBoardState): string[] {
   }
   if (interaction.proxyUrl) {
     lines.push(`  代理 URL：${interaction.proxyUrl}`);
+  }
+  if (interaction.manualCompleted) {
+    lines.push("  人工确认：已完成");
   }
   if (interaction.devServerOutputSummary) {
     lines.push(`  输出摘要：${interaction.devServerOutputSummary}`);

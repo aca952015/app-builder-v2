@@ -747,6 +747,8 @@ test("renderTodoBoardToString can render interactive runtime validation details"
     artifacts: createArtifactItemsForStage("运行验证阶段", "validating"),
     narrative: "正在监听 dev server 输出。",
     runtimeInteraction: {
+      validationUrl: "http://127.0.0.1:4321/validate",
+      proxyUrl: "http://127.0.0.1:4321",
       devServerUrl: "http://127.0.0.1:4321",
       browserOpenAttempted: true,
       browserOpened: true,
@@ -757,7 +759,9 @@ test("renderTodoBoardToString can render interactive runtime validation details"
 
   assert.match(output, /计划阶段 -> 生成阶段 -> 运行验证阶段 -> 完成阶段/);
   assert.match(output, /运行验证：/);
+  assert.match(output, /验证 URL：http:\/\/127\.0\.0\.1:4321\/validate/);
   assert.match(output, /Dev server URL：http:\/\/127\.0\.0\.1:4321/);
+  assert.match(output, /代理 URL：http:\/\/127\.0\.0\.1:4321/);
   assert.match(output, /浏览器：已自动打开默认浏览器/);
   assert.match(output, /输出摘要：ready - started server/);
   assert.match(output, /runtime-interaction-validation\.json/);

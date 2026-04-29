@@ -12,6 +12,7 @@ import { connect as connectNet, createServer as createNetServer } from "node:net
 import type { Duplex } from "node:stream";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import type { PlanSpec } from "./plan-spec.js";
@@ -64,6 +65,8 @@ export type RuntimeInteractionValidationArtifact = {
   valid: boolean;
   reasons: string[];
   proxyUrl?: string;
+  validationUrl?: string;
+  manualCompleted?: boolean;
   devServerUrl?: string;
   browserOpenAttempted?: boolean;
   browserOpened?: boolean;
@@ -84,6 +87,7 @@ export type RuntimeInteractionValidationArtifact = {
 export type RuntimeInteractionFailureChain = {
   reason: string;
   proxyUrl?: string;
+  validationUrl?: string;
   devServerUrl?: string;
   request?: RuntimeInteractionRequestRecord;
   recentRequests: RuntimeInteractionRequestRecord[];
@@ -111,6 +115,7 @@ export type RuntimeInteractionRecordInput = {
 
 type RuntimeInteractionReadyInfo = {
   proxyUrl?: string;
+  validationUrl?: string;
   devServerUrl: string;
   browserOpenAttempted?: boolean;
   browserOpened?: boolean;
@@ -121,6 +126,7 @@ type RuntimeInteractionReadyInfo = {
 
 type RuntimeInteractionUpdate = {
   proxyUrl?: string;
+  validationUrl?: string;
   devServerUrl: string;
   browserOpenAttempted?: boolean;
   browserOpened?: boolean;
@@ -154,6 +160,10 @@ const REQUEST_POLL_INTERVAL_MS = 200;
 const MAX_DEV_SERVER_OUTPUT_CHARS = 40_000;
 const MAX_RESPONSE_BODY_CAPTURE_BYTES = 32_768;
 const MAX_RESPONSE_BODY_SUMMARY_CHARS = 6_000;
+const VALIDATION_PAGE_PATH = "/validate";
+const MANUAL_VALIDATION_COMPLETE_PATH = "/__app_builder_validate_complete";
+const VALIDATION_PAGE_TEMPLATE_FILENAME = "runtime-validation-page.html";
+const MANUAL_VALIDATION_COMPLETE_PATH_PLACEHOLDER = "__APP_BUILDER_MANUAL_COMPLETE_PATH__";
 
 const DEV_SERVER_ERROR_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bblocked cross-origin request\b/i, label: "跨源资源阻止" },
@@ -637,6 +647,8 @@ function isIgnoredRequestPath(pathname: string): boolean {
   if (
     normalized === "/favicon.ico" ||
     normalized === "/__app_builder_ready" ||
+    normalized === VALIDATION_PAGE_PATH ||
+    normalized === MANUAL_VALIDATION_COMPLETE_PATH ||
     normalized === "/robots.txt" ||
     normalized.startsWith("/_next/") ||
     normalized.startsWith("/__nextjs")
@@ -785,6 +797,8 @@ function buildRuntimeInteractionArtifact(options: {
   valid: boolean;
   reasons: string[];
   proxyUrl?: string;
+  validationUrl?: string;
+  manualCompleted?: boolean;
   devServerUrl?: string;
   browserOpenResult?: BrowserOpenResult;
   devServerOutput?: string;
@@ -808,6 +822,12 @@ function buildRuntimeInteractionArtifact(options: {
 
   if (options.proxyUrl) {
     artifact.proxyUrl = options.proxyUrl;
+  }
+  if (options.validationUrl) {
+    artifact.validationUrl = options.validationUrl;
+  }
+  if (options.manualCompleted) {
+    artifact.manualCompleted = true;
   }
   if (options.devServerUrl) {
     artifact.devServerUrl = options.devServerUrl;
@@ -982,6 +1002,64 @@ function writeProxyErrorResponse(response: ServerResponse, status: number, body:
   response.end(body);
 }
 
+function requestPathname(rawPath: string): string {
+  try {
+    return new URL(rawPath, "http://127.0.0.1").pathname;
+  } catch {
+    return rawPath.split("?")[0] ?? rawPath;
+  }
+}
+
+function validationUrlForProxy(proxyUrl: string): string {
+  return `${proxyUrl}${VALIDATION_PAGE_PATH}`;
+}
+
+async function readValidationPageTemplate(): Promise<string> {
+  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(moduleDirectory, VALIDATION_PAGE_TEMPLATE_FILENAME),
+    path.resolve(moduleDirectory, "../../../src/lib", VALIDATION_PAGE_TEMPLATE_FILENAME),
+    path.resolve(process.cwd(), "src/lib", VALIDATION_PAGE_TEMPLATE_FILENAME),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      return await fs.readFile(candidate, "utf8");
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      if (code === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error(`Could not find ${VALIDATION_PAGE_TEMPLATE_FILENAME}.`);
+}
+
+async function buildValidationPageHtml(): Promise<string> {
+  const template = await readValidationPageTemplate();
+  return template.replaceAll(MANUAL_VALIDATION_COMPLETE_PATH_PLACEHOLDER, MANUAL_VALIDATION_COMPLETE_PATH);
+}
+
+function writeValidationPageResponse(response: ServerResponse, html: string): void {
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(html);
+}
+
+function writeManualValidationCompleteResponse(response: ServerResponse): void {
+  response.writeHead(200, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  response.end(JSON.stringify({ ok: true, manualCompleted: true }));
+}
+
 function writeUpgradeRequest(
   upstreamSocket: Duplex,
   request: IncomingMessage,
@@ -1019,15 +1097,51 @@ async function startDevServerProxy(options: {
   getDevServerOutput: () => string;
   onActivity: () => void;
   onFailure: (reason: string, record: RuntimeInteractionRequestRecord) => void;
+  onManualComplete: () => void;
   onRecordedRequest: () => void;
 }): Promise<{ server: HttpServer; proxyUrl: string }> {
+  const validationPageHtml = await buildValidationPageHtml();
   const server = createHttpServer((request, response) => {
     const startedAt = Date.now();
     const method = (request.method ?? "GET").toUpperCase();
     const rawPath = request.url ?? "/";
+    const hostPath = normalizeRoutePath(requestPathname(rawPath));
     const capturedChunks: Buffer[] = [];
     let capturedBytes = 0;
     let totalResponseBytes = 0;
+
+    if (hostPath === VALIDATION_PAGE_PATH) {
+      if (method !== "GET" && method !== "HEAD") {
+        response.writeHead(405, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+          allow: "GET, HEAD",
+        });
+        response.end(JSON.stringify({ ok: false, error: "Method not allowed." }));
+        request.resume();
+        return;
+      }
+      writeValidationPageResponse(response, validationPageHtml);
+      request.resume();
+      return;
+    }
+
+    if (hostPath === MANUAL_VALIDATION_COMPLETE_PATH) {
+      if (method !== "POST") {
+        response.writeHead(405, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+          allow: "POST",
+        });
+        response.end(JSON.stringify({ ok: false, error: "Method not allowed." }));
+        request.resume();
+        return;
+      }
+      options.onManualComplete();
+      writeManualValidationCompleteResponse(response);
+      request.resume();
+      return;
+    }
 
     options.onActivity();
 
@@ -1216,10 +1330,13 @@ export async function runInteractiveRuntimeValidation(options: {
   }
   const devServerUrl = `http://127.0.0.1:${devPort}`;
   let proxyUrl: string | undefined;
+  let validationUrl: string | undefined;
   let output = "";
   let stopping = false;
   let failureReason: string | null = null;
   let failureRecord: RuntimeInteractionRequestRecord | undefined;
+  let manualCompletionRequested = false;
+  let manualCompleted = false;
   let browserOpenResult: BrowserOpenResult | undefined;
   let browserOpenReused = false;
   let lastActivityAt = Date.now();
@@ -1240,6 +1357,7 @@ export async function runInteractiveRuntimeValidation(options: {
     return {
       reason: failureReason,
       ...(proxyUrl ? { proxyUrl } : {}),
+      ...(validationUrl ? { validationUrl } : {}),
       devServerUrl,
       ...(failureRecord ? { request: failureRecord } : {}),
       recentRequests: tracker.getRecentRequests(),
@@ -1248,15 +1366,18 @@ export async function runInteractiveRuntimeValidation(options: {
   };
 
   const persist = async (valid: boolean, reasons: string[], completedAt?: string) => {
-    const failureChain = buildFailureChain();
+    const includeFailure = !manualCompleted;
+    const failureChain = includeFailure ? buildFailureChain() : undefined;
     const artifact = buildRuntimeInteractionArtifact({
       valid,
       reasons,
       ...(proxyUrl ? { proxyUrl } : {}),
+      ...(validationUrl ? { validationUrl } : {}),
+      ...(manualCompleted ? { manualCompleted } : {}),
       devServerUrl,
       ...(browserOpenResult ? { browserOpenResult } : {}),
       devServerOutput: output,
-      ...(failureReason ? { detectedDevServerError: failureReason } : {}),
+      ...(includeFailure && failureReason ? { detectedDevServerError: failureReason } : {}),
       startedAt,
       ...(completedAt ? { completedAt } : {}),
       config,
@@ -1290,6 +1411,7 @@ export async function runInteractiveRuntimeValidation(options: {
     }
     await options.onUpdate({
       ...(proxyUrl ? { proxyUrl } : {}),
+      ...(validationUrl ? { validationUrl } : {}),
       devServerUrl,
       ...(browserOpenResult
         ? {
@@ -1453,6 +1575,9 @@ export async function runInteractiveRuntimeValidation(options: {
             failureRecord = record;
           }
         },
+        onManualComplete: () => {
+          manualCompletionRequested = true;
+        },
         onRecordedRequest: () => {
           void queuePersist(false, failureReason ? [failureReason] : []);
           void publishUpdate();
@@ -1460,6 +1585,7 @@ export async function runInteractiveRuntimeValidation(options: {
       });
       proxyServer = proxy.server;
       proxyUrl = proxy.proxyUrl;
+      validationUrl = validationUrlForProxy(proxyUrl);
       if (options.session && options.session.proxyPort === undefined) {
         options.session.proxyPort = Number(new URL(proxyUrl).port);
       }
@@ -1480,13 +1606,14 @@ export async function runInteractiveRuntimeValidation(options: {
     await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
       `[interactive] Dev server ready at ${devServerUrl}.`,
       `[interactive] Proxy ready at ${proxyUrl}.`,
-      `[interactive] Visit proxy URL: ${proxyUrl}`,
+      `[interactive] Visit validation URL: ${validationUrl}`,
+      `[interactive] Visit proxy URL (diagnostic): ${proxyUrl}`,
       `[interactive] Runtime repair signal combines proxy HTTP request/response records with dev server stdout/stderr.`,
       `[interactive] Planned targets: ${targets.map((target) => target.label).join(", ")}`,
       "",
     ]);
 
-    const browserUrl = proxyUrl ?? devServerUrl;
+    const browserUrl = validationUrl ?? proxyUrl ?? devServerUrl;
     if (options.session?.browserOpenResult) {
       browserOpenResult = options.session.browserOpenResult;
       browserOpenReused = true;
@@ -1516,6 +1643,7 @@ export async function runInteractiveRuntimeValidation(options: {
     await publishUpdate();
     await options.onReady?.({
       ...(proxyUrl ? { proxyUrl } : {}),
+      ...(validationUrl ? { validationUrl } : {}),
       devServerUrl,
       ...(browserOpenResult
         ? {
@@ -1529,6 +1657,24 @@ export async function runInteractiveRuntimeValidation(options: {
     });
 
     while (true) {
+      if (manualCompletionRequested) {
+        manualCompleted = true;
+        const artifact = await finish(true, []);
+        await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+          "[ok] Runtime validation manually completed from /validate.",
+          "",
+        ]);
+        return {
+          reasons: [],
+          steps: [{
+            name: "interactive runtime validation",
+            ok: true,
+            detail: `运行验证已由用户在 ${validationUrl ?? proxyUrl ?? devServerUrl} 人工确认完成。`,
+          }],
+          artifact,
+        };
+      }
+
       if (failureReason) {
         const artifact = await finish(false, [failureReason]);
         await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
