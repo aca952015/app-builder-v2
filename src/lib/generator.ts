@@ -36,6 +36,12 @@ import {
   updateWorkflowBoard,
 } from "./terminal-ui.js";
 import {
+  appendWorkflowMetricRecord,
+  buildWorkflowMetricRecord,
+  measureRuntimeStep,
+  measureWorkflowStep,
+} from "./workflow-metrics.js";
+import {
   TEMPLATE_PHASE_EFFORTS,
   type GeneratedAppValidator,
   GenerateAppOptions,
@@ -74,7 +80,6 @@ function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
     ],
   };
 }
-
 
 type ReferenceCandidate = {
   url: string;
@@ -734,7 +739,15 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
     const runtimeValidation = runtime.templateRuntimeValidation ?? defaultTemplateRuntimeValidation();
 
     if (runtimeValidation.copyEnvExample !== false) {
-      const envStep = await ensureEnvFile(outputDirectory, runtime.deepagentsRuntimeValidationLogPath);
+      const envStep = await measureRuntimeStep(
+        runtime,
+        {
+          name: "runtime_validation.env_file",
+          phase: (runtime.generateAttempt ?? 1) > 1 ? "generate_repair" : "generate",
+          metadata: { stepName: "mv .env.example .env" },
+        },
+        async () => await ensureEnvFile(outputDirectory, runtime.deepagentsRuntimeValidationLogPath),
+      );
       steps.push(envStep);
       if (!envStep.ok) {
         return {
@@ -745,8 +758,19 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
     }
 
     for (const validationStep of runtimeValidation.steps) {
-      const step =
-        validationStep.kind === "dev-server"
+      const step = await measureRuntimeStep(
+        runtime,
+        {
+          name: "runtime_validation.step",
+          phase: (runtime.generateAttempt ?? 1) > 1 ? "generate_repair" : "generate",
+          metadata: {
+            stepName: validationStep.name,
+            kind: validationStep.kind ?? "command",
+            command: validationStep.command,
+            args: validationStep.args,
+          },
+        },
+        async () => validationStep.kind === "dev-server"
           ? await runConfiguredDevValidationStep({
               outputDirectory,
               logPath: runtime.deepagentsRuntimeValidationLogPath,
@@ -764,7 +788,8 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
                 logPath: runtime.deepagentsRuntimeValidationLogPath,
                 ...(validationStep.env ? { env: validationStep.env } : {}),
               })
-            ).step;
+            ).step,
+      );
       steps.push(step);
       if (!step.ok) {
         return {
@@ -1644,28 +1669,38 @@ async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: Plan
   reasons: string[];
   planSpec: PlanSpec | null;
 }> {
-  const validation = await collectPersistedPlanValidation(runtime);
-  const reasons = [...validation.reasons];
-  const { planSpec } = validation;
+  return await measureRuntimeStep(
+    runtime,
+    {
+      name: "plan.validate_artifacts",
+      phase: (runtime.planAttempt ?? 1) > 1 ? "plan_repair" : "plan",
+      attempt: runtime.planAttempt ?? 1,
+    },
+    async () => {
+      const validation = await collectPersistedPlanValidation(runtime);
+      const reasons = [...validation.reasons];
+      const { planSpec } = validation;
 
-  if (result.planSpecVersion !== 1) {
-    reasons.push(`计划阶段未完成：结构化结果返回了不支持的 planSpecVersion=${result.planSpecVersion}。`);
-  }
+      if (result.planSpecVersion !== 1) {
+        reasons.push(`计划阶段未完成：结构化结果返回了不支持的 planSpecVersion=${result.planSpecVersion}。`);
+      }
 
-  if (result.artifactsWritten.length === 0) {
-    reasons.push("计划阶段未完成：结构化结果中的 artifactsWritten 为空，说明本轮没有明确报告计划产物。");
-  }
+      if (result.artifactsWritten.length === 0) {
+        reasons.push("计划阶段未完成：结构化结果中的 artifactsWritten 为空，说明本轮没有明确报告计划产物。");
+      }
 
-  await writePlanValidationResult(runtime.deepagentsPlanValidationPath, {
-    valid: reasons.length === 0,
-    reasons,
-    ...(planSpec ? { planSpecVersion: planSpec.version } : {}),
-  });
+      await writePlanValidationResult(runtime.deepagentsPlanValidationPath, {
+        valid: reasons.length === 0,
+        reasons,
+        ...(planSpec ? { planSpecVersion: planSpec.version } : {}),
+      });
 
-  return {
-    reasons,
-    planSpec,
-  };
+      return {
+        reasons,
+        planSpec,
+      };
+    },
+  );
 }
 
 function getRuntimeValidationForRuntime(runtime: TextGeneratorRuntime): TemplateRuntimeValidation {
@@ -1769,72 +1804,83 @@ async function validateGeneratedArtifacts(
   validator: GeneratedAppValidator,
   options: { skipRuntimeDevServerSteps?: boolean } = {},
 ): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
-  await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
+  return await measureRuntimeStep(
+    runtime,
+    {
+      name: "generate.validate_artifacts",
+      phase: (runtime.generateAttempt ?? 1) > 1 ? "generate_repair" : "generate",
+      attempt: runtime.generateAttempt ?? 1,
+      metadata: { skipRuntimeDevServerSteps: options.skipRuntimeDevServerSteps === true },
+    },
+    async () => {
+      await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
 
-  const reasons: string[] = [];
-  const nonPlanningFiles = result.filesWritten.filter((file) => !file.startsWith(".deepagents/"));
+      const reasons: string[] = [];
+      const nonPlanningFiles = result.filesWritten.filter((file) => !file.startsWith(".deepagents/"));
 
-  if (result.filesWritten.length === 0) {
-    reasons.push("生成阶段未完成：结构化结果中的 filesWritten 为空，说明本轮没有明确报告已落盘文件。");
-  } else if (nonPlanningFiles.length === 0) {
-    reasons.push("生成阶段未完成：本轮只报告了计划阶段 artifacts，没有报告任何应用源码或交付文件。");
-  }
+      if (result.filesWritten.length === 0) {
+        reasons.push("生成阶段未完成：结构化结果中的 filesWritten 为空，说明本轮没有明确报告已落盘文件。");
+      } else if (nonPlanningFiles.length === 0) {
+        reasons.push("生成阶段未完成：本轮只报告了计划阶段 artifacts，没有报告任何应用源码或交付文件。");
+      }
 
-  const reportPath = path.join(outputDirectory, "app-builder-report.md");
-  const reportContents = await readIfExists(reportPath);
-  if (nonPlanningFiles.length > 0 && (!reportContents || reportContents.trim().length === 0)) {
-    reasons.push("生成阶段未完成：app-builder-report.md 尚未落盘。");
-  }
+      const reportPath = path.join(outputDirectory, "app-builder-report.md");
+      const reportContents = await readIfExists(reportPath);
+      if (nonPlanningFiles.length > 0 && (!reportContents || reportContents.trim().length === 0)) {
+        reasons.push("生成阶段未完成：app-builder-report.md 尚未落盘。");
+      }
 
-  const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
-  await appendIndirectResourceCoverageNotice(coverage.indirectResources);
-  const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
-  const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, planSpec);
-  if (coverage.missingPageRoutes.length > 0) {
-    reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
-  }
-  if (coverage.missingApiPaths.length > 0) {
-    reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
-  }
-  if (missingAcceptanceChecks.length > 0) {
-    reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
-  }
-  reasons.push(...environmentIssues);
+      const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
+      await appendIndirectResourceCoverageNotice(coverage.indirectResources);
+      const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
+      const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, planSpec);
+      if (coverage.missingPageRoutes.length > 0) {
+        reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
+      }
+      if (coverage.missingApiPaths.length > 0) {
+        reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
+      }
+      if (missingAcceptanceChecks.length > 0) {
+        reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
+      }
+      reasons.push(...environmentIssues);
 
-  let steps: GenerationValidationStep[] = [];
-  if (reasons.length === 0) {
-    const validationRuntime = options.skipRuntimeDevServerSteps
-      ? createRuntimeWithoutDevServerValidation(runtime)
-      : runtime;
-    const runtimeValidation = await validator.validate(outputDirectory, validationRuntime);
-    reasons.push(...runtimeValidation.reasons);
-    steps = options.skipRuntimeDevServerSteps
-      ? [
-          ...runtimeValidation.steps,
-          ...createSkippedDevServerValidationSteps(runtime),
-        ]
-      : runtimeValidation.steps;
-    if (options.skipRuntimeDevServerSteps) {
-      await appendRuntimeValidationLog(runtime.deepagentsRuntimeValidationLogPath, [
-        "[skip] dev-server validation steps are owned by the active interactive runtime validation session.",
-        "",
-      ]);
-    }
-  } else {
-    await fs.writeFile(
-      runtime.deepagentsRuntimeValidationLogPath,
-      "未执行运行命令验证：宿主结构化交付物校验尚未通过。\n",
-      "utf8",
-    );
-  }
+      let steps: GenerationValidationStep[] = [];
+      if (reasons.length === 0) {
+        const validationRuntime = options.skipRuntimeDevServerSteps
+          ? createRuntimeWithoutDevServerValidation(runtime)
+          : runtime;
+        const runtimeValidation = await validator.validate(outputDirectory, validationRuntime);
+        reasons.push(...runtimeValidation.reasons);
+        steps = options.skipRuntimeDevServerSteps
+          ? [
+              ...runtimeValidation.steps,
+              ...createSkippedDevServerValidationSteps(runtime),
+            ]
+          : runtimeValidation.steps;
+        if (options.skipRuntimeDevServerSteps) {
+          await appendRuntimeValidationLog(runtime.deepagentsRuntimeValidationLogPath, [
+            "[skip] dev-server validation steps are owned by the active interactive runtime validation session.",
+            "",
+          ]);
+        }
+      } else {
+        await fs.writeFile(
+          runtime.deepagentsRuntimeValidationLogPath,
+          "未执行运行命令验证：宿主结构化交付物校验尚未通过。\n",
+          "utf8",
+        );
+      }
 
-  await writeGenerationValidationResult(runtime.deepagentsGenerationValidationPath, {
-    valid: reasons.length === 0,
-    reasons,
-    steps,
-  });
+      await writeGenerationValidationResult(runtime.deepagentsGenerationValidationPath, {
+        valid: reasons.length === 0,
+        reasons,
+        steps,
+      });
 
-  return { reasons, steps };
+      return { reasons, steps };
+    },
+  );
 }
 
 async function appendRetryNote(logPath: string, attempt: number, stage: RetryStage, reasons: string[]): Promise<void> {
@@ -2183,6 +2229,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     deepagentsAgentsPath: path.join(deepagentsDirectory, "AGENTS.md"),
     deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
+    deepagentsMetricsLogPath: path.join(deepagentsDirectory, "metrics.jsonl"),
     deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
     deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
     deepagentsInteractionContractPath: path.join(deepagentsDirectory, "interaction-contract.json"),
@@ -2320,23 +2367,43 @@ async function completeAfterGenerateValidation(options: {
   skipValidation?: boolean;
 }): Promise<void> {
   if (options.skipValidation) {
-    await appendWorkflowLog("[host] 已按 --skip-validation 跳过 validation 阶段。");
-    await markWorkflowComplete(options.runtime, ["plan", "generate"]);
+    await measureRuntimeStep(
+      options.runtime,
+      {
+        name: "validation.skip",
+        phase: "validation",
+        metadata: { reason: "--skip-validation" },
+      },
+      async () => {
+        await appendWorkflowLog("[host] 已按 --skip-validation 跳过 validation 阶段。");
+        await markWorkflowComplete(options.runtime, ["plan", "generate"]);
+      },
+    );
     return;
   }
 
   if (!options.runtime.templateInteractiveRuntimeValidation.enabled) {
-    await markWorkflowComplete(options.runtime, ["plan", "generate"]);
+    await measureRuntimeStep(
+      options.runtime,
+      {
+        name: "validation.disabled",
+        phase: "validation",
+        metadata: { reason: "template.interactiveRuntimeValidation.enabled=false" },
+      },
+      async () => await markWorkflowComplete(options.runtime, ["plan", "generate"]),
+    );
     return;
   }
 
   let retryReasons: string[] = [];
   const maxGenerationRepairs = options.runtime.maxGenerateRetries ?? 0;
   const runtimeInteractionSession: RuntimeInteractionValidationSession = {};
+  let validationAttempt = 0;
 
   try {
     while (true) {
       if (retryReasons.length === 0) {
+        validationAttempt += 1;
         await updateWorkflowState(options.runtime.deepagentsConfigPath, "validation", ["plan", "generate"]);
         await appendWorkflowLog("[host] 进入运行验证阶段，启动或复用 dev server，并启动本地请求代理，合并监听 HTTP 响应与 stdout/stderr。");
         await updateRuntimeValidationWorkflowBoard({
@@ -2345,75 +2412,88 @@ async function completeAfterGenerateValidation(options: {
           lifecycle: "generating",
         });
 
-        const validation = await runInteractiveRuntimeValidation({
-          runtime: options.runtime,
-          planSpec: options.approvedPlan,
-          config: options.runtime.templateInteractiveRuntimeValidation,
-          session: runtimeInteractionSession,
-          onReady: async ({ proxyUrl, validationUrl, devServerUrl, browserOpened, browserOpenReused, browserOpenError }) => {
-            const visitUrl = validationUrl ?? proxyUrl ?? devServerUrl;
-            if (browserOpenReused && browserOpened) {
-              await appendWorkflowLog(`[host] 继续使用已打开的运行验证地址：${visitUrl}`);
-              return;
-            }
-            if (browserOpenReused) {
-              if (browserOpenError) {
-                await appendWorkflowLog(`[host] 保留上次默认浏览器打开失败结果，不重复启动浏览器：${browserOpenError}`);
+        const validation = await measureRuntimeStep(
+          options.runtime,
+          {
+            name: "validation.interactive_runtime",
+            phase: "validation",
+            attempt: validationAttempt,
+            metadata: {
+              coverageThreshold: options.runtime.templateInteractiveRuntimeValidation.coverageThreshold,
+              idleTimeoutMs: options.runtime.templateInteractiveRuntimeValidation.idleTimeoutMs,
+              readyTimeoutMs: options.runtime.templateInteractiveRuntimeValidation.readyTimeoutMs,
+            },
+          },
+          async () => await runInteractiveRuntimeValidation({
+            runtime: options.runtime,
+            planSpec: options.approvedPlan,
+            config: options.runtime.templateInteractiveRuntimeValidation,
+            session: runtimeInteractionSession,
+            onReady: async ({ proxyUrl, validationUrl, devServerUrl, browserOpened, browserOpenReused, browserOpenError }) => {
+              const visitUrl = validationUrl ?? proxyUrl ?? devServerUrl;
+              if (browserOpenReused && browserOpened) {
+                await appendWorkflowLog(`[host] 继续使用已打开的运行验证地址：${visitUrl}`);
+                return;
               }
-              await appendWorkflowLog(`[host] 请继续使用运行验证地址：${visitUrl}`);
-              return;
-            }
-            if (browserOpened) {
-              await appendWorkflowLog(`[host] 已使用默认浏览器打开运行验证地址：${visitUrl}`);
-              return;
-            }
-            if (browserOpenError) {
-              await appendWorkflowLog(`[host] 默认浏览器打开失败：${browserOpenError}`);
-            }
-            await appendWorkflowLog(`[host] 请在浏览器访问运行验证地址：${visitUrl}`);
-          },
-          onUpdate: async (update) => {
-            const recentRequests = update.recentRequests.slice(-4).map((requestRecord) => {
-              const status = requestRecord.status === undefined ? "ERR" : String(requestRecord.status);
-              const target = requestRecord.targetLabel ? ` ${requestRecord.targetLabel}` : "";
-              const source = requestRecord.source === "proxy" ? "proxy " : "";
-              const error = requestRecord.errorSummary ? ` ${requestRecord.errorSummary}` : "";
-              return `${source}${requestRecord.method} ${requestRecord.rawPath ?? requestRecord.path} -> ${status}${target}${error}`;
-            });
-            await updateWorkflowBoard({
-              stage: "运行验证阶段",
-              todos: createStepItemsForLifecycle("运行验证阶段", "validating"),
-              artifacts: createArtifactItemsForStage("运行验证阶段", "validating"),
-              narrative: "正在监听代理请求、HTTP 响应和 dev server 输出，并等待静默窗口。",
-              sessionId: options.runtime.sessionId,
-              outputDirectory: options.runtime.outputDirectory,
-              runtimeStatus: {
-                phase: "validation",
-                effort: undefined,
-              },
-              runtimeInteraction: {
-                devServerUrl: update.devServerUrl,
-                ...(update.browserOpenAttempted !== undefined
-                  ? { browserOpenAttempted: update.browserOpenAttempted }
-                  : {}),
-                ...(update.browserOpened !== undefined ? { browserOpened: update.browserOpened } : {}),
-                ...(update.browserOpenError ? { browserOpenError: update.browserOpenError } : {}),
-                ...(update.proxyUrl ? { proxyUrl: update.proxyUrl } : {}),
-                ...(update.validationUrl ? { validationUrl: update.validationUrl } : {}),
-                ...(update.implementationRequest ? { implementationRequest: update.implementationRequest.requirement } : {}),
-                ...(recentRequests.length > 0
-                  ? {
-                      coverageRatio: update.coverage.ratio,
-                      coveredTargets: update.coverage.coveredTargets,
-                      uncoveredTargets: update.coverage.uncoveredTargets,
-                      recentRequests,
-                    }
-                  : {}),
-                recentDevServerOutput: update.recentDevServerOutput,
-              },
-            });
-          },
-        });
+              if (browserOpenReused) {
+                if (browserOpenError) {
+                  await appendWorkflowLog(`[host] 保留上次默认浏览器打开失败结果，不重复启动浏览器：${browserOpenError}`);
+                }
+                await appendWorkflowLog(`[host] 请继续使用运行验证地址：${visitUrl}`);
+                return;
+              }
+              if (browserOpened) {
+                await appendWorkflowLog(`[host] 已使用默认浏览器打开运行验证地址：${visitUrl}`);
+                return;
+              }
+              if (browserOpenError) {
+                await appendWorkflowLog(`[host] 默认浏览器打开失败：${browserOpenError}`);
+              }
+              await appendWorkflowLog(`[host] 请在浏览器访问运行验证地址：${visitUrl}`);
+            },
+            onUpdate: async (update) => {
+              const recentRequests = update.recentRequests.slice(-4).map((requestRecord) => {
+                const status = requestRecord.status === undefined ? "ERR" : String(requestRecord.status);
+                const target = requestRecord.targetLabel ? ` ${requestRecord.targetLabel}` : "";
+                const source = requestRecord.source === "proxy" ? "proxy " : "";
+                const error = requestRecord.errorSummary ? ` ${requestRecord.errorSummary}` : "";
+                return `${source}${requestRecord.method} ${requestRecord.rawPath ?? requestRecord.path} -> ${status}${target}${error}`;
+              });
+              await updateWorkflowBoard({
+                stage: "运行验证阶段",
+                todos: createStepItemsForLifecycle("运行验证阶段", "validating"),
+                artifacts: createArtifactItemsForStage("运行验证阶段", "validating"),
+                narrative: "正在监听代理请求、HTTP 响应和 dev server 输出，并等待静默窗口。",
+                sessionId: options.runtime.sessionId,
+                outputDirectory: options.runtime.outputDirectory,
+                runtimeStatus: {
+                  phase: "validation",
+                  effort: undefined,
+                },
+                runtimeInteraction: {
+                  devServerUrl: update.devServerUrl,
+                  ...(update.browserOpenAttempted !== undefined
+                    ? { browserOpenAttempted: update.browserOpenAttempted }
+                    : {}),
+                  ...(update.browserOpened !== undefined ? { browserOpened: update.browserOpened } : {}),
+                  ...(update.browserOpenError ? { browserOpenError: update.browserOpenError } : {}),
+                  ...(update.proxyUrl ? { proxyUrl: update.proxyUrl } : {}),
+                  ...(update.validationUrl ? { validationUrl: update.validationUrl } : {}),
+                  ...(update.implementationRequest ? { implementationRequest: update.implementationRequest.requirement } : {}),
+                  ...(recentRequests.length > 0
+                    ? {
+                        coverageRatio: update.coverage.ratio,
+                        coveredTargets: update.coverage.coveredTargets,
+                        uncoveredTargets: update.coverage.uncoveredTargets,
+                        recentRequests,
+                      }
+                    : {}),
+                  recentDevServerOutput: update.recentDevServerOutput,
+                },
+              });
+            },
+          }),
+        );
 
         if (validation.reasons.length === 0) {
           await appendWorkflowLog("[host] 运行验证阶段通过。");
@@ -2461,7 +2541,16 @@ async function completeAfterGenerateValidation(options: {
       });
       let repairedProject: GeneratedProject;
       try {
-        repairedProject = await options.generator.generateRepairProject(options.approvedPlan, repairRuntime);
+        repairedProject = await measureRuntimeStep(
+          repairRuntime,
+          {
+            name: "validation.generate_repair_project",
+            phase: "validation",
+            attempt: existingRepairAttempts + 1,
+            metadata: { retryReasonCount: retryReasons.length },
+          },
+          async () => await options.generator.generateRepairProject(options.approvedPlan, repairRuntime),
+        );
       } catch (error) {
         const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, options.approvedPlan, error);
         if (!recovered) {
@@ -2526,7 +2615,11 @@ async function continueGenerateFlow(options: {
     });
     let generatedProject: GeneratedProject;
     try {
-      generatedProject = await options.generator.generateProject(options.approvedPlan, initialRuntime);
+      generatedProject = await measureRuntimeStep(
+        initialRuntime,
+        { name: "generate.project", phase: "generate", attempt: 1 },
+        async () => await options.generator.generateProject(options.approvedPlan, initialRuntime),
+      );
     } catch (error) {
       const recovered = await synthesizeRecoveredGeneratedResult(initialRuntime, options.approvedPlan, error);
       if (!recovered) {
@@ -2594,7 +2687,16 @@ async function continueGenerateFlow(options: {
     });
     let repairedProject: GeneratedProject;
     try {
-      repairedProject = await options.generator.generateRepairProject(options.approvedPlan, repairRuntime);
+      repairedProject = await measureRuntimeStep(
+        repairRuntime,
+        {
+          name: "generate.repair_project",
+          phase: "generate_repair",
+          attempt: existingRepairAttempts + repairIndex + 1,
+          metadata: { retryReasonCount: generationRetryReasons.length },
+        },
+        async () => await options.generator.generateRepairProject(options.approvedPlan, repairRuntime),
+      );
     } catch (error) {
       const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, options.approvedPlan, error);
       if (!recovered) {
@@ -2675,7 +2777,16 @@ async function continuePlanRepairFlow(options: {
       planAttempt: existingRepairAttempts + repairIndex + 2,
       retryReasons: planRetryReasons,
     });
-    const repairResult = await options.generator.planRepairProject(repairRuntime);
+    const repairResult = await measureRuntimeStep(
+      repairRuntime,
+      {
+        name: "plan.repair_project",
+        phase: "plan_repair",
+        attempt: existingRepairAttempts + repairIndex + 1,
+        metadata: { retryReasonCount: planRetryReasons.length },
+      },
+      async () => await options.generator.planRepairProject(repairRuntime),
+    );
     await appendWorkflowLog("[host] 计划修复输出完成，开始复核。");
     await updateWorkflowBoard({
       stage: "计划阶段",
@@ -3127,14 +3238,80 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       workspaceOptions.force = options.force;
     }
 
+    const prepareStartedAt = new Date();
+    const prepareStartedHr = process.hrtime.bigint();
     const workspace = await prepareOutputWorkspace(workspaceOptions);
-    const template = await loadTemplatePack(options.templateId);
-    const templateLock = await stageTemplatePack(template, workspace);
+    await appendWorkflowMetricRecord(
+      workspace.deepagentsMetricsLogPath,
+      buildWorkflowMetricRecord({
+        sessionId: workspace.sessionId,
+        metric: {
+          name: "workspace.prepare",
+          phase: "workspace",
+          metadata: {
+            outputDirectory: workspace.outputDirectory,
+            force: workspaceOptions.force === true,
+          },
+        },
+        status: "success",
+        startedAt: prepareStartedAt,
+        completedAt: new Date(),
+        startedHr: prepareStartedHr,
+      }),
+    );
+    const template = await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      {
+        name: "template.load",
+        phase: "template",
+        metadata: { templateId: options.templateId ?? "default" },
+      },
+      async () => await loadTemplatePack(options.templateId),
+    );
+    const templateLock = await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      {
+        name: "template.stage",
+        phase: "template",
+        metadata: { templateId: template.id, templateVersion: template.version },
+      },
+      async () => await stageTemplatePack(template, workspace),
+    );
 
-    const sourceMarkdown = await fs.readFile(options.specPath, "utf8");
-    const parsed = parsePrd(sourceMarkdown);
-    const spec = normalizeSpec(parsed, sourceMarkdown, options.appNameOverride);
-    await fs.writeFile(workspace.sourcePrdSnapshotPath, sourceMarkdown, "utf8");
+    const sourceMarkdown = await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      {
+        name: "spec.read_source",
+        phase: "spec",
+        metadata: { specPath: path.resolve(options.specPath) },
+      },
+      async () => await fs.readFile(options.specPath, "utf8"),
+    );
+    const parsed = await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      { name: "spec.parse_prd", phase: "spec" },
+      async () => parsePrd(sourceMarkdown),
+    );
+    const spec = await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      {
+        name: "spec.normalize",
+        phase: "spec",
+        metadata: { appNameOverride: options.appNameOverride ?? null },
+      },
+      async () => normalizeSpec(parsed, sourceMarkdown, options.appNameOverride),
+    );
+    await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      { name: "spec.snapshot_source", phase: "spec" },
+      async () => await fs.writeFile(workspace.sourcePrdSnapshotPath, sourceMarkdown, "utf8"),
+    );
 
     const modelRoles = resolveModelRoleConfigs(process.env, {
       requireApiKeys: options.generator ? false : true,
@@ -3146,39 +3323,54 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       options.validator ??
       (options.generator ? new PassthroughGeneratedAppValidator() : new ShellGeneratedAppValidator());
     let localReferences: LocalReference[] = [];
-    await copyStarterScaffold(template, workspace.outputDirectory);
+    await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      {
+        name: "workspace.copy_starter",
+        phase: "workspace",
+        metadata: { templateId: template.id },
+      },
+      async () => await copyStarterScaffold(template, workspace.outputDirectory),
+    );
 
-    await writeDeepagentsConfig(workspace, {
-      sessionId: workspace.sessionId,
-      startedAt: new Date().toISOString(),
-      appName: spec.appName,
-      model: modelRoles.plan.modelName,
-      models: sanitizeModelRoleConfigs(modelRoles),
-      workflow: {
-        phase: "plan",
-        completedPhases: [],
-      },
-      artifacts: {
-        sourcePrd: ".deepagents/source-prd.md",
-        analysis: ".deepagents/prd-analysis.md",
-        generatedSpec: ".deepagents/generated-spec.md",
-        planSpec: ".deepagents/plan-spec.json",
-        interactionContract: ".deepagents/interaction-contract.json",
-        referenceManifest: ".deepagents/references/reference-manifest.json",
-        planValidation: ".deepagents/plan-validation.json",
-        generationValidation: ".deepagents/generation-validation.json",
-        runtimeValidationLog: ".deepagents/runtime-validation.log",
-        runtimeInteractionValidation: ".deepagents/runtime-interaction-validation.json",
-        errorLog: ".deepagents/error.log",
-      },
-      prompts: {
-        plan: ".deepagents/plan-system-prompt.md",
-        planRepair: ".deepagents/plan-repair-system-prompt.md",
-        generate: ".deepagents/generate-system-prompt.md",
-        generateRepair: ".deepagents/generate-repair-system-prompt.md",
-      },
-      template: templateLock,
-    });
+    await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      { name: "workspace.write_config", phase: "workspace" },
+      async () => await writeDeepagentsConfig(workspace, {
+        sessionId: workspace.sessionId,
+        startedAt: new Date().toISOString(),
+        appName: spec.appName,
+        model: modelRoles.plan.modelName,
+        models: sanitizeModelRoleConfigs(modelRoles),
+        workflow: {
+          phase: "plan",
+          completedPhases: [],
+        },
+        artifacts: {
+          sourcePrd: ".deepagents/source-prd.md",
+          analysis: ".deepagents/prd-analysis.md",
+          generatedSpec: ".deepagents/generated-spec.md",
+          planSpec: ".deepagents/plan-spec.json",
+          interactionContract: ".deepagents/interaction-contract.json",
+          referenceManifest: ".deepagents/references/reference-manifest.json",
+          planValidation: ".deepagents/plan-validation.json",
+          generationValidation: ".deepagents/generation-validation.json",
+          runtimeValidationLog: ".deepagents/runtime-validation.log",
+          runtimeInteractionValidation: ".deepagents/runtime-interaction-validation.json",
+          metricsLog: ".deepagents/metrics.jsonl",
+          errorLog: ".deepagents/error.log",
+        },
+        prompts: {
+          plan: ".deepagents/plan-system-prompt.md",
+          planRepair: ".deepagents/plan-repair-system-prompt.md",
+          generate: ".deepagents/generate-system-prompt.md",
+          generateRepair: ".deepagents/generate-repair-system-prompt.md",
+        },
+        template: templateLock,
+      }),
+    );
 
     const createRuntime = (overrides: Partial<TextGeneratorRuntime> = {}): TextGeneratorRuntime => ({
       sessionId: workspace.sessionId,
@@ -3187,6 +3379,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       deepagentsAgentsPath: workspace.deepagentsAgentsPath,
       deepagentsLogPath: workspace.deepagentsLogPath,
       deepagentsErrorLogPath: workspace.deepagentsErrorLogPath,
+      deepagentsMetricsLogPath: workspace.deepagentsMetricsLogPath,
       deepagentsRuntimeValidationLogPath: workspace.deepagentsRuntimeValidationLogPath,
       deepagentsRuntimeInteractionValidationPath: workspace.deepagentsRuntimeInteractionValidationPath,
       deepagentsInteractionContractPath: workspace.deepagentsInteractionContractPath,
@@ -3222,8 +3415,16 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
     const maxPlanRepairs = template.repairRetries.plan;
     const maxGenerationRepairs = template.repairRetries.generate;
 
-    localReferences = await resolveExternalReferences(createRuntime(), sourceMarkdown);
-    await materializeSessionPromptSnapshots(createRuntime());
+    localReferences = await measureRuntimeStep(
+      createRuntime(),
+      { name: "references.resolve_external", phase: "references" },
+      async () => await resolveExternalReferences(createRuntime(), sourceMarkdown),
+    );
+    await measureRuntimeStep(
+      createRuntime(),
+      { name: "workspace.materialize_prompt_snapshots", phase: "workspace" },
+      async () => await materializeSessionPromptSnapshots(createRuntime()),
+    );
 
     let approvedPlan: PlanSpec | null = null;
     let planRetryReasons: string[] = [];
@@ -3235,7 +3436,11 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       });
       let planResult: PlanResult;
       try {
-        planResult = await generator.planProject(spec, initialRuntime);
+        planResult = await measureRuntimeStep(
+          initialRuntime,
+          { name: "plan.project", phase: "plan", attempt: 1 },
+          async () => await generator.planProject(spec, initialRuntime),
+        );
       } catch (error) {
         const recovered = await synthesizeRecoveredPlanResult(initialRuntime, error);
         if (!recovered) {
@@ -3282,7 +3487,16 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       });
       let repairResult: PlanResult;
       try {
-        repairResult = await generator.planRepairProject(repairRuntime);
+        repairResult = await measureRuntimeStep(
+          repairRuntime,
+          {
+            name: "plan.repair_project",
+            phase: "plan_repair",
+            attempt: repairIndex + 1,
+            metadata: { retryReasonCount: planRetryReasons.length },
+          },
+          async () => await generator.planRepairProject(repairRuntime),
+        );
       } catch (error) {
         const recovered = await synthesizeRecoveredPlanResult(repairRuntime, error);
         if (!recovered) {
@@ -3334,7 +3548,11 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       });
       let generatedProject: GeneratedProject;
       try {
-        generatedProject = await generator.generateProject(approvedPlan, initialRuntime);
+        generatedProject = await measureRuntimeStep(
+          initialRuntime,
+          { name: "generate.project", phase: "generate", attempt: 1 },
+          async () => await generator.generateProject(approvedPlan, initialRuntime),
+        );
       } catch (error) {
         const recovered = await synthesizeRecoveredGeneratedResult(initialRuntime, approvedPlan, error);
         if (!recovered) {
@@ -3388,7 +3606,16 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       });
       let repairedProject: GeneratedProject;
       try {
-        repairedProject = await generator.generateRepairProject(approvedPlan, repairRuntime);
+        repairedProject = await measureRuntimeStep(
+          repairRuntime,
+          {
+            name: "generate.repair_project",
+            phase: "generate_repair",
+            attempt: repairIndex + 1,
+            metadata: { retryReasonCount: generationRetryReasons.length },
+          },
+          async () => await generator.generateRepairProject(approvedPlan, repairRuntime),
+        );
       } catch (error) {
         const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, approvedPlan, error);
         if (!recovered) {
@@ -3445,7 +3672,12 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
     });
 
     const outputDirectory = workspace.outputDirectory;
-    const writtenFiles = await collectGeneratedFiles(outputDirectory);
+    const writtenFiles = await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      { name: "workspace.collect_generated_files", phase: "workspace" },
+      async () => await collectGeneratedFiles(outputDirectory),
+    );
 
     const report: GenerationReport = {
       appName: spec.appName,

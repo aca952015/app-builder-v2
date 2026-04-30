@@ -268,6 +268,7 @@ export type OutputWorkspace = {
   deepagentsAgentsPath: string;
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
+  deepagentsMetricsLogPath: string;
   deepagentsRuntimeValidationLogPath: string;
   deepagentsRuntimeInteractionValidationPath: string;
   deepagentsInteractionContractPath: string;
@@ -294,6 +295,7 @@ export type TextGeneratorRuntime = {
   deepagentsAgentsPath: string;
   deepagentsLogPath: string;
   deepagentsErrorLogPath: string;
+  deepagentsMetricsLogPath: string;
   deepagentsRuntimeValidationLogPath: string;
   deepagentsRuntimeInteractionValidationPath: string;
   deepagentsInteractionContractPath: string;

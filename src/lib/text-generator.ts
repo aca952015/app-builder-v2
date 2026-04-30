@@ -38,6 +38,11 @@ import {
   TextGenerator,
   TextGeneratorRuntime,
 } from "./types.js";
+import {
+  appendWorkflowMetricRecord,
+  buildWorkflowMetricRecord,
+  type WorkflowMetricPhase,
+} from "./workflow-metrics.js";
 
 export {
   buildTodoBoardLines,
@@ -86,6 +91,16 @@ type DeepAgentRunner = {
 type StreamProgressSummary = {
   receivedOutputTokens?: number | undefined;
   receivedOutputTokensEstimated?: boolean | undefined;
+};
+
+type TodoTimingEntry = {
+  status: TodoStatus;
+  firstSeenAt: Date;
+  firstSeenHr: bigint;
+  startedAt?: Date;
+  startedHr?: bigint;
+  completedReported: boolean;
+  openReported: boolean;
 };
 
 async function loadDeepagentsModule() {
@@ -693,6 +708,7 @@ function extractMessageText(value: unknown): string | null {
 type DeepAgentsTraceState = {
   stage: "计划阶段" | "生成阶段";
   todos: TodoItem[];
+  todoTimings: Map<string, TodoTimingEntry>;
   lastNarrative: string;
   logFilePath?: string;
   runtimeStatus: RuntimeStatus;
@@ -883,6 +899,206 @@ function parseToolInput(value: unknown): Record<string, unknown> | null {
   }
 
   return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function extractTodosFromToolEventPayload(value: unknown): TodoItem[] | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const parsedInput = parseToolInput(record.input);
+  return extractTodosFromPayload(parsedInput) ?? extractTodosFromToolOutput(record.output);
+}
+
+function extractTodosForBoard(value: unknown): TodoItem[] | null {
+  return extractTodosFromPayload(value) ?? extractTodosFromToolEventPayload(value);
+}
+
+function workflowMetricPhaseForRuntimeStatus(
+  phase: RuntimeStatusPhase | undefined,
+  stage: DeepAgentsTraceState["stage"],
+): WorkflowMetricPhase {
+  switch (phase) {
+    case "plan":
+      return "plan";
+    case "planRepair":
+    case "plan_repair":
+      return "plan_repair";
+    case "generate":
+      return "generate";
+    case "generateRepair":
+    case "generate_repair":
+      return "generate_repair";
+    case "validation":
+      return "validation";
+    case "complete":
+      return "complete";
+    default:
+      return stage === "计划阶段" ? "plan" : "generate";
+  }
+}
+
+function metricAttemptForPhase(runtime: TextGeneratorRuntime, phase: WorkflowMetricPhase): number | undefined {
+  switch (phase) {
+    case "plan":
+    case "plan_repair":
+      return runtime.planAttempt;
+    case "generate":
+    case "generate_repair":
+      return runtime.generateAttempt;
+    default:
+      return undefined;
+  }
+}
+
+function createTodoTimingPoint(): { at: Date; hr: bigint } {
+  return {
+    at: new Date(),
+    hr: process.hrtime.bigint(),
+  };
+}
+
+async function appendModelTodoMetric(
+  trace: DeepAgentsTraceState,
+  runtime: TextGeneratorRuntime,
+  options: {
+    name: string;
+    content: string;
+    startedAt: Date;
+    startedHr: bigint;
+    completedAt: Date;
+    metadata: Record<string, unknown>;
+  },
+): Promise<void> {
+  const phase = workflowMetricPhaseForRuntimeStatus(trace.runtimeStatus.phase, trace.stage);
+  const attempt = metricAttemptForPhase(runtime, phase);
+  await appendWorkflowMetricRecord(
+    runtime.deepagentsMetricsLogPath,
+    buildWorkflowMetricRecord({
+      sessionId: runtime.sessionId,
+      metric: {
+        name: options.name,
+        phase,
+        ...(attempt !== undefined ? { attempt } : {}),
+        metadata: {
+          content: options.content,
+          ...options.metadata,
+        },
+      },
+      status: "success",
+      startedAt: options.startedAt,
+      completedAt: options.completedAt,
+      startedHr: options.startedHr,
+    }),
+  );
+}
+
+async function recordModelTodoTimingMetrics(
+  trace: DeepAgentsTraceState,
+  todos: TodoItem[],
+  runtime: TextGeneratorRuntime,
+  source: string,
+): Promise<void> {
+  for (const todo of todos) {
+    const content = todo.content.trim();
+    if (!content) {
+      continue;
+    }
+
+    let entry = trace.todoTimings.get(content);
+    const previousStatus = entry?.status;
+    if (!entry) {
+      const firstSeen = createTodoTimingPoint();
+      entry = {
+        status: todo.status,
+        firstSeenAt: firstSeen.at,
+        firstSeenHr: firstSeen.hr,
+        completedReported: false,
+        openReported: false,
+      };
+      trace.todoTimings.set(content, entry);
+    }
+
+    if (
+      todo.status === "in_progress" &&
+      previousStatus !== "in_progress" &&
+      previousStatus !== "completed"
+    ) {
+      const started = createTodoTimingPoint();
+      entry.startedAt = started.at;
+      entry.startedHr = started.hr;
+      entry.openReported = false;
+      await appendModelTodoMetric(trace, runtime, {
+        name: "model_todo.start",
+        content,
+        startedAt: started.at,
+        completedAt: started.at,
+        startedHr: started.hr,
+        metadata: {
+          source,
+          todoStatus: todo.status,
+          previousStatus: previousStatus ?? "unseen",
+        },
+      });
+    }
+
+    if (todo.status === "completed" && !entry.completedReported) {
+      const completed = createTodoTimingPoint();
+      const startedAt = entry.startedAt ?? entry.firstSeenAt;
+      const startedHr = entry.startedHr ?? entry.firstSeenHr;
+      await appendModelTodoMetric(trace, runtime, {
+        name: "model_todo.completed",
+        content,
+        startedAt,
+        completedAt: completed.at,
+        startedHr,
+        metadata: {
+          source,
+          todoStatus: todo.status,
+          previousStatus: previousStatus ?? "unseen",
+          durationBasis: entry.startedAt !== undefined && entry.startedHr !== undefined ? "started" : "first_seen",
+        },
+      });
+      entry.completedReported = true;
+      entry.openReported = true;
+    }
+
+    if (todo.status === "pending" && previousStatus === "in_progress") {
+      delete entry.startedAt;
+      delete entry.startedHr;
+      entry.openReported = false;
+    }
+
+    entry.status = todo.status;
+  }
+}
+
+async function recordOpenModelTodoMetrics(
+  trace: DeepAgentsTraceState,
+  runtime: TextGeneratorRuntime,
+  source: string,
+): Promise<void> {
+  for (const [content, entry] of trace.todoTimings) {
+    if (entry.status !== "in_progress" || entry.completedReported || entry.openReported) {
+      continue;
+    }
+
+    const completed = createTodoTimingPoint();
+    await appendModelTodoMetric(trace, runtime, {
+      name: "model_todo.incomplete",
+      content,
+      startedAt: entry.startedAt ?? entry.firstSeenAt,
+      completedAt: completed.at,
+      startedHr: entry.startedHr ?? entry.firstSeenHr,
+      metadata: {
+        source,
+        todoStatus: entry.status,
+        durationBasis: "open_at_stream_end",
+      },
+    });
+    entry.openReported = true;
+  }
 }
 
 function formatReadFileRange(input: Record<string, unknown> | null): string | null {
@@ -1207,8 +1423,11 @@ async function updateTodoBoard(
     applyStreamProgress(trace, mode ?? "unclassified", payload);
   }
 
-  const extractedTodos = extractTodosFromPayload(payload);
+  const extractedTodos = extractTodosForBoard(payload);
   if (extractedTodos && extractedTodos.length > 0) {
+    if (runtime) {
+      await recordModelTodoTimingMetrics(trace, extractedTodos, runtime, mode ?? "unclassified");
+    }
     trace.todos = extractedTodos;
   }
 
@@ -1457,6 +1676,7 @@ export async function runDeepAgentWithLogs(
   const trace: DeepAgentsTraceState = {
     stage: workflowStage,
     todos: defaultTodosForStage(workflowStage),
+    todoTimings: new Map(),
     lastNarrative: "等待模型开始处理。",
     logFilePath: runtime.deepagentsLogPath,
     runtimeStatus: buildRuntimeStatus({
@@ -1518,6 +1738,7 @@ export async function runDeepAgentWithLogs(
       );
 
       trace.lastNarrative = "生成流程结束。";
+      await recordOpenModelTodoMetrics(trace, runtime, "stream_end");
       await appendWorkflowLog("[lifecycle] 本轮流式生成结束，等待宿主后续处理。");
       writeSystemTraceEvent(trace.logFilePath, "lifecycle", { result: lastValuesChunk }, "生成流程结束。");
       await updateWorkflowBoard({
@@ -1534,6 +1755,7 @@ export async function runDeepAgentWithLogs(
     } catch (error) {
       const retryReason = extractCompatibleStreamErrorReason(error);
       if (!retryReason || retryCount >= DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT) {
+        await recordOpenModelTodoMetrics(trace, runtime, "stream_error");
         throw error;
       }
 

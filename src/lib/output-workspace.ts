@@ -52,6 +52,7 @@ export async function prepareOutputWorkspace(options: {
     deepagentsAgentsPath,
     deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
+    deepagentsMetricsLogPath: path.join(deepagentsDirectory, "metrics.jsonl"),
     deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
     deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
     deepagentsInteractionContractPath: path.join(deepagentsDirectory, "interaction-contract.json"),

@@ -339,6 +339,7 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
     deepagentsAgentsPath: "/virtual-workspace/.deepagents/AGENTS.md",
     deepagentsLogPath: "/virtual-workspace/.deepagents/trace.log",
     deepagentsErrorLogPath: "/virtual-workspace/.deepagents/error.log",
+    deepagentsMetricsLogPath: "/virtual-workspace/.deepagents/metrics.jsonl",
     deepagentsRuntimeValidationLogPath: "/virtual-workspace/.deepagents/runtime-validation.log",
     deepagentsRuntimeInteractionValidationPath: "/virtual-workspace/.deepagents/runtime-interaction-validation.json",
     deepagentsInteractionContractPath: "/virtual-workspace/.deepagents/interaction-contract.json",
@@ -731,6 +732,97 @@ test("runDeepAgentWithLogs retries stream for transient socket resets", async ()
     const traceLog = await readFile(runtime.deepagentsLogPath, "utf8");
     assert.match(traceLog, /stream-retry/);
     assert.match(traceLog, /socket connection closed unexpectedly|ECONNRESET/);
+  } finally {
+    await closeWorkflowBoard();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runDeepAgentWithLogs records model-planned todo timing metrics", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-todo-metrics-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const runtime = buildTestRuntime({
+    outputDirectory: tempRoot,
+    deepagentsDirectory,
+    deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
+    deepagentsMetricsLogPath: path.join(deepagentsDirectory, "metrics.jsonl"),
+  });
+
+  await mkdir(deepagentsDirectory, { recursive: true });
+
+  const result = {
+    structuredResponse: {
+      summary: "todo metrics ok",
+    },
+  };
+  const agent = {
+    async stream() {
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield [
+            "tools",
+            {
+              event: "on_tool_end",
+              name: "write_todos",
+              output: {
+                todos: [
+                  { content: "分析需求", status: "in_progress" },
+                  { content: "生成计划", status: "pending" },
+                ],
+              },
+            },
+          ];
+          yield [
+            "tools",
+            {
+              event: "on_tool_end",
+              name: "write_todos",
+              output: {
+                todos: [
+                  { content: "分析需求", status: "completed" },
+                  { content: "生成计划", status: "in_progress" },
+                ],
+              },
+            },
+          ];
+          yield ["values", result];
+        },
+      };
+    },
+  };
+
+  try {
+    const resolved = await runDeepAgentWithLogs(agent, { messages: [] }, runtime, "plan", "deepagents planning");
+
+    assert.equal(resolved, result);
+
+    const metricsLog = await readFile(runtime.deepagentsMetricsLogPath, "utf8");
+    const metricRecords = metricsLog.trim().split("\n").map((line) => JSON.parse(line)) as Array<{
+      name: string;
+      phase: string;
+      sessionId: string;
+      status: string;
+      attempt?: number;
+      durationMs: number;
+      metadata?: Record<string, unknown>;
+    }>;
+
+    const starts = metricRecords.filter((record) => record.name === "model_todo.start");
+    const completed = metricRecords.find((record) => record.name === "model_todo.completed");
+    const incomplete = metricRecords.find((record) => record.name === "model_todo.incomplete");
+
+    assert.equal(starts.length, 2);
+    assert.equal(completed?.metadata?.content, "分析需求");
+    assert.equal(completed?.metadata?.durationBasis, "started");
+    assert.equal(incomplete?.metadata?.content, "生成计划");
+    assert.equal(incomplete?.metadata?.durationBasis, "open_at_stream_end");
+    assert.ok(metricRecords.every((record) => (
+      record.sessionId === runtime.sessionId &&
+      record.phase === "plan" &&
+      record.status === "success" &&
+      record.attempt === 1 &&
+      record.durationMs >= 0
+    )));
   } finally {
     await closeWorkflowBoard();
     await rm(tempRoot, { recursive: true, force: true });
@@ -3048,6 +3140,10 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
       path.join(result.outputDirectory, ".deepagents/runtime-validation.log"),
       "utf8",
     );
+    const metricsLog = await readFile(
+      path.join(result.outputDirectory, ".deepagents/metrics.jsonl"),
+      "utf8",
+    );
     const deepagentsConfig = await readFile(
       path.join(result.outputDirectory, ".deepagents/config.json"),
       "utf8",
@@ -3058,6 +3154,17 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     );
 
     const planSpec = JSON.parse(planSpecSnapshot) as PlanSpec;
+    const metricRecords = metricsLog.trim().split("\n").map((line) => JSON.parse(line)) as Array<{
+      version: number;
+      sessionId: string;
+      name: string;
+      phase: string;
+      status: string;
+      startedAt: string;
+      completedAt: string;
+      durationMs: number;
+    }>;
+    const metricNames = metricRecords.map((record) => record.name);
 
     assert.match(packageJson, /"next"/);
     assert.match(gitHead, /ref: refs\/heads\/main/);
@@ -3124,6 +3231,24 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(runtimeValidationLog, /=== pnpm install ===/);
     assert.match(runtimeValidationLog, /=== pnpm dev ===/);
     assert.match(deepagentsConfig, /"runtimeValidationLog": "\.deepagents\/runtime-validation\.log"/);
+    assert.match(deepagentsConfig, /"metricsLog": "\.deepagents\/metrics\.jsonl"/);
+    assert.ok(metricRecords.length >= 10);
+    assert.ok(metricNames.includes("workspace.prepare"));
+    assert.ok(metricNames.includes("template.load"));
+    assert.ok(metricNames.includes("spec.parse_prd"));
+    assert.ok(metricNames.includes("plan.project"));
+    assert.ok(metricNames.includes("plan.validate_artifacts"));
+    assert.ok(metricNames.includes("generate.project"));
+    assert.ok(metricNames.includes("generate.validate_artifacts"));
+    assert.ok(metricNames.includes("validation.disabled"));
+    assert.ok(metricRecords.every((record) => (
+      record.version === 1 &&
+      record.sessionId === result.sessionId &&
+      record.status === "success" &&
+      typeof record.startedAt === "string" &&
+      typeof record.completedAt === "string" &&
+      record.durationMs >= 0
+    )));
     assert.match(deepagentsConfig, /"repairRetries": \{/);
     assert.match(deepagentsConfig, /"phases": \{/);
     assert.match(deepagentsConfig, /"plan": \{[\s\S]*"prompt": "prompts\/plan-system-prompt\.md"[\s\S]*"effort": "high"/);
