@@ -33,6 +33,8 @@ export function buildSessionPolicyDocument(): string {
     "- `hardConstraints.planSpecSchemaValidation` is a blocking constraint, not a suggestion.",
     "- `artifacts.interactionContract` records critical user-action triggers, internal API mappings, and external operation details; keep it aligned with `artifacts.planSpec` and references.",
     "- `hardConstraints.interactionContractValidation` is a blocking constraint, not a suggestion.",
+    "- If downloaded external references are present in `externalReferences`, `localReferences`, or `artifacts.referenceManifest`, read their `localPath` files before assembling `artifacts.generatedSpec`, `artifacts.planSpec`, or `artifacts.interactionContract`.",
+    "- `hardConstraints.referenceUsageValidation` is a blocking constraint, not a suggestion.",
     "- Optional string fields with no value must be omitted. Do not write empty strings.",
     "- Required string fields must be non-empty strings.",
     "- `acceptanceChecks.target` must follow these rules:",

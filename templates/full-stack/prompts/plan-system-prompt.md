@@ -57,13 +57,15 @@
 
 `artifacts.planSpec` 是最关键产物。它必须严格符合输入里的 `planSpecSchema`，并且使用结构化定义表达后续生成和验证所需的关键信息。
 
-输入里的 `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束，不是建议项。
+输入里的 `hardConstraints.planSpecSchemaValidation`、`hardConstraints.referenceUsageValidation` 是阻断性硬约束，不是建议项。
 在同时满足以下条件前，不允许结束当前阶段，也不允许返回最终结构化响应：
 
 - `artifacts.planSpec` 是合法 JSON
 - `artifacts.planSpec` 通过 `hardConstraints.planSpecSchemaValidation.schema` 校验
 - 可选字符串字段无值时直接省略，不能写成空字符串 `""`
 - 必填字符串字段必须提供非空字符串
+- 如果输入的 `externalReferences`、`localReferences` 或 `artifacts.referenceManifest` 中存在已下载本地资料，必须先读取对应 `localPath` 文件，再组装 `artifacts.generatedSpec`、`artifacts.planSpec` 和 `artifacts.interactionContract`
+- 外部 API endpoint、认证方式、参数格式/顺序、响应字段、错误码和限制信息必须优先来自已下载本地资料，不能凭模型记忆或远程 URL 猜测
 
 ## 结构化 spec 约束
 
@@ -98,7 +100,7 @@
 - 如果 PRD 信息不足，可以做保守默认，但这些默认必须写入 `assumptions`，并体现在 JSON 定义中。
 - 不允许输出“数据模型：无”“后续补充”这类不可执行描述。
 - 如果 PRD 中包含外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须写入 `planSpec.references`，并在 `artifacts.generatedSpec` 中增加 `References` 章节说明。
-- 如果输入包含 `localReferences` 或 `artifacts.referenceManifest` 中已有下载成功的本地资料，外部 API endpoint、认证方式、参数格式/顺序和响应字段必须优先来自这些本地文件；不要凭记忆猜测。
+- 如果输入包含 `externalReferences`、`localReferences` 或 `artifacts.referenceManifest` 中已有下载成功的本地资料，外部 API endpoint、认证方式、参数格式/顺序和响应字段必须先读取并优先来自这些本地文件；不要凭记忆猜测。
 - `planSpec.references[*]` 对应已下载资料时必须填写 `localPath`、`retrievedAt`、`contentType`、`retrievalStatus`；`artifacts.generatedSpec` 的 References 章节必须在远程 URL 旁写出同一个本地路径。
 - `planSpec.references` 只描述参考资料本身，不要求也不提供 `relatedApis`、`apiPaths` 之类的绑定字段。
 - `references` 不属于宿主强制验收项，不要为了引用资料额外制造 `acceptanceChecks`。

@@ -1,4 +1,16 @@
-import { AppEntity, AppScreen, EntityField, FieldType, NormalizedSpec, ParsedPrd } from "./types.js";
+import {
+  AppEntity,
+  AppScreen,
+  EntityField,
+  ExternalReferenceDraft,
+  FieldType,
+  LocalReference,
+  NormalizedSpec,
+  ParsedPrd,
+  ParsedSection,
+} from "./types.js";
+
+const URL_PATTERN = /https?:\/\/[^\s<>)\]"']+/gi;
 
 function compactCjkSpacing(input: string): string {
   return input
@@ -243,7 +255,117 @@ function buildScreenBasedFlows(screens: AppScreen[]): string[] {
   return flows;
 }
 
-export function normalizeSpec(parsed: ParsedPrd, sourceMarkdown: string, appNameOverride?: string): NormalizedSpec {
+function cleanReferenceUrl(url: string): string {
+  return url.replace(/[.,;:!?，。；：！？）\])]+$/u, "");
+}
+
+function classifyReferenceCandidate(context: string): Pick<ExternalReferenceDraft, "type" | "required"> {
+  const lower = context.toLowerCase();
+  if (/api|endpoint|接口|参数|鉴权|认证|sdk/.test(lower)) {
+    return { type: "external_api", required: true };
+  }
+  if (/service|provider|platform|第三方|服务/.test(lower)) {
+    return { type: "external_service", required: true };
+  }
+  if (/doc|docs|documentation|reference|文档|指南|说明/.test(lower)) {
+    return { type: "documentation", required: true };
+  }
+  return { type: "other", required: false };
+}
+
+function extractExternalReferences(sections: ParsedSection[]): ExternalReferenceDraft[] {
+  const candidates = new Map<string, ExternalReferenceDraft>();
+
+  for (const section of sections) {
+    const sectionText = [section.path.join(" > "), section.content].filter(Boolean).join("\n");
+    for (const match of sectionText.matchAll(URL_PATTERN)) {
+      const rawUrl = match[0];
+      const url = cleanReferenceUrl(rawUrl);
+      const index = match.index ?? 0;
+      const context = sectionText.slice(
+        Math.max(0, index - 160),
+        Math.min(sectionText.length, index + rawUrl.length + 160),
+      );
+      const existing = candidates.get(url);
+      const classification = classifyReferenceCandidate(context);
+      if (existing) {
+        candidates.set(url, {
+          ...existing,
+          type: existing.type === "other" ? classification.type : existing.type,
+          required: existing.required || classification.required,
+          context: existing.context ?? context,
+        });
+        continue;
+      }
+
+      candidates.set(url, {
+        url,
+        name: new URL(url).hostname,
+        ...classification,
+        context,
+        sourcePath: section.path,
+      });
+    }
+  }
+
+  return [...candidates.values()];
+}
+
+export function extractExternalReferenceDrafts(parsed: ParsedPrd): ExternalReferenceDraft[] {
+  return extractExternalReferences(parsed.sections);
+}
+
+function mergeResolvedExternalReferences(
+  candidates: ExternalReferenceDraft[],
+  localReferences: LocalReference[],
+): ExternalReferenceDraft[] {
+  const resolvedByUrl = new Map(localReferences.map((reference) => [reference.url, reference]));
+  const merged = candidates.map((candidate) => {
+    const resolved = resolvedByUrl.get(candidate.url);
+    if (!resolved) {
+      return candidate;
+    }
+
+    return {
+      ...candidate,
+      name: resolved.name,
+      type: resolved.type,
+      required: resolved.required,
+      ...(resolved.localPath ? { localPath: resolved.localPath } : {}),
+      ...(resolved.retrievedAt ? { retrievedAt: resolved.retrievedAt } : {}),
+      ...(resolved.contentType ? { contentType: resolved.contentType } : {}),
+      retrievalStatus: resolved.retrievalStatus,
+      ...(resolved.error ? { error: resolved.error } : {}),
+    };
+  });
+
+  for (const resolved of localReferences) {
+    if (candidates.some((candidate) => candidate.url === resolved.url)) {
+      continue;
+    }
+
+    merged.push({
+      url: resolved.url,
+      name: resolved.name,
+      type: resolved.type,
+      required: resolved.required,
+      ...(resolved.localPath ? { localPath: resolved.localPath } : {}),
+      ...(resolved.retrievedAt ? { retrievedAt: resolved.retrievedAt } : {}),
+      ...(resolved.contentType ? { contentType: resolved.contentType } : {}),
+      retrievalStatus: resolved.retrievalStatus,
+      ...(resolved.error ? { error: resolved.error } : {}),
+    });
+  }
+
+  return merged;
+}
+
+export function normalizeSpec(
+  parsed: ParsedPrd,
+  sourceMarkdown: string,
+  appNameOverride?: string,
+  localReferences: LocalReference[] = [],
+): NormalizedSpec {
   const warnings: string[] = [];
   const defaultsApplied: string[] = [];
   const structuredPrd = hasMeaningfulStructure(parsed);
@@ -355,5 +477,6 @@ export function normalizeSpec(parsed: ParsedPrd, sourceMarkdown: string, appName
     warnings,
     defaultsApplied,
     sourceMarkdown,
+    externalReferences: mergeResolvedExternalReferences(extractExternalReferenceDrafts(parsed), localReferences),
   };
 }

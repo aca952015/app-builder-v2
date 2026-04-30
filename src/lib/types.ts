@@ -14,6 +14,22 @@ export type EntityDraft = {
   description?: string;
 };
 
+export type ReferenceType = "external_api" | "documentation" | "external_service" | "other";
+
+export type ExternalReferenceDraft = {
+  url: string;
+  name: string;
+  type: ReferenceType;
+  required: boolean;
+  context?: string;
+  sourcePath?: string[];
+  localPath?: string;
+  retrievedAt?: string;
+  contentType?: string;
+  retrievalStatus?: "downloaded" | "failed" | "skipped";
+  error?: string;
+};
+
 export type ParsedPrd = {
   title: string;
   summary: string;
@@ -69,6 +85,7 @@ export type NormalizedSpec = {
   warnings: string[];
   defaultsApplied: string[];
   sourceMarkdown: string;
+  externalReferences: ExternalReferenceDraft[];
 };
 
 export type GeneratedProject = {
@@ -179,7 +196,7 @@ export type SessionValidationResult = {
 export type LocalReference = {
   url: string;
   name: string;
-  type: "external_api" | "documentation" | "external_service" | "other";
+  type: ReferenceType;
   required: boolean;
   retrievalStatus: "downloaded" | "failed" | "skipped";
   localPath?: string;
@@ -192,6 +209,19 @@ export type ReferenceManifest = {
   version: 1;
   generatedAt: string;
   entries: LocalReference[];
+};
+
+export type ReferenceMarkdownConversionInput = {
+  url: string;
+  name: string;
+  type: LocalReference["type"];
+  contentType: string;
+  body: string;
+};
+
+export type ReferenceMarkdownConversionResult = {
+  markdown: string;
+  notes: string[];
 };
 
 export type PlanResult = {
@@ -336,6 +366,10 @@ export type TextGenerator = {
   planRepairProject(runtime: TextGeneratorRuntime): Promise<PlanResult>;
   generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject>;
   generateRepairProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject>;
+  convertReferenceToMarkdown?(
+    input: ReferenceMarkdownConversionInput,
+    runtime: TextGeneratorRuntime,
+  ): Promise<ReferenceMarkdownConversionResult>;
 };
 
 export type GenerateAppOptions = {

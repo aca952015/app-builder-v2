@@ -18,7 +18,7 @@ import {
 } from "./model-config.js";
 import { prepareOutputWorkspace, writeDeepagentsConfig } from "./output-workspace.js";
 import { parsePrd } from "./prd-parser.js";
-import { normalizeSpec } from "./spec-normalizer.js";
+import { extractExternalReferenceDrafts, normalizeSpec } from "./spec-normalizer.js";
 import { copyStarterScaffold, loadTemplatePack, stageTemplatePack } from "./template-pack.js";
 import { DeepAgentsTextGenerator, materializeSessionPromptSnapshots } from "./text-generator.js";
 import {
@@ -43,6 +43,7 @@ import {
 } from "./workflow-metrics.js";
 import {
   TEMPLATE_PHASE_EFFORTS,
+  type ExternalReferenceDraft,
   type GeneratedAppValidator,
   GenerateAppOptions,
   GeneratedProject,
@@ -60,6 +61,7 @@ import {
   TextGenerator,
   TextGeneratorRuntime,
   type LocalReference,
+  type ReferenceMarkdownConversionInput,
   type ReferenceManifest,
   type StdoutMode,
   ValidationPhase,
@@ -81,47 +83,6 @@ function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
   };
 }
 
-type ReferenceCandidate = {
-  url: string;
-  name: string;
-  type: LocalReference["type"];
-  required: boolean;
-};
-
-const URL_PATTERN = /https?:\/\/[^\s<>)\]"']+/gi;
-
-function cleanReferenceUrl(url: string): string {
-  return url.replace(/[.,;:!?，。；：！？）\])]+$/u, "");
-}
-
-function classifyReferenceCandidate(context: string): Pick<ReferenceCandidate, "type" | "required"> {
-  const lower = context.toLowerCase();
-  if (/api|endpoint|接口|参数|鉴权|认证|sdk/.test(lower)) {
-    return { type: "external_api", required: true };
-  }
-  if (/doc|docs|documentation|reference|文档|指南|说明/.test(lower)) {
-    return { type: "documentation", required: true };
-  }
-  return { type: "other", required: false };
-}
-
-function extractReferenceCandidates(markdown: string): ReferenceCandidate[] {
-  const candidates = new Map<string, ReferenceCandidate>();
-  for (const match of markdown.matchAll(URL_PATTERN)) {
-    const rawUrl = match[0];
-    const url = cleanReferenceUrl(rawUrl);
-    const index = match.index ?? 0;
-    const context = markdown.slice(Math.max(0, index - 160), Math.min(markdown.length, index + rawUrl.length + 160));
-    const classification = classifyReferenceCandidate(context);
-    candidates.set(url, {
-      url,
-      name: new URL(url).hostname,
-      ...classification,
-    });
-  }
-  return [...candidates.values()];
-}
-
 function slugifyReferenceUrl(url: string): string {
   const parsed = new URL(url);
   const source = `${parsed.hostname}${parsed.pathname}`;
@@ -133,12 +94,112 @@ function slugifyReferenceUrl(url: string): string {
   return slug || "reference";
 }
 
+function toReferenceVirtualPath(outputDirectory: string, filePath: string): string {
+  return `/${path.relative(outputDirectory, filePath).split(path.sep).join("/")}`;
+}
+
 function extensionForContentType(contentType?: string | null): "md" | "html" {
   return contentType?.toLowerCase().includes("html") ? "html" : "md";
 }
 
-function toReferenceVirtualPath(outputDirectory: string, filePath: string): string {
-  return `/${path.relative(outputDirectory, filePath).split(path.sep).join("/")}`;
+function reserveReferencePath(
+  directory: string,
+  baseSlug: string,
+  extension: "md" | "html",
+  usedPaths: Set<string>,
+): string {
+  let localPath = path.join(directory, `${baseSlug}.${extension}`);
+  let counter = 2;
+  while (usedPaths.has(localPath)) {
+    localPath = path.join(directory, `${baseSlug}-${counter}.${extension}`);
+    counter += 1;
+  }
+  usedPaths.add(localPath);
+  return localPath;
+}
+
+function isLikelyHtmlDocument(input: ReferenceMarkdownConversionInput): boolean {
+  return input.contentType.toLowerCase().includes("html") || /<\/?[a-z][\s\S]*>/i.test(input.body);
+}
+
+function decodeHtmlEntities(text: string): string {
+  const namedEntities: Record<string, string> = {
+    amp: "&",
+    apos: "'",
+    gt: ">",
+    lt: "<",
+    nbsp: " ",
+    quot: "\"",
+  };
+  const decodeCodePoint = (value: number, fallback: string) => (
+    Number.isInteger(value) && value >= 0 && value <= 0x10ffff
+      ? String.fromCodePoint(value)
+      : fallback
+  );
+
+  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, code: string) => {
+    const normalized = code.toLowerCase();
+    if (normalized.startsWith("#x")) {
+      const value = Number.parseInt(normalized.slice(2), 16);
+      return decodeCodePoint(value, entity);
+    }
+
+    if (normalized.startsWith("#")) {
+      const value = Number.parseInt(normalized.slice(1), 10);
+      return decodeCodePoint(value, entity);
+    }
+
+    return namedEntities[normalized] ?? entity;
+  });
+}
+
+function compactReadableText(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function stripHtmlToReadableMarkdown(html: string): string {
+  return compactReadableText(decodeHtmlEntities(
+    html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<(?:nav|footer|header|aside)\b[^>]*>[\s\S]*?<\/(?:nav|footer|header|aside)>/gi, " ")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(?:p|div|section|article|h[1-6]|li|tr|table|pre|blockquote|ul|ol)>/gi, "\n")
+      .replace(/<[^>]+>/g, " "),
+  ));
+}
+
+function fallbackReferenceMarkdown(input: ReferenceMarkdownConversionInput): string {
+  if (isLikelyHtmlDocument(input)) {
+    return stripHtmlToReadableMarkdown(input.body) || compactReadableText(input.body);
+  }
+
+  return compactReadableText(input.body);
+}
+
+async function convertReferenceToMarkdown(
+  generator: TextGenerator,
+  runtime: TextGeneratorRuntime,
+  input: ReferenceMarkdownConversionInput,
+): Promise<string> {
+  if (generator.convertReferenceToMarkdown) {
+    try {
+      const result = await generator.convertReferenceToMarkdown(input, runtime);
+      if (result.markdown.trim().length > 0) {
+        return result.markdown;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await appendWorkflowLog(`[host] 参考资料 Markdown 转换失败，改用宿主兜底转换：${input.url}（${message}）`);
+    }
+  }
+
+  return fallbackReferenceMarkdown(input);
 }
 
 async function writeReferenceManifest(runtime: TextGeneratorRuntime, entries: LocalReference[]): Promise<void> {
@@ -151,8 +212,11 @@ async function writeReferenceManifest(runtime: TextGeneratorRuntime, entries: Lo
   await fs.writeFile(runtime.deepagentsReferenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 }
 
-async function resolveExternalReferences(runtime: TextGeneratorRuntime, markdown: string): Promise<LocalReference[]> {
-  const candidates = extractReferenceCandidates(markdown);
+async function resolveExternalReferences(
+  runtime: TextGeneratorRuntime,
+  candidates: ExternalReferenceDraft[],
+  generator: TextGenerator,
+): Promise<LocalReference[]> {
   const entries: LocalReference[] = [];
   const usedPaths = new Set<string>();
   const externalDirectory = path.join(runtime.deepagentsDirectory, "references", "external");
@@ -171,13 +235,8 @@ async function resolveExternalReferences(runtime: TextGeneratorRuntime, markdown
       const contentType = response.headers.get("content-type") ?? "text/plain";
       const body = await response.text();
       const baseSlug = slugifyReferenceUrl(candidate.url);
-      let localPath = path.join(externalDirectory, `${baseSlug}.${extensionForContentType(contentType)}`);
-      let counter = 2;
-      while (usedPaths.has(localPath)) {
-        localPath = path.join(externalDirectory, `${baseSlug}-${counter}.${extensionForContentType(contentType)}`);
-        counter += 1;
-      }
-      usedPaths.add(localPath);
+      const rawExtension = extensionForContentType(contentType);
+      const localPath = reserveReferencePath(externalDirectory, baseSlug, rawExtension, usedPaths);
       await fs.writeFile(localPath, body, "utf8");
       entries.push({
         url: candidate.url,
@@ -200,6 +259,37 @@ async function resolveExternalReferences(runtime: TextGeneratorRuntime, markdown
         retrievedAt,
         error: message,
       });
+    }
+  }
+
+  await writeReferenceManifest(runtime, entries);
+
+  for (const entry of entries) {
+    if (entry.retrievalStatus !== "downloaded" || !entry.localPath) {
+      continue;
+    }
+
+    const rawRelativePath = entry.localPath.replace(/^\/+/, "");
+    const rawPath = path.resolve(runtime.outputDirectory, rawRelativePath);
+    const rawExtension = path.extname(rawPath).toLowerCase() === ".html" ? "html" : "md";
+
+    try {
+      const body = await fs.readFile(rawPath, "utf8");
+      const convertedMarkdown = await convertReferenceToMarkdown(generator, runtime, {
+        url: entry.url,
+        name: entry.name,
+        type: entry.type,
+        contentType: entry.contentType ?? "text/plain",
+        body,
+      });
+      const convertedPath = rawExtension === "md"
+        ? rawPath
+        : reserveReferencePath(externalDirectory, slugifyReferenceUrl(entry.url), "md", usedPaths);
+      await fs.writeFile(convertedPath, convertedMarkdown, "utf8");
+      entry.localPath = toReferenceVirtualPath(runtime.outputDirectory, convertedPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await appendWorkflowLog(`[host] 参考资料已下载，但 Markdown 转换落盘失败，保留原始文件：${entry.url}（${message}）`);
     }
   }
 
@@ -1589,6 +1679,49 @@ async function showCompletedWorkflowBoard(sessionId: string, outputDirectory: st
       phase: "complete",
       effort: undefined,
     },
+  });
+}
+
+type PreparationStepKey = "workspace" | "input" | "references" | "model";
+
+function createPreparationStepItems(activeStep: PreparationStepKey): Array<{
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}> {
+  const steps: Array<{
+    key: PreparationStepKey;
+    content: string;
+  }> = [
+    { key: "workspace", content: "准备输出工作区与模板快照" },
+    { key: "input", content: "读取 PRD 并整理输入上下文" },
+    { key: "references", content: "本地化 PRD 外部参考资料" },
+    { key: "model", content: "等待模型开始计划阶段" },
+  ];
+  const activeIndex = steps.findIndex((step) => step.key === activeStep);
+
+  return steps.map((step, index) => ({
+    content: step.content,
+    status: index < activeIndex
+      ? "completed"
+      : index === activeIndex
+        ? "in_progress"
+        : "pending",
+  }));
+}
+
+async function showPreparationWorkflowBoard(options: {
+  sessionId: string;
+  outputDirectory: string;
+  activeStep: PreparationStepKey;
+  narrative: string;
+}): Promise<void> {
+  await updateWorkflowBoard({
+    stage: "计划阶段",
+    todos: createPreparationStepItems(options.activeStep),
+    artifacts: createArtifactItemsForStage("计划阶段", "generating"),
+    narrative: options.narrative,
+    sessionId: options.sessionId,
+    outputDirectory: options.outputDirectory,
   });
 }
 
@@ -3259,6 +3392,13 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         startedHr: prepareStartedHr,
       }),
     );
+    await showPreparationWorkflowBoard({
+      sessionId: workspace.sessionId,
+      outputDirectory: workspace.outputDirectory,
+      activeStep: "workspace",
+      narrative: "正在准备输出工作区、加载模板并初始化生成看板。",
+    });
+    await appendWorkflowLog("[host] 已创建输出工作区，开始加载模板与读取 PRD。");
     const template = await measureWorkflowStep(
       workspace.deepagentsMetricsLogPath,
       workspace.sessionId,
@@ -3296,23 +3436,18 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       { name: "spec.parse_prd", phase: "spec" },
       async () => parsePrd(sourceMarkdown),
     );
-    const spec = await measureWorkflowStep(
-      workspace.deepagentsMetricsLogPath,
-      workspace.sessionId,
-      {
-        name: "spec.normalize",
-        phase: "spec",
-        metadata: { appNameOverride: options.appNameOverride ?? null },
-      },
-      async () => normalizeSpec(parsed, sourceMarkdown, options.appNameOverride),
-    );
     await measureWorkflowStep(
       workspace.deepagentsMetricsLogPath,
       workspace.sessionId,
       { name: "spec.snapshot_source", phase: "spec" },
       async () => await fs.writeFile(workspace.sourcePrdSnapshotPath, sourceMarkdown, "utf8"),
     );
-
+    await showPreparationWorkflowBoard({
+      sessionId: workspace.sessionId,
+      outputDirectory: workspace.outputDirectory,
+      activeStep: "input",
+      narrative: "已读取 PRD 与模板上下文，正在准备模型输入。",
+    });
     const modelRoles = resolveModelRoleConfigs(process.env, {
       requireApiKeys: options.generator ? false : true,
     });
@@ -3323,6 +3458,83 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       options.validator ??
       (options.generator ? new PassthroughGeneratedAppValidator() : new ShellGeneratedAppValidator());
     let localReferences: LocalReference[] = [];
+
+    const createRuntime = (overrides: Partial<TextGeneratorRuntime> = {}): TextGeneratorRuntime => ({
+      sessionId: workspace.sessionId,
+      outputDirectory: workspace.outputDirectory,
+      deepagentsDirectory: workspace.deepagentsDirectory,
+      deepagentsAgentsPath: workspace.deepagentsAgentsPath,
+      deepagentsLogPath: workspace.deepagentsLogPath,
+      deepagentsErrorLogPath: workspace.deepagentsErrorLogPath,
+      deepagentsMetricsLogPath: workspace.deepagentsMetricsLogPath,
+      deepagentsRuntimeValidationLogPath: workspace.deepagentsRuntimeValidationLogPath,
+      deepagentsRuntimeInteractionValidationPath: workspace.deepagentsRuntimeInteractionValidationPath,
+      deepagentsInteractionContractPath: workspace.deepagentsInteractionContractPath,
+      deepagentsReferenceManifestPath: workspace.deepagentsReferenceManifestPath,
+      localReferences,
+      deepagentsConfigPath: workspace.deepagentsConfigPath,
+      deepagentsPlanPromptSnapshotPath: workspace.deepagentsPlanPromptSnapshotPath,
+      deepagentsPlanRepairPromptSnapshotPath: workspace.deepagentsPlanRepairPromptSnapshotPath,
+      deepagentsGeneratePromptSnapshotPath: workspace.deepagentsGeneratePromptSnapshotPath,
+      deepagentsGenerateRepairPromptSnapshotPath: workspace.deepagentsGenerateRepairPromptSnapshotPath,
+      templateId: template.id,
+      templateName: template.name,
+      templateVersion: template.version,
+      templateDirectory: workspace.deepagentsTemplateDirectory,
+      templatePlanPromptPath: template.planPromptPath,
+      templatePlanRepairPromptPath: template.planRepairPromptPath,
+      templateGeneratePromptPath: template.generatePromptPath,
+      templateGenerateRepairPromptPath: template.generateRepairPromptPath,
+      sourcePrdSnapshotPath: workspace.sourcePrdSnapshotPath,
+      deepagentsAnalysisPath: workspace.deepagentsAnalysisPath,
+      deepagentsDetailedSpecPath: workspace.deepagentsDetailedSpecPath,
+      deepagentsPlanSpecPath: workspace.deepagentsPlanSpecPath,
+      deepagentsPlanValidationPath: workspace.deepagentsPlanValidationPath,
+      deepagentsGenerationValidationPath: workspace.deepagentsGenerationValidationPath,
+      maxPlanRetries: template.repairRetries.plan,
+      maxGenerateRetries: template.repairRetries.generate,
+      templatePhases: template.phases,
+      templateRuntimeValidation: template.runtimeValidation,
+      templateInteractiveRuntimeValidation: template.interactiveRuntimeValidation,
+      modelRoles,
+      ...overrides,
+    });
+
+    const referenceCandidates = await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      { name: "spec.extract_external_references", phase: "spec" },
+      async () => extractExternalReferenceDrafts(parsed),
+    );
+    await showPreparationWorkflowBoard({
+      sessionId: workspace.sessionId,
+      outputDirectory: workspace.outputDirectory,
+      activeStep: "references",
+      narrative: "正在本地化 PRD 分析阶段识别出的外部参考资料。",
+    });
+    localReferences = await measureRuntimeStep(
+      createRuntime(),
+      {
+        name: "references.resolve_external",
+        phase: "references",
+        metadata: { candidateCount: referenceCandidates.length },
+      },
+      async () => await resolveExternalReferences(createRuntime(), referenceCandidates, generator),
+    );
+
+    const spec = await measureWorkflowStep(
+      workspace.deepagentsMetricsLogPath,
+      workspace.sessionId,
+      {
+        name: "spec.normalize",
+        phase: "spec",
+        metadata: {
+          appNameOverride: options.appNameOverride ?? null,
+          localReferenceCount: localReferences.length,
+        },
+      },
+      async () => normalizeSpec(parsed, sourceMarkdown, options.appNameOverride, localReferences),
+    );
     await measureWorkflowStep(
       workspace.deepagentsMetricsLogPath,
       workspace.sessionId,
@@ -3371,60 +3583,19 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         template: templateLock,
       }),
     );
-
-    const createRuntime = (overrides: Partial<TextGeneratorRuntime> = {}): TextGeneratorRuntime => ({
-      sessionId: workspace.sessionId,
-      outputDirectory: workspace.outputDirectory,
-      deepagentsDirectory: workspace.deepagentsDirectory,
-      deepagentsAgentsPath: workspace.deepagentsAgentsPath,
-      deepagentsLogPath: workspace.deepagentsLogPath,
-      deepagentsErrorLogPath: workspace.deepagentsErrorLogPath,
-      deepagentsMetricsLogPath: workspace.deepagentsMetricsLogPath,
-      deepagentsRuntimeValidationLogPath: workspace.deepagentsRuntimeValidationLogPath,
-      deepagentsRuntimeInteractionValidationPath: workspace.deepagentsRuntimeInteractionValidationPath,
-      deepagentsInteractionContractPath: workspace.deepagentsInteractionContractPath,
-      deepagentsReferenceManifestPath: workspace.deepagentsReferenceManifestPath,
-      localReferences,
-      deepagentsConfigPath: workspace.deepagentsConfigPath,
-      deepagentsPlanPromptSnapshotPath: workspace.deepagentsPlanPromptSnapshotPath,
-      deepagentsPlanRepairPromptSnapshotPath: workspace.deepagentsPlanRepairPromptSnapshotPath,
-      deepagentsGeneratePromptSnapshotPath: workspace.deepagentsGeneratePromptSnapshotPath,
-      deepagentsGenerateRepairPromptSnapshotPath: workspace.deepagentsGenerateRepairPromptSnapshotPath,
-      templateId: template.id,
-      templateName: template.name,
-      templateVersion: template.version,
-      templateDirectory: workspace.deepagentsTemplateDirectory,
-      templatePlanPromptPath: template.planPromptPath,
-      templatePlanRepairPromptPath: template.planRepairPromptPath,
-      templateGeneratePromptPath: template.generatePromptPath,
-      templateGenerateRepairPromptPath: template.generateRepairPromptPath,
-      sourcePrdSnapshotPath: workspace.sourcePrdSnapshotPath,
-      deepagentsAnalysisPath: workspace.deepagentsAnalysisPath,
-      deepagentsDetailedSpecPath: workspace.deepagentsDetailedSpecPath,
-      deepagentsPlanSpecPath: workspace.deepagentsPlanSpecPath,
-      deepagentsPlanValidationPath: workspace.deepagentsPlanValidationPath,
-      deepagentsGenerationValidationPath: workspace.deepagentsGenerationValidationPath,
-      maxPlanRetries: template.repairRetries.plan,
-      maxGenerateRetries: template.repairRetries.generate,
-      templatePhases: template.phases,
-      templateRuntimeValidation: template.runtimeValidation,
-      templateInteractiveRuntimeValidation: template.interactiveRuntimeValidation,
-      modelRoles,
-      ...overrides,
-    });
-    const maxPlanRepairs = template.repairRetries.plan;
-    const maxGenerationRepairs = template.repairRetries.generate;
-
-    localReferences = await measureRuntimeStep(
-      createRuntime(),
-      { name: "references.resolve_external", phase: "references" },
-      async () => await resolveExternalReferences(createRuntime(), sourceMarkdown),
-    );
     await measureRuntimeStep(
       createRuntime(),
       { name: "workspace.materialize_prompt_snapshots", phase: "workspace" },
       async () => await materializeSessionPromptSnapshots(createRuntime()),
     );
+    await showPreparationWorkflowBoard({
+      sessionId: workspace.sessionId,
+      outputDirectory: workspace.outputDirectory,
+      activeStep: "model",
+      narrative: "准备工作已完成，等待模型开始计划阶段。",
+    });
+    const maxPlanRepairs = template.repairRetries.plan;
+    const maxGenerationRepairs = template.repairRetries.generate;
 
     let approvedPlan: PlanSpec | null = null;
     let planRetryReasons: string[] = [];

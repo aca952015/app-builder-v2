@@ -30,6 +30,8 @@ import {
   GeneratedProject,
   NormalizedSpec,
   PlanResult,
+  ReferenceMarkdownConversionInput,
+  ReferenceMarkdownConversionResult,
   RuntimeStatus,
   RuntimeStatusPhase,
   RuntimeUsageSummary,
@@ -73,6 +75,29 @@ const generatedProjectSchema = z.object({
   implementedApis: z.array(z.string()).default([]),
   notes: z.array(z.string()).default([]),
 });
+
+const referenceMarkdownConversionSchema = z.object({
+  markdown: z.string().min(1),
+  notes: z.array(z.string()).default([]),
+});
+
+const REFERENCE_MARKDOWN_CONVERSION_SYSTEM_PROMPT = [
+  "# API Reference Markdown Conversion",
+  "",
+  "You convert a downloaded external API or documentation page into directly readable Markdown for later planning and code generation.",
+  "",
+  "Rules:",
+  "- Preserve API endpoints, HTTP methods, authentication requirements, parameters, request formats, response fields, examples, rate limits, and error codes.",
+  "- Remove navigation, menus, breadcrumbs, footers, ads, cookie banners, scripts, styles, and unrelated boilerplate.",
+  "- Output pure Markdown only in `markdown`; do not return HTML.",
+  "- Do not replace the source with a summary. Keep the source-level details that another model needs to implement API calls correctly.",
+  "- If the document is sparse or extraction is uncertain, keep the original key fragments as Markdown text instead of inventing missing details.",
+  "- Keep code blocks and tables when they clarify requests, responses, or examples.",
+  "",
+  "Return a structured response with:",
+  "- `markdown`: the readable Markdown document.",
+  "- `notes`: short notes about removed noise or extraction uncertainty.",
+].join("\n");
 
 const SANDBOX_ALPHA_WARNING =
   "langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.";
@@ -228,6 +253,19 @@ export function buildPlanSpecHardConstraints(
         "如果没有关键交互或外部操作，也必须写入空数组结构，不能省略该 artifact。",
       ],
     },
+    referenceUsageValidation: {
+      artifactKey: "artifacts.referenceManifest",
+      artifactPath: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsReferenceManifestPath),
+      blocking: true,
+      required: true,
+      mustValidateBeforeResponse: true,
+      rules: [
+        "如果输入 externalReferences/localReferences/referenceManifest 中存在 retrievalStatus=downloaded 的外部 API、第三方服务或文档资料，必须先读取其 localPath 指向的本地文件，再组装 artifacts.generatedSpec、artifacts.planSpec 和 artifacts.interactionContract。",
+        "外部 API endpoint、认证方式、参数格式/顺序、响应字段、错误码和限制信息必须优先来自已下载本地资料，不能凭模型记忆或远程 URL 猜测。",
+        "artifacts.generatedSpec 的 References 章节必须在远程 URL 旁写出同一个 localPath，并说明关键 API/认证/参数/响应字段来自该本地文件。",
+        "artifacts.planSpec.references[*] 对应已下载资料时必须填写 localPath、retrievedAt、contentType、retrievalStatus；不得只保留远程 URL。",
+      ],
+    },
   };
 }
 
@@ -245,6 +283,7 @@ export function buildPlanProjectPayload(
     flows: spec.flows,
     businessRules: spec.businessRules,
     sourcePrdMarkdown: spec.sourceMarkdown,
+    externalReferences: spec.externalReferences,
     template: {
       id: runtime.templateId,
       name: runtime.templateName,
@@ -1783,6 +1822,52 @@ export async function runDeepAgentWithLogs(
   }
 }
 
+async function runDeepAgentForStructuredResponse(
+  agent: DeepAgentRunner,
+  state: unknown,
+  timeoutLabel: string,
+): Promise<unknown> {
+  for (let retryCount = 0; ; retryCount += 1) {
+    try {
+      return await withActivityTimeout(
+        async (signalActivity) => {
+          const stream = await agent.stream(state, {
+            streamMode: resolveDeepagentsStreamModes(),
+          });
+          let lastChunk: unknown = null;
+
+          for await (const chunk of stream) {
+            signalActivity();
+            if (Array.isArray(chunk) && chunk.length === 2 && typeof chunk[0] === "string") {
+              const [mode, payload] = chunk as [string, unknown];
+              if (mode === "values") {
+                lastChunk = payload;
+              }
+              continue;
+            }
+
+            lastChunk = chunk;
+          }
+
+          return lastChunk;
+        },
+        DEEPAGENTS_IDLE_TIMEOUT_MS,
+        timeoutLabel,
+      );
+    } catch (error) {
+      const retryReason = extractCompatibleStreamErrorReason(error);
+      if (!retryReason || retryCount >= DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT) {
+        throw error;
+      }
+
+      const currentRetry = retryCount + 1;
+      await appendWorkflowLog(
+        `[host] 参考资料 Markdown 转换遇到可重试流式响应错误（${retryReason}），准备重试第 ${currentRetry}/${DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT} 次。`,
+      );
+    }
+  }
+}
+
 function extractStructuredResponse<T>(result: unknown, schema: z.ZodType<T>): T | null {
   if (!result || typeof result !== "object") {
     return null;
@@ -1917,6 +2002,61 @@ export class DeepAgentsTextGenerator implements TextGenerator {
     }
 
     return structured;
+  }
+
+  async convertReferenceToMarkdown(
+    input: ReferenceMarkdownConversionInput,
+    runtime: TextGeneratorRuntime,
+  ): Promise<ReferenceMarkdownConversionResult> {
+    try {
+      const deepagents = await loadDeepagentsModule();
+      const createDeepAgent = deepagents.createDeepAgent;
+      const modelConfig = runtime.modelRoles?.plan ?? this.modelRoles.plan;
+      const resolvedModel = await resolveModel(modelConfig, runtime.templatePhases.plan?.effort);
+      const agentOptions: any = {
+        model: resolvedModel,
+        responseFormat: toolStrategy(referenceMarkdownConversionSchema),
+        systemPrompt: REFERENCE_MARKDOWN_CONVERSION_SYSTEM_PROMPT,
+        backend: new deepagents.FilesystemBackend({
+          rootDir: runtime.outputDirectory,
+          virtualMode: true,
+        }),
+      };
+      const agent = createDeepAgent(agentOptions);
+      const state = {
+        messages: [
+          {
+            role: "user",
+            content: JSON.stringify({
+              stage: "reference_markdown_conversion",
+              source: {
+                url: input.url,
+                name: input.name,
+                type: input.type,
+                contentType: input.contentType,
+              },
+              rawDocument: input.body,
+            }),
+          },
+        ],
+      };
+
+      await appendWorkflowLog(`[host] 开始将参考资料转换为 Markdown：${input.url}`);
+      const result = await runDeepAgentForStructuredResponse(
+        agent as any,
+        state,
+        "deepagents reference markdown conversion",
+      );
+      const structured = extractStructuredResponse(result, referenceMarkdownConversionSchema);
+      if (!structured) {
+        throw new Error("deepagents reference markdown conversion did not return a valid structured response.");
+      }
+      await appendWorkflowLog(`[host] 参考资料 Markdown 转换完成：${input.url}`);
+      return structured;
+    } catch (error) {
+      await writeErrorLog(runtime.deepagentsErrorLogPath, error);
+      throw error;
+    }
   }
 
   async planProject(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {

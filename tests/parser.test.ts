@@ -30,6 +30,23 @@ test("normalizeSpec adds routes and default CRUD screens", async () => {
   assert.equal(normalized.defaultsApplied.length, 0);
 });
 
+test("normalizeSpec assembles external references from parsed PRD sections", () => {
+  const markdown = [
+    "# Weather Console",
+    "",
+    "## External APIs",
+    "- QWeather realtime API docs: https://dev.qweather.com/docs/api/weather/weather-now/ for endpoint parameters and auth.",
+    "",
+  ].join("\n");
+  const parsed = parsePrd(markdown);
+  const normalized = normalizeSpec(parsed, markdown);
+
+  assert.equal(normalized.externalReferences.length, 1);
+  assert.equal(normalized.externalReferences[0]?.url, "https://dev.qweather.com/docs/api/weather/weather-now/");
+  assert.equal(normalized.externalReferences[0]?.type, "external_api");
+  assert.equal(normalized.externalReferences[0]?.required, true);
+});
+
 test("parsePrd recognizes OCR-style Chinese energy PRDs", async () => {
   const markdown = await readFile(ENERGY_FIXTURE_PATH, "utf8");
   const parsed = parsePrd(markdown);

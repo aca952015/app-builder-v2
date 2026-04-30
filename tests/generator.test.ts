@@ -24,7 +24,16 @@ import { filterRedundantValidationDetailLines, generateApplication, resolveSpawn
 import { buildPlanProjectPayload, buildPlanRepairPayload, runDeepAgentWithLogs } from "../src/lib/text-generator.js";
 import { closeWorkflowBoard } from "../src/lib/terminal-ui.js";
 import { copyStarterScaffold, loadTemplatePack } from "../src/lib/template-pack.js";
-import { GeneratedAppValidator, GeneratedProject, NormalizedSpec, PlanResult, TextGenerator, TextGeneratorRuntime } from "../src/lib/types.js";
+import {
+  GeneratedAppValidator,
+  GeneratedProject,
+  NormalizedSpec,
+  PlanResult,
+  type ReferenceMarkdownConversionInput,
+  type ReferenceMarkdownConversionResult,
+  TextGenerator,
+  TextGeneratorRuntime,
+} from "../src/lib/types.js";
 
 function buildPlanSpec(): PlanSpec {
   return {
@@ -1629,7 +1638,7 @@ test("planSpec schema accepts PRD-derived environment variables and references",
       url: "https://dev.qweather.com/docs/api/weather/weather-now/",
       description: "用于理解和风天气实时天气接口的认证、请求参数和响应结构。",
       usage: "生成阶段自行判断是否用于相关天气 API 实现。",
-      localPath: "/.deepagents/references/external/dev-qweather-com-docs-api-weather-weather-now.html",
+      localPath: "/.deepagents/references/external/dev-qweather-com-docs-api-weather-weather-now.md",
       retrievedAt: "2026-04-30T00:00:00.000Z",
       contentType: "text/html; charset=utf-8",
       retrievalStatus: "downloaded",
@@ -1870,8 +1879,10 @@ function buildWeatherEnvPlanSpec(): PlanSpec {
 
 class ReferenceAwareTextGenerator implements TextGenerator {
   observedLocalReferences: TextGeneratorRuntime["localReferences"];
+  observedSpecExternalReferences: NormalizedSpec["externalReferences"] | undefined;
 
-  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+  async planProject(spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    this.observedSpecExternalReferences = spec.externalReferences;
     this.observedLocalReferences = runtime.localReferences;
     const reference = runtime.localReferences?.[0];
     const planSpec = buildPlanSpec();
@@ -1937,6 +1948,34 @@ class ReferenceAwareTextGenerator implements TextGenerator {
 
   async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<GeneratedProject> {
     throw new Error("generateRepairProject should not be called in ReferenceAwareTextGenerator");
+  }
+}
+
+class ConvertingReferenceTextGenerator extends ReferenceAwareTextGenerator {
+  readonly convertedMarkdown = "# Weather Now\n\n- Endpoint: `GET /v7/weather/now`\n- Parameters: `location`, `key`\n";
+  observedConversionInput: ReferenceMarkdownConversionInput | undefined;
+  observedConversionRuntime: Pick<TextGeneratorRuntime, "sessionId" | "outputDirectory"> | undefined;
+
+  async convertReferenceToMarkdown(
+    input: ReferenceMarkdownConversionInput,
+    runtime: TextGeneratorRuntime,
+  ): Promise<ReferenceMarkdownConversionResult> {
+    this.observedConversionInput = input;
+    this.observedConversionRuntime = {
+      sessionId: runtime.sessionId,
+      outputDirectory: runtime.outputDirectory,
+    };
+
+    return {
+      markdown: this.convertedMarkdown,
+      notes: ["converted test fixture"],
+    };
+  }
+}
+
+class FailingReferenceConversionTextGenerator extends ReferenceAwareTextGenerator {
+  async convertReferenceToMarkdown(): Promise<ReferenceMarkdownConversionResult> {
+    throw new Error("conversion unavailable");
   }
 }
 
@@ -3268,7 +3307,8 @@ test("generateApplication resolves PRD API docs into local reference artifacts b
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-"));
   const specPath = path.join(tempRoot, "weather-prd.md");
   const originalFetch = globalThis.fetch;
-  const generator = new ReferenceAwareTextGenerator();
+  const generator = new ConvertingReferenceTextGenerator();
+  const rawHtml = "<html><body><h1>Weather Now</h1><code>GET /v7/weather/now</code><p>location,key</p></body></html>";
 
   try {
     await writeFile(
@@ -3282,7 +3322,7 @@ test("generateApplication resolves PRD API docs into local reference artifacts b
       "utf8",
     );
     globalThis.fetch = (async () => new Response(
-      "<html><body><h1>Weather Now</h1><code>GET /v7/weather/now</code><p>location,key</p></body></html>",
+      rawHtml,
       { headers: { "content-type": "text/html; charset=utf-8" } },
     )) as typeof fetch;
 
@@ -3294,20 +3334,147 @@ test("generateApplication resolves PRD API docs into local reference artifacts b
     });
 
     const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { entries: Array<{ url: string; localPath?: string; retrievalStatus: string }> };
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { entries: Array<{ url: string; localPath?: string; retrievalStatus: string; contentType?: string }> };
     assert.equal(manifest.entries.length, 1);
     assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
     assert.equal(manifest.entries[0]?.url, "https://dev.qweather.com/docs/api/weather/weather-now/");
+    assert.equal(manifest.entries[0]?.contentType, "text/html; charset=utf-8");
     assert.equal(generator.observedLocalReferences?.[0]?.localPath, manifest.entries[0]?.localPath);
+    assert.equal(generator.observedConversionInput?.url, "https://dev.qweather.com/docs/api/weather/weather-now/");
+    assert.equal(generator.observedConversionInput?.contentType, "text/html; charset=utf-8");
+    assert.equal(generator.observedConversionInput?.body, rawHtml);
+    assert.equal(generator.observedConversionRuntime?.sessionId, result.sessionId);
 
     const localPath = manifest.entries[0]?.localPath;
     assert.ok(localPath?.startsWith("/.deepagents/references/external/"));
-    assert.match(await readFile(path.join(result.outputDirectory, localPath!.slice(1)), "utf8"), /Weather Now/);
+    assert.equal(path.extname(localPath!), ".md");
+    assert.equal(generator.observedSpecExternalReferences?.[0]?.localPath, localPath);
+    assert.equal(generator.observedSpecExternalReferences?.[0]?.retrievalStatus, "downloaded");
+    assert.equal(await readFile(path.join(result.outputDirectory, localPath!.slice(1)), "utf8"), generator.convertedMarkdown);
+    assert.equal(
+      await readFile(
+        path.join(
+          result.outputDirectory,
+          ".deepagents/references/external/dev-qweather-com-docs-api-weather-weather-now.html",
+        ),
+        "utf8",
+      ),
+      rawHtml,
+    );
 
     const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8")) as PlanSpec;
     assert.equal(planSpec.references?.[0]?.localPath, localPath);
+    assert.equal(planSpec.references?.[0]?.localPath, generator.observedLocalReferences?.[0]?.localPath);
     assert.equal(planSpec.references?.[0]?.retrievalStatus, "downloaded");
     assert.match(await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8"), new RegExp(localPath!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication keeps downloaded references when Markdown conversion fails", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-conversion-fail-"));
+  const specPath = path.join(tempRoot, "weather-prd.md");
+  const originalFetch = globalThis.fetch;
+  const generator = new FailingReferenceConversionTextGenerator();
+  const rawHtml = "<html><body><h1>Weather Now</h1><code>GET /v7/weather/now</code><p>location,key</p></body></html>";
+
+  try {
+    await writeFile(
+      specPath,
+      [
+        "# Weather Console",
+        "",
+        "Use API docs at https://docs.example.com/weather/api for weather endpoint parameters.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    globalThis.fetch = (async () => new Response(
+      rawHtml,
+      { headers: { "content-type": "text/html; charset=utf-8" } },
+    )) as typeof fetch;
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { entries: Array<{ localPath?: string; retrievalStatus: string }> };
+    const localPath = manifest.entries[0]?.localPath;
+
+    assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
+    assert.ok(localPath?.startsWith("/.deepagents/references/external/"));
+    assert.equal(path.extname(localPath!), ".md");
+    assert.equal(generator.observedLocalReferences?.[0]?.localPath, localPath);
+
+    const convertedContents = await readFile(path.join(result.outputDirectory, localPath!.slice(1)), "utf8");
+    assert.match(convertedContents, /Weather Now/);
+    assert.match(convertedContents, /GET \/v7\/weather\/now/);
+    assert.doesNotMatch(convertedContents, /<html|<body|<code/i);
+    assert.equal(
+      await readFile(path.join(result.outputDirectory, ".deepagents/references/external/docs-example-com-weather-api.html"), "utf8"),
+      rawHtml,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication falls back to stripped Markdown when custom generator cannot convert references", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-fallback-"));
+  const specPath = path.join(tempRoot, "weather-prd.md");
+  const originalFetch = globalThis.fetch;
+  const generator = new ReferenceAwareTextGenerator();
+
+  try {
+    await writeFile(
+      specPath,
+      [
+        "# Weather Console",
+        "",
+        "Use API docs at https://docs.example.com/weather/api for weather endpoint parameters.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    globalThis.fetch = (async () => new Response(
+      [
+        "<html>",
+        "<head><style>.hidden{display:none}</style><script>window.noise = true;</script></head>",
+        "<body><nav>Docs menu</nav><h1>Weather Now</h1><code>GET /v7/weather/now</code><p>location,key</p><footer>Copyright</footer></body>",
+        "</html>",
+      ].join(""),
+      { headers: { "content-type": "text/html; charset=utf-8" } },
+    )) as typeof fetch;
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { entries: Array<{ localPath?: string; retrievalStatus: string }> };
+    const localPath = manifest.entries[0]?.localPath;
+
+    assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
+    assert.ok(localPath?.startsWith("/.deepagents/references/external/"));
+    assert.equal(path.extname(localPath!), ".md");
+    assert.equal(generator.observedLocalReferences?.[0]?.localPath, localPath);
+
+    const contents = await readFile(path.join(result.outputDirectory, localPath!.slice(1)), "utf8");
+    assert.match(contents, /Weather Now/);
+    assert.match(contents, /GET \/v7\/weather\/now/);
+    assert.match(contents, /location,key/);
+    assert.doesNotMatch(contents, /<html|<body|<code/i);
+    assert.doesNotMatch(contents, /window\.noise|Docs menu|Copyright/);
   } finally {
     globalThis.fetch = originalFetch;
     await rm(tempRoot, { recursive: true, force: true });
@@ -4145,6 +4312,7 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
     warnings: [],
     defaultsApplied: [],
     sourceMarkdown: "# PRD",
+    externalReferences: [],
   };
 
   const payload = buildPlanProjectPayload(spec, runtime) as {
@@ -4165,10 +4333,19 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
         mustValidateBeforeResponse: boolean;
         rules: string[];
       };
+      referenceUsageValidation: {
+        artifactKey: string;
+        artifactPath: string;
+        blocking: boolean;
+        required: boolean;
+        mustValidateBeforeResponse: boolean;
+        rules: string[];
+      };
     };
     planSpecSchema: unknown;
     artifacts: {
       interactionContract: string;
+      referenceManifest: string;
     };
   };
 
@@ -4189,6 +4366,19 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
     "/.deepagents/interaction-contract.json",
   );
   assert.equal(payload.hardConstraints.interactionContractValidation.blocking, true);
+  assert.equal(payload.artifacts.referenceManifest, "/.deepagents/references/reference-manifest.json");
+  assert.equal(
+    payload.hardConstraints.referenceUsageValidation.artifactKey,
+    "artifacts.referenceManifest",
+  );
+  assert.equal(
+    payload.hardConstraints.referenceUsageValidation.artifactPath,
+    "/.deepagents/references/reference-manifest.json",
+  );
+  assert.equal(payload.hardConstraints.referenceUsageValidation.blocking, true);
+  assert.equal(payload.hardConstraints.referenceUsageValidation.required, true);
+  assert.equal(payload.hardConstraints.referenceUsageValidation.mustValidateBeforeResponse, true);
+  assert.match(payload.hardConstraints.referenceUsageValidation.rules.join("\n"), /必须先读取其 localPath/);
   assert.match(JSON.stringify(payload.planSpecSchema), /references/);
   assert.doesNotMatch(JSON.stringify(payload.planSpecSchema), /relatedApis/);
 });
@@ -4215,10 +4405,19 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
         mustValidateBeforeResponse: boolean;
         rules: string[];
       };
+      referenceUsageValidation: {
+        artifactKey: string;
+        artifactPath: string;
+        blocking: boolean;
+        required: boolean;
+        mustValidateBeforeResponse: boolean;
+        rules: string[];
+      };
     };
     planSpecSchema: unknown;
     artifacts: {
       interactionContract: string;
+      referenceManifest: string;
     };
   };
 
@@ -4234,6 +4433,11 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
     payload.hardConstraints.interactionContractValidation.artifactKey,
     "artifacts.interactionContract",
   );
+  assert.equal(payload.artifacts.referenceManifest, "/.deepagents/references/reference-manifest.json");
+  assert.equal(payload.hardConstraints.referenceUsageValidation.artifactKey, "artifacts.referenceManifest");
+  assert.equal(payload.hardConstraints.referenceUsageValidation.artifactPath, "/.deepagents/references/reference-manifest.json");
+  assert.equal(payload.hardConstraints.referenceUsageValidation.blocking, true);
+  assert.match(payload.hardConstraints.referenceUsageValidation.rules.join("\n"), /不能凭模型记忆/);
 });
 
 test("mini-app prompts require interaction contract traceability", async () => {
