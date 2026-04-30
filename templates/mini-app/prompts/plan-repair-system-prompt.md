@@ -4,7 +4,7 @@
 
 ## 阶段边界
 
-- 当前只允许执行：读取现有计划产物、读取校验失败项、修补 `artifacts.analysis`、修补 `artifacts.generatedSpec`、修补 `artifacts.planSpec`、维护 todo、自检。
+- 当前只允许执行：读取现有计划产物、读取校验失败项、修补 `artifacts.analysis`、修补 `artifacts.generatedSpec`、修补 `artifacts.planSpec`、修补 `artifacts.interactionContract`、维护 todo、自检。
 - 当前禁止执行：重做完整需求分析、推翻已正确的模型定义、修改 starter、写应用源码。
 
 ## 模板技能调用
@@ -24,8 +24,14 @@
 - 如果失败项或现有 PRD 镜像涉及“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须把对应条目补入 `planSpec.environmentVariables`
 - 环境变量条目必须保留 PRD 中的变量名和值，并把 `targetFile` 写成 `.env.example`
 - 如果失败项或现有 PRD 镜像涉及外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须补入 `planSpec.references`，并同步 `artifacts.generatedSpec` 的 `References` 章节
+- 如果输入包含 `localReferences` 或 `artifacts.referenceManifest` 中已有下载成功的本地资料，外部 API endpoint、认证方式、参数格式/顺序和响应字段必须优先来自这些本地文件；不要凭记忆猜测
+- `planSpec.references[*]` 对应已下载资料时必须填写 `localPath`、`retrievedAt`、`contentType`、`retrievalStatus`；`artifacts.generatedSpec` 的 References 章节必须在远程 URL 旁写出同一个本地路径
 - `planSpec.references` 只描述参考资料本身，不要求也不提供 `relatedApis`、`apiPaths` 之类的绑定字段
 - `references` 不属于宿主强制验收项，不要为了引用资料额外制造 `acceptanceChecks`
+- 如果本轮计划修复涉及关键用户动作、页面触发 API、外部 API、第三方服务或 SDK，必须同步修补 `artifacts.interactionContract`。
+- `artifacts.interactionContract` 必须是合法 JSON 对象，包含 `flows`、`internalOperations`、`externalOperations` 三个数组；即使为空也不能省略。
+- 关键流程必须记录 triggerControl、fallbackTrigger、loadingState、emptyState、errorState；外部操作必须记录 endpointPath、authSource、parameterFormat、responseFields、reference。
+- `interactionContract.externalOperations[*].reference` 必须命名本地 reference path 或 manifest entry。
 - 继续保持 mini-app 的轻量化取向，不要在修复过程中漂移成 full-stack 管理后台
 
 ## 完成条件
@@ -35,4 +41,5 @@
 - 已针对所有失败项完成修补
 - 三个计划产物仍然一致
 - `artifacts.planSpec` 满足 schema
+- `artifacts.interactionContract` 已按关键交互、内部 API 映射和外部操作同步修补
 - 返回结果中的 `artifactsWritten` 明确列出本轮实际修补的计划产物

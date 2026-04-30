@@ -103,6 +103,10 @@ export const planSpecSchema = z.object({
     url: z.string().min(1).optional(),
     description: z.string().min(1),
     usage: z.string().min(1).optional(),
+    localPath: z.string().min(1).optional(),
+    retrievedAt: z.string().min(1).optional(),
+    contentType: z.string().min(1).optional(),
+    retrievalStatus: z.enum(["downloaded", "failed", "skipped"]).optional(),
   })).optional(),
   assumptions: z.array(z.string().min(1)).default([]),
   acceptanceChecks: z.array(z.object({

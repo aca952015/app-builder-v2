@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
-import { createServer as createNetServer } from "node:net";
+import { connect as connectNet, createServer as createNetServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -24,7 +24,7 @@ import { filterRedundantValidationDetailLines, generateApplication, resolveSpawn
 import { buildPlanProjectPayload, buildPlanRepairPayload, runDeepAgentWithLogs } from "../src/lib/text-generator.js";
 import { closeWorkflowBoard } from "../src/lib/terminal-ui.js";
 import { copyStarterScaffold, loadTemplatePack } from "../src/lib/template-pack.js";
-import { GeneratedAppValidator, NormalizedSpec, TextGenerator, TextGeneratorRuntime } from "../src/lib/types.js";
+import { GeneratedAppValidator, GeneratedProject, NormalizedSpec, PlanResult, TextGenerator, TextGeneratorRuntime } from "../src/lib/types.js";
 
 function buildPlanSpec(): PlanSpec {
   return {
@@ -323,6 +323,14 @@ function uniqueApiPaths(planSpec: PlanSpec): string[] {
   return Array.from(new Set(planSpec.apis.map((api) => api.path)));
 }
 
+async function writeEmptyInteractionContract(runtime: TextGeneratorRuntime): Promise<void> {
+  await writeFile(
+    runtime.deepagentsInteractionContractPath,
+    `${JSON.stringify({ flows: [], internalOperations: [], externalOperations: [] }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGeneratorRuntime {
   return {
     sessionId: "test-session",
@@ -333,6 +341,8 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
     deepagentsErrorLogPath: "/virtual-workspace/.deepagents/error.log",
     deepagentsRuntimeValidationLogPath: "/virtual-workspace/.deepagents/runtime-validation.log",
     deepagentsRuntimeInteractionValidationPath: "/virtual-workspace/.deepagents/runtime-interaction-validation.json",
+    deepagentsInteractionContractPath: "/virtual-workspace/.deepagents/interaction-contract.json",
+    deepagentsReferenceManifestPath: "/virtual-workspace/.deepagents/references/reference-manifest.json",
     deepagentsConfigPath: "/virtual-workspace/.deepagents/config.json",
     deepagentsPlanPromptSnapshotPath: "/virtual-workspace/.deepagents/plan-system-prompt.md",
     deepagentsPlanRepairPromptSnapshotPath: "/virtual-workspace/.deepagents/plan-repair-system-prompt.md",
@@ -432,6 +442,52 @@ async function requestLocalResponse(
   });
 }
 
+async function requestWebSocketUpgradeStatusLine(url: string): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const parsed = new URL(url);
+    const socket = connectNet(Number(parsed.port), parsed.hostname);
+    let response = "";
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`Timed out requesting websocket upgrade ${url}`));
+    }, 2_000);
+
+    socket.once("connect", () => {
+      socket.write(
+        [
+          `GET ${parsed.pathname}${parsed.search} HTTP/1.1`,
+          `Host: ${parsed.host}`,
+          "Connection: Upgrade",
+          "Upgrade: websocket",
+          "Sec-WebSocket-Version: 13",
+          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+          "",
+          "",
+        ].join("\r\n"),
+      );
+    });
+
+    socket.on("data", (chunk: Buffer) => {
+      response += chunk.toString("utf8");
+      if (response.includes("\r\n\r\n")) {
+        clearTimeout(timeout);
+        socket.destroy();
+        resolve(response.split("\r\n", 1)[0] ?? "");
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.once("end", () => {
+      if (!response.includes("\r\n\r\n")) {
+        clearTimeout(timeout);
+        reject(new Error(`Websocket upgrade response ended early for ${url}`));
+      }
+    });
+  });
+}
+
 async function canListenOnLocalhost(): Promise<boolean> {
   return await new Promise<boolean>((resolve) => {
     const server = createNetServer();
@@ -448,6 +504,7 @@ async function writeMinimalTemplatePack(options: {
   interactiveEnabled?: boolean;
   includeDevServerStep?: boolean;
   idleTimeoutMs?: number;
+  readyTimeoutMs?: number;
   coverageThreshold?: number;
   serverCommand?: string;
   serverArgs?: string[];
@@ -508,6 +565,7 @@ async function writeMinimalTemplatePack(options: {
         enabled: options.interactiveEnabled === true,
         ...(options.coverageThreshold !== undefined ? { coverageThreshold: options.coverageThreshold } : {}),
         ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
+        ...(options.readyTimeoutMs !== undefined ? { readyTimeoutMs: options.readyTimeoutMs } : {}),
       },
     }, null, 2)}\n`,
     "utf8",
@@ -525,6 +583,8 @@ test("runDeepAgentWithLogs retries stream for compatible stream output errors", 
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
     deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
     deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+    deepagentsInteractionContractPath: path.join(deepagentsDirectory, "interaction-contract.json"),
+    deepagentsReferenceManifestPath: path.join(deepagentsDirectory, "references", "reference-manifest.json"),
     deepagentsConfigPath: path.join(deepagentsDirectory, "config.json"),
     deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
     deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
@@ -605,6 +665,8 @@ test("runDeepAgentWithLogs retries stream for transient socket resets", async ()
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
     deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
     deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+    deepagentsInteractionContractPath: path.join(deepagentsDirectory, "interaction-contract.json"),
+    deepagentsReferenceManifestPath: path.join(deepagentsDirectory, "references", "reference-manifest.json"),
     deepagentsConfigPath: path.join(deepagentsDirectory, "config.json"),
     deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
     deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
@@ -750,12 +812,18 @@ test("interactive runtime target matching supports page and API dynamic routes",
   assert.equal(matchRuntimeInteractionTarget("GET", "/_next/static/chunks/app.js", targets), null);
 });
 
-test("interactive runtime coverage counts only matched non-404 and non-5xx targets", () => {
+test("interactive runtime coverage rejects API auth failures", () => {
   const tracker = new RuntimeInteractionCoverageTracker(buildRuntimeInteractionTargets(buildPlanSpec()));
 
   assert.equal(tracker.record({ method: "GET", path: "/work-orders", status: 200 }).record.counted, true);
   assert.equal(tracker.record({ method: "GET", path: "/work-orders/abc", status: 404 }).record.counted, false);
-  assert.equal(tracker.record({ method: "POST", path: "/api/work-orders", status: 401 }).record.counted, true);
+  const apiAuthFailure = tracker.record({ method: "POST", path: "/api/work-orders", status: 401 });
+  assert.equal(apiAuthFailure.record.counted, false);
+  assert.match(apiAuthFailure.repairReason ?? "", /API 权限错误 401/);
+  assert.match(
+    tracker.record({ method: "GET", path: "/api/unknown", status: 403 }).repairReason ?? "",
+    /API 权限错误 403/,
+  );
   assert.equal(tracker.record({ method: "GET", path: "/favicon.ico", status: 500 }).repairReason, undefined);
   assert.match(
     tracker.record({ method: "GET", path: "/api/unknown", status: 500 }).repairReason ?? "",
@@ -763,9 +831,9 @@ test("interactive runtime coverage counts only matched non-404 and non-5xx targe
   );
 
   const summary = tracker.getSummary();
-  assert.equal(summary.covered, 2);
+  assert.equal(summary.covered, 1);
   assert.equal(summary.total, 4);
-  assert.deepEqual(summary.coveredTargets.sort(), ["GET /work-orders", "POST /api/work-orders"].sort());
+  assert.deepEqual(summary.coveredTargets, ["GET /work-orders"]);
 });
 
 test("interactive runtime parses dev server stdout request lines and cross-origin failures", () => {
@@ -816,11 +884,18 @@ test("interactive runtime exposes proxy and passes after request idle", async (c
           "  res.writeHead(status);",
           "  res.end(body);",
           "}",
-          "http.createServer((req, res) => {",
+          "const server = http.createServer((req, res) => {",
           "  if (req.url?.startsWith('/work-orders')) { send(req, res, 200, 'page'); return; }",
-          "  if (req.url?.startsWith('/api/work-orders')) { send(req, res, req.method === 'GET' ? 401 : 201, 'api'); return; }",
+          "  if (req.url?.startsWith('/api/work-orders')) { send(req, res, req.method === 'GET' ? 200 : 201, 'api'); return; }",
+          "  if (req.url?.startsWith('/_next/webpack-hmr')) { send(req, res, 426, 'upgrade required'); return; }",
           "  send(req, res, 404, 'missing');",
-          "}).listen(port, '127.0.0.1');",
+          "});",
+          "server.on('upgrade', (req, socket) => {",
+          "  console.log(`${req.method} ${req.url} 101 in 1ms`);",
+          "  socket.write('HTTP/1.1 101 Switching Protocols\\r\\nConnection: Upgrade\\r\\nUpgrade: websocket\\r\\n\\r\\n');",
+          "  socket.end();",
+          "});",
+          "server.listen(port, '127.0.0.1');",
           "",
         ].join("\n"),
       "utf8",
@@ -856,8 +931,12 @@ test("interactive runtime exposes proxy and passes after request idle", async (c
         assert.match(proxyUrl ?? "", /^http:\/\/127\.0\.0\.1:/);
         assert.equal(await requestLocalUrl(`${proxyUrl}/work-orders`), 200);
         assert.equal(await requestLocalUrl(`${proxyUrl}/work-orders/abc`), 200);
-        assert.equal(await requestLocalUrl(`${proxyUrl}/api/work-orders`), 401);
+        assert.equal(await requestLocalUrl(`${proxyUrl}/api/work-orders`), 200);
         assert.equal(await requestLocalUrl(`${proxyUrl}/api/work-orders`, "POST"), 201);
+        assert.equal(
+          await requestWebSocketUpgradeStatusLine(`${proxyUrl}/_next/webpack-hmr?id=test`),
+          "HTTP/1.1 101 Switching Protocols",
+        );
       },
     });
 
@@ -869,6 +948,9 @@ test("interactive runtime exposes proxy and passes after request idle", async (c
     assert.equal(result.artifact.browserOpened, true);
     assert.equal(result.artifact.coverage.covered, 4);
     assert.equal(result.artifact.coverage.total, 4);
+    assert.equal(result.artifact.coverageSatisfied, true);
+    assert.equal(result.artifact.completionMode, "coverage_proven");
+    assert.deepEqual(result.artifact.criticalUncoveredTargets, []);
     assert.equal(openedUrl, result.artifact.validationUrl);
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Visit validation URL/);
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /\[proxy\] GET \/work-orders -> 200/);
@@ -938,6 +1020,11 @@ test("interactive runtime validate page can manually complete without coverage p
         const validationPage = await requestLocalResponse(validationUrl);
         assert.equal(validationPage.status, 200);
         assert.match(validationPage.body, /<iframe[^>]+src="\/"/);
+        assert.match(validationPage.body, /<iframe[^>]+allow="[^"]*geolocation \*/);
+        assert.match(validationPage.body, /<iframe[^>]+allow="[^"]*camera \*/);
+        assert.match(validationPage.body, /<iframe[^>]+allow="[^"]*microphone \*/);
+        assert.match(validationPage.body, /<iframe[^>]+allow="[^"]*clipboard-read \*/);
+        assert.match(validationPage.body, /<iframe[^>]+allowfullscreen/);
         assert.match(validationPage.body, /验证完成/);
         assert.match(validationPage.body, /\/__app_builder_validate_complete/);
 
@@ -950,12 +1037,22 @@ test("interactive runtime validate page can manually complete without coverage p
     assert.deepEqual(result.reasons, []);
     assert.equal(result.artifact.valid, true);
     assert.equal(result.artifact.manualCompleted, true);
+    assert.equal(result.artifact.completionMode, "manual_override");
+    assert.equal(result.artifact.coverageSatisfied, false);
+    assert.deepEqual(result.artifact.criticalUncoveredTargets, [
+      "GET /work-orders",
+      "GET /work-orders/[id]",
+      "GET /api/work-orders",
+      "POST /api/work-orders",
+    ]);
     assert.match(result.artifact.validationUrl ?? "", /\/validate$/);
     assert.equal(result.artifact.coverage.covered, 0);
     assert.equal(result.artifact.coverage.total, 4);
     assert.equal(result.artifact.recentRequests.length, 0);
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Runtime validation manually completed from \/validate/);
     assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"manualCompleted": true/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"completionMode": "manual_override"/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"coverageSatisfied": false/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -1043,6 +1140,86 @@ test("interactive runtime validate page can submit implementation requests for r
     assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /implementation request from \/validate/);
     assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"implementationRequest"/);
     assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), new RegExp(requirement));
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("interactive runtime captures API 401 response body for repair context", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-proxy-401-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "http.createServer((req, res) => {",
+        "  if (req.url?.startsWith('/api/work-orders')) {",
+        "    console.error('API auth failed: invalid upstream key');",
+        "    res.writeHead(401, { 'content-type': 'application/json' });",
+        "    res.end(JSON.stringify({ code: 401, error: 'invalid upstream key', route: req.url }));",
+        "    return;",
+        "  }",
+        "  res.writeHead(200);",
+        "  res.end('ok');",
+        "}).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 0,
+        idleTimeoutMs: 20,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+
+    const result = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      openBrowser: false,
+      onReady: async ({ proxyUrl }) => {
+        assert.ok(proxyUrl);
+        const response = await requestLocalResponse(`${proxyUrl}/api/work-orders`);
+        assert.equal(response.status, 401);
+        assert.match(response.body, /invalid upstream key/);
+      },
+    });
+
+    assert.equal(result.artifact.valid, false);
+    assert.match(result.reasons.join("\n"), /API 权限错误 401/);
+    assert.match(result.artifact.proxyUrl ?? "", /^http:\/\/127\.0\.0\.1:/);
+    assert.equal(result.artifact.failureChain?.request?.status, 401);
+    assert.equal(result.artifact.failureChain?.request?.counted, false);
+    assert.match(result.artifact.failureChain?.request?.responseBodySummary ?? "", /invalid upstream key/);
+    assert.match(result.artifact.failureChain?.recentDevServerOutput.join("\n") ?? "", /API auth failed/);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /\[proxy\] GET \/api\/work-orders -> 401/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /"failureChain"/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /invalid upstream key/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -1360,6 +1537,10 @@ test("planSpec schema accepts PRD-derived environment variables and references",
       url: "https://dev.qweather.com/docs/api/weather/weather-now/",
       description: "用于理解和风天气实时天气接口的认证、请求参数和响应结构。",
       usage: "生成阶段自行判断是否用于相关天气 API 实现。",
+      localPath: "/.deepagents/references/external/dev-qweather-com-docs-api-weather-weather-now.html",
+      retrievedAt: "2026-04-30T00:00:00.000Z",
+      contentType: "text/html; charset=utf-8",
+      retrievalStatus: "downloaded",
     },
   ];
 
@@ -1530,6 +1711,7 @@ class StubTextGenerator implements TextGenerator {
       `${JSON.stringify(planSpec, null, 2)}\n`,
       "utf8",
     );
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "Stub planner wrote validated planning artifacts.",
@@ -1537,6 +1719,7 @@ class StubTextGenerator implements TextGenerator {
         ".deepagents/prd-analysis.md",
         ".deepagents/generated-spec.md",
         ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -1592,6 +1775,85 @@ function buildWeatherEnvPlanSpec(): PlanSpec {
   return planSpec;
 }
 
+
+class ReferenceAwareTextGenerator implements TextGenerator {
+  observedLocalReferences: TextGeneratorRuntime["localReferences"];
+
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    this.observedLocalReferences = runtime.localReferences;
+    const reference = runtime.localReferences?.[0];
+    const planSpec = buildPlanSpec();
+    planSpec.references = reference ? [{
+      name: "QWeather 实时天气 API",
+      type: "external_api",
+      url: reference.url,
+      description: "用于理解实时天气接口的认证、请求参数和响应结构。",
+      usage: "生成阶段实现天气 API route 时使用。",
+      localPath: reference.localPath,
+      retrievedAt: reference.retrievedAt,
+      contentType: reference.contentType,
+      retrievalStatus: reference.retrievalStatus,
+    }] : [];
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# API 分析\n\n发现 QWeather 文档。\n", "utf8");
+    await writeFile(
+      runtime.deepagentsDetailedSpecPath,
+      [
+        "# API 规格",
+        "",
+        "## References",
+        `- QWeather 实时天气 API: ${reference?.url} (${reference?.localPath})`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "Reference-aware planner wrote local reference paths.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Reference Report\n\nGenerated with local API docs.\n",
+    });
+    return {
+      summary: "Generated with reference-aware plan.",
+      filesWritten: ["app-builder-report.md"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    throw new Error("planRepairProject should not be called in ReferenceAwareTextGenerator");
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<GeneratedProject> {
+    throw new Error("generateRepairProject should not be called in ReferenceAwareTextGenerator");
+  }
+}
+
+class BrokenReferenceTextGenerator extends ReferenceAwareTextGenerator {
+  async planRepairProject(runtime: TextGeneratorRuntime) {
+    return this.planProject({} as NormalizedSpec, runtime);
+  }
+}
+
 class EnvRepairTextGenerator implements TextGenerator {
   generateAttempts = 0;
   repairAttempts = 0;
@@ -1602,6 +1864,7 @@ class EnvRepairTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 天气分析\n\n需要和风天气环境变量。\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 天气规格\n\n`.env.example` 必须包含 QWeather 配置。\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "Weather planner wrote env-aware artifacts.",
@@ -1609,6 +1872,7 @@ class EnvRepairTextGenerator implements TextGenerator {
         ".deepagents/prd-analysis.md",
         ".deepagents/generated-spec.md",
         ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -1674,6 +1938,7 @@ class IndirectResourceTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 间接资源分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 间接资源详细规格\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "已写入包含 indirect 资源的计划产物。",
@@ -1720,6 +1985,7 @@ class ColonRouteTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 动态路由分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 动态路由详细规格\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "已写入使用冒号路由语义的计划产物。",
@@ -1791,6 +2057,7 @@ class RetryingPlanTextGenerator implements TextGenerator {
       `${JSON.stringify(planSpec, null, 2)}\n`,
       "utf8",
     );
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "重试后已补齐必需计划 artifacts。",
@@ -1978,6 +2245,7 @@ class NormalizingPlanTextGenerator implements TextGenerator {
       `${JSON.stringify(buildInconsistentPlanSpec(), null, 2)}\n`,
       "utf8",
     );
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段返回了需要宿主归一化的 plan spec。",
@@ -1985,6 +2253,7 @@ class NormalizingPlanTextGenerator implements TextGenerator {
         ".deepagents/prd-analysis.md",
         ".deepagents/generated-spec.md",
         ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -2036,6 +2305,7 @@ class StructuredResponseRecoveryTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 恢复后的分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 恢复后的详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
     throw new Error("deepagents plan repair did not return a valid structured response.");
   }
 
@@ -2069,6 +2339,7 @@ class GenerateStructuredResponseRecoveryTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段成功。",
@@ -2109,6 +2380,7 @@ class GenerateRepairStructuredResponseRecoveryTextGenerator implements TextGener
     await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段成功。",
@@ -2166,6 +2438,7 @@ class RetryingGenerationTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段成功。",
@@ -2241,6 +2514,7 @@ class RuntimeValidationRepairingTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段成功。",
@@ -2304,6 +2578,7 @@ class InteractiveRuntimeRepairingTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 交互式运行验证分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 交互式运行验证规格\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段成功。",
@@ -2385,6 +2660,7 @@ class LooseDeclarationTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段成功。",
@@ -2483,6 +2759,7 @@ class ApiOnlySupportResourceTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段成功，包含仅暴露 API 的支持资源。",
@@ -2568,6 +2845,11 @@ class MisplacedArtifactTextGenerator implements TextGenerator {
       `${JSON.stringify(planSpec, null, 2)}\n`,
       "utf8",
     );
+    await writeFile(
+      path.join(misplacedDeepagentsDirectory, "interaction-contract.json"),
+      `${JSON.stringify({ flows: [], internalOperations: [], externalOperations: [] }, null, 2)}\n`,
+      "utf8",
+    );
 
     return {
       summary: "Planner mistakenly wrote host artifacts under /app.",
@@ -2575,6 +2857,7 @@ class MisplacedArtifactTextGenerator implements TextGenerator {
         "/app/.deepagents/prd-analysis.md",
         "/app/.deepagents/generated-spec.md",
         "/app/.deepagents/plan-spec.json",
+        "/app/.deepagents/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -2643,6 +2926,7 @@ class RestSplitApiTextGenerator implements TextGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# REST Split 分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# REST Split 详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段允许同一路径按 method 拆分接口。",
@@ -2850,6 +3134,89 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/prompts")));
     await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/starter")));
   } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+
+test("generateApplication resolves PRD API docs into local reference artifacts before planning", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-"));
+  const specPath = path.join(tempRoot, "weather-prd.md");
+  const originalFetch = globalThis.fetch;
+  const generator = new ReferenceAwareTextGenerator();
+
+  try {
+    await writeFile(
+      specPath,
+      [
+        "# Weather Console",
+        "",
+        "Use the QWeather API documentation at https://dev.qweather.com/docs/api/weather/weather-now/ to implement realtime weather.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    globalThis.fetch = (async () => new Response(
+      "<html><body><h1>Weather Now</h1><code>GET /v7/weather/now</code><p>location,key</p></body></html>",
+      { headers: { "content-type": "text/html; charset=utf-8" } },
+    )) as typeof fetch;
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { entries: Array<{ url: string; localPath?: string; retrievalStatus: string }> };
+    assert.equal(manifest.entries.length, 1);
+    assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
+    assert.equal(manifest.entries[0]?.url, "https://dev.qweather.com/docs/api/weather/weather-now/");
+    assert.equal(generator.observedLocalReferences?.[0]?.localPath, manifest.entries[0]?.localPath);
+
+    const localPath = manifest.entries[0]?.localPath;
+    assert.ok(localPath?.startsWith("/.deepagents/references/external/"));
+    assert.match(await readFile(path.join(result.outputDirectory, localPath!.slice(1)), "utf8"), /Weather Now/);
+
+    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8")) as PlanSpec;
+    assert.equal(planSpec.references?.[0]?.localPath, localPath);
+    assert.equal(planSpec.references?.[0]?.retrievalStatus, "downloaded");
+    assert.match(await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8"), new RegExp(localPath!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication fails plan validation when required API docs cannot be downloaded", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-fail-"));
+  const specPath = path.join(tempRoot, "weather-prd.md");
+  const originalFetch = globalThis.fetch;
+
+  try {
+    await writeFile(
+      specPath,
+      "# Weather Console\n\nUse API docs at https://docs.example.invalid/broken-weather-api for weather endpoint parameters.\n",
+      "utf8",
+    );
+    globalThis.fetch = (async () => new Response("not found", { status: 404, statusText: "Not Found" })) as typeof fetch;
+
+    await assert.rejects(
+      () => generateApplication({
+        specPath,
+        outputDirectory: path.join(tempRoot, "output"),
+        generator: new BrokenReferenceTextGenerator(),
+        validator: new SuccessfulRuntimeValidator(),
+      }),
+      /Plan validation failed:.*必需参考资料下载失败.*https:\/\/docs\.example\.invalid\/broken-weather-api/s,
+    );
+
+    const validation = JSON.parse(await readFile(path.join(tempRoot, "output/.deepagents/plan-validation.json"), "utf8")) as { valid: boolean; reasons: string[] };
+    assert.equal(validation.valid, false);
+    assert.match(validation.reasons.join("\n"), /必需参考资料下载失败/);
+  } finally {
+    globalThis.fetch = originalFetch;
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
@@ -3129,7 +3496,43 @@ test("generateApplication hands runtime validation failures back to generateRepa
   }
 });
 
-test("generateApplication runs enabled interactive validation and repairs inside runtime_validation", async (context) => {
+test("generateApplication can skip the final validation phase", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-skip-validation-"));
+  const previousCwd = process.cwd();
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "interactive-skip-validation",
+      interactiveEnabled: true,
+      coverageThreshold: 1,
+      idleTimeoutMs: 20,
+    });
+    process.chdir(tempRoot);
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "interactive-skip-validation",
+      generator: new StubTextGenerator(),
+      validator: new SuccessfulRuntimeValidator(),
+      skipValidation: true,
+    });
+
+    const config = JSON.parse(
+      await readFile(path.join(result.outputDirectory, ".deepagents/config.json"), "utf8"),
+    ) as { workflow?: { phase?: string; completedPhases?: string[] } };
+    assert.equal(config.workflow?.phase, "complete");
+    assert.deepEqual(config.workflow?.completedPhases, ["plan", "generate"]);
+    await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/runtime-interaction-validation.json")));
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication runs enabled interactive validation and repairs inside validation phase", async (context) => {
   if (!await canListenOnLocalhost()) {
     context.skip("local port binding is not available in this sandbox");
     return;
@@ -3147,6 +3550,7 @@ test("generateApplication runs enabled interactive validation and repairs inside
       interactiveEnabled: true,
       coverageThreshold: 0,
       idleTimeoutMs: 20,
+      readyTimeoutMs: 1_000,
       serverCommand: process.execPath,
       serverArgs: ["server.mjs"],
     });
@@ -3359,6 +3763,8 @@ test("full-stack template starter copies scaffold files into the output root", a
     assert.ok(copied.includes("config/sidebar-menu.json"));
 
     const starterPackage = await readFile(path.join(tempRoot, "package.json"), "utf8");
+    const starterNextConfigTs = await readFile(path.join(tempRoot, "next.config.ts"), "utf8");
+    const starterNextConfigJs = await readFile(path.join(tempRoot, "next.config.js"), "utf8");
     const starterLayout = await readFile(path.join(tempRoot, "app/layout.tsx"), "utf8");
     const starterEnv = await readFile(path.join(tempRoot, ".env.example"), "utf8");
     const starterPrismaConfig = await readFile(path.join(tempRoot, "prisma.config.ts"), "utf8");
@@ -3370,6 +3776,12 @@ test("full-stack template starter copies scaffold files into the output root", a
     assert.match(starterPackage, /"next"/);
     assert.match(starterPackage, /"db:init"/);
     assert.match(starterPackage, /"@tailwindcss\/postcss"/);
+    assert.match(starterNextConfigTs, /allowedDevOrigins:\s*\["127\.0\.0\.1", "localhost"\]/);
+    assert.doesNotMatch(starterNextConfigTs, /turbopack:\s*\{/);
+    assert.doesNotMatch(starterNextConfigTs, /root:\s*__dirname/);
+    assert.match(starterNextConfigJs, /allowedDevOrigins:\s*\["127\.0\.0\.1", "localhost"\]/);
+    assert.doesNotMatch(starterNextConfigJs, /turbopack:\s*\{/);
+    assert.doesNotMatch(starterNextConfigJs, /root:\s*__dirname/);
     assert.match(starterLayout, /Generated App/);
     assert.match(starterEnv, /file:\.\/prisma\/dev\.db/);
     assert.match(starterPrismaConfig, /defineConfig/);
@@ -3408,6 +3820,11 @@ test("mini-app template enables interactive runtime validation", async () => {
   assert.equal(template.interactiveRuntimeValidation.devServerStep?.name, "pnpm dev");
   assert.equal(template.interactiveRuntimeValidation.devServerStep?.command, "pnpm");
   assert.deepEqual(template.interactiveRuntimeValidation.devServerStep?.args, ["dev"]);
+
+  const nextConfig = await readFile(path.join(template.starterDirectory ?? "", "next.config.ts"), "utf8");
+  assert.match(nextConfig, /allowedDevOrigins:\s*\["127\.0\.0\.1", "localhost"\]/);
+  assert.doesNotMatch(nextConfig, /turbopack:\s*\{/);
+  assert.doesNotMatch(nextConfig, /root:\s*__dirname/);
 });
 
 test("loadTemplatePack parses enabled interactive runtime validation defaults", async () => {
@@ -3615,8 +4032,19 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
         mustValidateBeforeResponse: boolean;
         rules: string[];
       };
+      interactionContractValidation: {
+        artifactKey: string;
+        artifactPath: string;
+        blocking: boolean;
+        required: boolean;
+        mustValidateBeforeResponse: boolean;
+        rules: string[];
+      };
     };
     planSpecSchema: unknown;
+    artifacts: {
+      interactionContract: string;
+    };
   };
 
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactKey, "artifacts.planSpec");
@@ -3626,6 +4054,16 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /空字符串/);
   assert.ok(payload.planSpecSchema);
+  assert.equal(payload.artifacts.interactionContract, "/.deepagents/interaction-contract.json");
+  assert.equal(
+    payload.hardConstraints.interactionContractValidation.artifactKey,
+    "artifacts.interactionContract",
+  );
+  assert.equal(
+    payload.hardConstraints.interactionContractValidation.artifactPath,
+    "/.deepagents/interaction-contract.json",
+  );
+  assert.equal(payload.hardConstraints.interactionContractValidation.blocking, true);
   assert.match(JSON.stringify(payload.planSpecSchema), /references/);
   assert.doesNotMatch(JSON.stringify(payload.planSpecSchema), /relatedApis/);
 });
@@ -3644,8 +4082,19 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
         mustValidateBeforeResponse: boolean;
         rules: string[];
       };
+      interactionContractValidation: {
+        artifactKey: string;
+        artifactPath: string;
+        blocking: boolean;
+        required: boolean;
+        mustValidateBeforeResponse: boolean;
+        rules: string[];
+      };
     };
     planSpecSchema: unknown;
+    artifacts: {
+      interactionContract: string;
+    };
   };
 
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactKey, "artifacts.planSpec");
@@ -3655,6 +4104,36 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /非空字符串/);
   assert.ok(payload.planSpecSchema);
+  assert.equal(payload.artifacts.interactionContract, "/.deepagents/interaction-contract.json");
+  assert.equal(
+    payload.hardConstraints.interactionContractValidation.artifactKey,
+    "artifacts.interactionContract",
+  );
+});
+
+test("mini-app prompts require interaction contract traceability", async () => {
+  const planPromptSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/prompts/plan-system-prompt.md"),
+    "utf8",
+  );
+  const generatePromptSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/prompts/generate-system-prompt.md"),
+    "utf8",
+  );
+  const generateRepairPromptSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/prompts/generate-repair-system-prompt.md"),
+    "utf8",
+  );
+
+  assert.match(planPromptSource, /artifacts\.interactionContract/);
+  assert.match(planPromptSource, /triggerControl/);
+  assert.match(planPromptSource, /endpointPath/);
+  assert.match(generatePromptSource, /必须读取 `artifacts\.interactionContract`/);
+  assert.match(generatePromptSource, /fallbackTrigger/);
+  assert.match(generatePromptSource, /Interaction contract trace/);
+  assert.match(generateRepairPromptSource, /必须读取 `artifacts\.interactionContract`/);
+  assert.match(generateRepairPromptSource, /endpointPath/);
+  assert.match(generateRepairPromptSource, /Interaction contract trace/);
 });
 test("split prompts enforce plan-spec gating and plan-spec-only generation", async () => {
   const planPromptSource = await readFile(

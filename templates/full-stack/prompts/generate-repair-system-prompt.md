@@ -56,6 +56,7 @@
 - 如需修改现有文件，必须先读再改。
 - 优先局部修复缺失的资源、页面、API、报告文件或接线路径。
 - `planSpec.references` 是修复时理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构的参考资料；你需要自行判断哪些 reference 与当前失败项相关。
+- 当 `planSpec.references[*].localPath` 存在时，必须先读取该本地文件，再修复外部 API route；endpoint、认证、参数顺序和响应字段以本地资料为准，不要凭记忆猜测。
 - `references` 不是宿主强制验收项，不要因为某个 reference 未被使用就额外生成无关功能。
 - 页面修复必须严格以 `planSpec.pages[*].route` 为准；禁止把缺失页面修成其他近似路径、别名路径或 starter 默认路径来蒙混通过。
 - 如果现有页面仍使用 mock 数据、演示数组、硬编码业务统计、`Math.random()` 模拟结果或其他静态占位逻辑替代真实业务数据，必须改为对接 `planSpec.apis` 中对应的 Route Handlers；必要时先补齐缺失 API，再修复页面接线。

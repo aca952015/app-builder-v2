@@ -75,10 +75,10 @@ type CliDeps = {
 
 function helpText(): string {
   return `Usage:
-  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--force] [--stdout <log|dashboard>]
-  app-builder generate --resume <session-id> [--stdout <log|dashboard>]
-  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--force] [--stdout <log|dashboard>]
-  app-builder -g --resume <session-id> [--stdout <log|dashboard>]
+  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--force] [--skip-validation] [--stdout <log|dashboard>]
+  app-builder generate --resume <session-id> [--skip-validation] [--stdout <log|dashboard>]
+  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--force] [--skip-validation] [--stdout <log|dashboard>]
+  app-builder -g --resume <session-id> [--skip-validation] [--stdout <log|dashboard>]
   app-builder validate <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
   app-builder -v <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
 
@@ -177,6 +177,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       "app-name": { type: "string" },
       template: { type: "string" },
       force: { type: "boolean" },
+      "skip-validation": { type: "boolean" },
       resume: { type: "string" },
       stdout: { type: "string" },
     },
@@ -204,6 +205,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     logCliExecutionParameters(stdoutMode, stdout, {
       command: "generate",
       resume: resumeSessionId,
+      skipValidation: parsed.values["skip-validation"] === true,
       model: resolveCliModelName(),
       stdout: stdoutMode,
       cwd,
@@ -213,6 +215,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       sessionId: resumeSessionId,
       stdoutMode,
       cwd,
+      ...(parsed.values["skip-validation"] === true ? { skipValidation: true } : {}),
       ...(deps.generator ? { generator: deps.generator } : {}),
       ...(deps.validator ? { validator: deps.validator } : {}),
     });
@@ -249,6 +252,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     specPath: resolvedSpecPath,
     force: parsed.values.force ?? false,
     templateId,
+    skipValidation: parsed.values["skip-validation"] === true,
     stdoutMode,
   };
 
@@ -270,6 +274,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     appName: appNameOverride ?? "auto",
     template: templateId,
     force: options.force ?? false,
+    skipValidation: options.skipValidation ?? false,
     model: resolveCliModelName(),
     stdout: stdoutMode,
     cwd,

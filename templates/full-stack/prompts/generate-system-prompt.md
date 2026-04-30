@@ -44,6 +44,7 @@
 - 如果 `planSpec` 与已有代码冲突，按 `planSpec` 修正代码。
 - 如果发现 `planSpec` 不足以支撑实现，只能在既有定义范围内做最小实现，不得擅自扩展新的业务模型。
 - `planSpec.references` 是生成阶段的参考资料集合，用于理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构。
+- 当 `planSpec.references[*].localPath` 存在时，必须先读取该本地文件，再实现外部 API route；endpoint、认证、参数顺序和响应字段以本地资料为准，不要凭记忆猜测。
 - 你需要自行判断哪些 reference 与当前要实现的页面/API 相关；不要要求 reference 显式绑定到某个 API，也不要因为某个 reference 未被使用就额外生成无关功能。
 - `references` 不是宿主强制验收项；强制实现范围仍以 `planSpec.resources`、`planSpec.pages`、`planSpec.apis`、`planSpec.environmentVariables` 和 `acceptanceChecks` 为准。
 

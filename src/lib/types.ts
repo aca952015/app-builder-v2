@@ -137,7 +137,7 @@ export type WorkflowPhase =
   | "plan_repair"
   | "generate"
   | "generate_repair"
-  | "runtime_validation"
+  | "validation"
   | "complete";
 export type ValidationPhase = "plan" | "generate";
 
@@ -174,6 +174,24 @@ export type SessionValidationResult = {
   runtimeInteractionValidationPath?: string;
   workflowPhase: WorkflowPhase;
   resumedFromPhase?: WorkflowPhase;
+};
+
+export type LocalReference = {
+  url: string;
+  name: string;
+  type: "external_api" | "documentation" | "external_service" | "other";
+  required: boolean;
+  retrievalStatus: "downloaded" | "failed" | "skipped";
+  localPath?: string;
+  retrievedAt?: string;
+  contentType?: string;
+  error?: string;
+};
+
+export type ReferenceManifest = {
+  version: 1;
+  generatedAt: string;
+  entries: LocalReference[];
 };
 
 export type PlanResult = {
@@ -252,6 +270,8 @@ export type OutputWorkspace = {
   deepagentsErrorLogPath: string;
   deepagentsRuntimeValidationLogPath: string;
   deepagentsRuntimeInteractionValidationPath: string;
+  deepagentsInteractionContractPath: string;
+  deepagentsReferenceManifestPath: string;
   deepagentsConfigPath: string;
   deepagentsPlanPromptSnapshotPath: string;
   deepagentsPlanRepairPromptSnapshotPath: string;
@@ -276,6 +296,8 @@ export type TextGeneratorRuntime = {
   deepagentsErrorLogPath: string;
   deepagentsRuntimeValidationLogPath: string;
   deepagentsRuntimeInteractionValidationPath: string;
+  deepagentsInteractionContractPath: string;
+  deepagentsReferenceManifestPath: string;
   deepagentsConfigPath: string;
   deepagentsPlanPromptSnapshotPath: string;
   deepagentsPlanRepairPromptSnapshotPath: string;
@@ -295,6 +317,7 @@ export type TextGeneratorRuntime = {
   deepagentsPlanSpecPath: string;
   deepagentsPlanValidationPath: string;
   deepagentsGenerationValidationPath: string;
+  localReferences?: LocalReference[];
   planAttempt?: number;
   maxPlanRetries?: number;
   generateAttempt?: number;
@@ -319,6 +342,7 @@ export type GenerateAppOptions = {
   appNameOverride?: string;
   templateId?: string;
   force?: boolean;
+  skipValidation?: boolean;
   stdoutMode?: StdoutMode;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;

@@ -53,6 +53,8 @@ import {
   type TemplateRuntimeValidationStep,
   TextGenerator,
   TextGeneratorRuntime,
+  type LocalReference,
+  type ReferenceManifest,
   type StdoutMode,
   ValidationPhase,
   WorkflowPhase,
@@ -71,6 +73,157 @@ function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
       { name: "pnpm dev", command: "pnpm", args: ["dev"], kind: "dev-server" },
     ],
   };
+}
+
+
+type ReferenceCandidate = {
+  url: string;
+  name: string;
+  type: LocalReference["type"];
+  required: boolean;
+};
+
+const URL_PATTERN = /https?:\/\/[^\s<>)\]"']+/gi;
+
+function cleanReferenceUrl(url: string): string {
+  return url.replace(/[.,;:!?，。；：！？）\])]+$/u, "");
+}
+
+function classifyReferenceCandidate(context: string): Pick<ReferenceCandidate, "type" | "required"> {
+  const lower = context.toLowerCase();
+  if (/api|endpoint|接口|参数|鉴权|认证|sdk/.test(lower)) {
+    return { type: "external_api", required: true };
+  }
+  if (/doc|docs|documentation|reference|文档|指南|说明/.test(lower)) {
+    return { type: "documentation", required: true };
+  }
+  return { type: "other", required: false };
+}
+
+function extractReferenceCandidates(markdown: string): ReferenceCandidate[] {
+  const candidates = new Map<string, ReferenceCandidate>();
+  for (const match of markdown.matchAll(URL_PATTERN)) {
+    const rawUrl = match[0];
+    const url = cleanReferenceUrl(rawUrl);
+    const index = match.index ?? 0;
+    const context = markdown.slice(Math.max(0, index - 160), Math.min(markdown.length, index + rawUrl.length + 160));
+    const classification = classifyReferenceCandidate(context);
+    candidates.set(url, {
+      url,
+      name: new URL(url).hostname,
+      ...classification,
+    });
+  }
+  return [...candidates.values()];
+}
+
+function slugifyReferenceUrl(url: string): string {
+  const parsed = new URL(url);
+  const source = `${parsed.hostname}${parsed.pathname}`;
+  const slug = source
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return slug || "reference";
+}
+
+function extensionForContentType(contentType?: string | null): "md" | "html" {
+  return contentType?.toLowerCase().includes("html") ? "html" : "md";
+}
+
+function toReferenceVirtualPath(outputDirectory: string, filePath: string): string {
+  return `/${path.relative(outputDirectory, filePath).split(path.sep).join("/")}`;
+}
+
+async function writeReferenceManifest(runtime: TextGeneratorRuntime, entries: LocalReference[]): Promise<void> {
+  const manifest: ReferenceManifest = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    entries,
+  };
+  await fs.mkdir(path.dirname(runtime.deepagentsReferenceManifestPath), { recursive: true });
+  await fs.writeFile(runtime.deepagentsReferenceManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+async function resolveExternalReferences(runtime: TextGeneratorRuntime, markdown: string): Promise<LocalReference[]> {
+  const candidates = extractReferenceCandidates(markdown);
+  const entries: LocalReference[] = [];
+  const usedPaths = new Set<string>();
+  const externalDirectory = path.join(runtime.deepagentsDirectory, "references", "external");
+  await fs.mkdir(externalDirectory, { recursive: true });
+
+  for (const candidate of candidates) {
+    const retrievedAt = new Date().toISOString();
+    try {
+      const response = await fetch(candidate.url, {
+        headers: { "user-agent": "app-builder-v2-reference-resolver/1.0" },
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+      }
+
+      const contentType = response.headers.get("content-type") ?? "text/plain";
+      const body = await response.text();
+      const baseSlug = slugifyReferenceUrl(candidate.url);
+      let localPath = path.join(externalDirectory, `${baseSlug}.${extensionForContentType(contentType)}`);
+      let counter = 2;
+      while (usedPaths.has(localPath)) {
+        localPath = path.join(externalDirectory, `${baseSlug}-${counter}.${extensionForContentType(contentType)}`);
+        counter += 1;
+      }
+      usedPaths.add(localPath);
+      await fs.writeFile(localPath, body, "utf8");
+      entries.push({
+        url: candidate.url,
+        name: candidate.name,
+        type: candidate.type,
+        required: candidate.required,
+        retrievalStatus: "downloaded",
+        localPath: toReferenceVirtualPath(runtime.outputDirectory, localPath),
+        retrievedAt,
+        contentType,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      entries.push({
+        url: candidate.url,
+        name: candidate.name,
+        type: candidate.type,
+        required: candidate.required,
+        retrievalStatus: "failed",
+        retrievedAt,
+        error: message,
+      });
+    }
+  }
+
+  await writeReferenceManifest(runtime, entries);
+  return entries;
+}
+
+async function readReferenceManifest(runtime: TextGeneratorRuntime): Promise<ReferenceManifest | null> {
+  const contents = await readIfExists(runtime.deepagentsReferenceManifestPath);
+  if (!contents) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(contents) as ReferenceManifest;
+    return parsed && parsed.version === 1 && Array.isArray(parsed.entries) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveVirtualReferencePath(runtime: TextGeneratorRuntime, localPath: string): string | null {
+  const normalized = localPath.replace(/\\/g, "/");
+  const relative = normalized.startsWith("/") ? normalized.slice(1) : normalized;
+  if (!relative.startsWith(".deepagents/references/")) {
+    return null;
+  }
+  const absolutePath = path.resolve(runtime.outputDirectory, relative);
+  const referencesRoot = path.resolve(runtime.deepagentsDirectory, "references");
+  return absolutePath === referencesRoot || absolutePath.startsWith(`${referencesRoot}${path.sep}`) ? absolutePath : null;
 }
 
 function defaultTemplateInteractiveRuntimeValidation(): TemplateInteractiveRuntimeValidation {
@@ -866,6 +1019,87 @@ async function reconcileHostManagedArtifacts(runtime: TextGeneratorRuntime, targ
   }
 }
 
+
+async function collectReferenceManifestIssues(runtime: TextGeneratorRuntime): Promise<string[]> {
+  const issues: string[] = [];
+  const manifest = await readReferenceManifest(runtime);
+  if (!manifest) {
+    return issues;
+  }
+
+  for (const entry of manifest.entries) {
+    if (entry.retrievalStatus === "downloaded") {
+      if (!entry.localPath) {
+        issues.push(`reference-manifest 下载项缺少 localPath：${entry.url}`);
+        continue;
+      }
+      const absolutePath = resolveVirtualReferencePath(runtime, entry.localPath);
+      if (!absolutePath) {
+        issues.push(`reference-manifest localPath 必须位于 .deepagents/references/ 内：${entry.localPath}`);
+        continue;
+      }
+      const contents = await readIfExists(absolutePath);
+      if (!contents || contents.trim().length === 0) {
+        issues.push(`reference-manifest localPath 文件不存在或为空：${entry.localPath}`);
+      }
+    }
+
+    if (entry.required && entry.retrievalStatus === "failed") {
+      issues.push(`必需参考资料下载失败：${entry.url}${entry.error ? `（${entry.error}）` : ""}`);
+    }
+  }
+
+  return issues;
+}
+
+async function collectPlanReferenceIssues(runtime: TextGeneratorRuntime, planSpec: PlanSpec): Promise<string[]> {
+  const issues: string[] = [];
+  const generatedSpecContents = await readIfExists(runtime.deepagentsDetailedSpecPath) ?? "";
+  const planReferenceLocalPaths = new Set((planSpec.references ?? [])
+    .map((reference) => reference.localPath)
+    .filter((localPath): localPath is string => Boolean(localPath)));
+  const manifest = await readReferenceManifest(runtime);
+
+  for (const entry of manifest?.entries ?? []) {
+    if (
+      entry.required &&
+      entry.retrievalStatus === "downloaded" &&
+      entry.localPath &&
+      (entry.type === "external_api" || entry.type === "documentation") &&
+      !planReferenceLocalPaths.has(entry.localPath)
+    ) {
+      issues.push(`planSpec.references 必须引用已下载的本地参考资料：${entry.localPath}`);
+    }
+  }
+
+  for (const reference of planSpec.references ?? []) {
+    const mustUseLocalPath = reference.type === "external_api" || reference.type === "documentation";
+    if (!reference.localPath) {
+      if (mustUseLocalPath && reference.url?.startsWith("http")) {
+        issues.push(`planSpec.references 缺少本地参考路径 localPath：${reference.name}`);
+      }
+      continue;
+    }
+
+    const absolutePath = resolveVirtualReferencePath(runtime, reference.localPath);
+    if (!absolutePath) {
+      issues.push(`planSpec.references localPath 必须位于 .deepagents/references/ 内：${reference.localPath}`);
+      continue;
+    }
+
+    const contents = await readIfExists(absolutePath);
+    if (!contents || contents.trim().length === 0) {
+      issues.push(`planSpec.references localPath 文件不存在或为空：${reference.localPath}`);
+    }
+
+    if (mustUseLocalPath && !generatedSpecContents.includes(reference.localPath)) {
+      issues.push(`generated-spec.md 的 References 章节必须包含本地参考路径：${reference.localPath}`);
+    }
+  }
+
+  return issues;
+}
+
 function collectPlanSpecConsistencyIssues(planSpec: PlanSpec): string[] {
   const issues: string[] = [];
   const resourceNames = new Set(planSpec.resources.map((resource) => resource.name));
@@ -1307,7 +1541,7 @@ async function writeGenerationValidationResult(
 async function updateWorkflowState(
   configPath: string,
   phase: WorkflowPhase,
-  completedPhases: Array<"plan" | "generate" | "runtime_validation">,
+  completedPhases: Array<"plan" | "generate" | "validation">,
 ): Promise<void> {
   const raw = await fs.readFile(configPath, "utf8");
   const config = JSON.parse(raw) as Record<string, unknown>;
@@ -1341,6 +1575,7 @@ async function collectPersistedPlanValidation(runtime: TextGeneratorRuntime): Pr
     runtime.deepagentsAnalysisPath,
     runtime.deepagentsDetailedSpecPath,
     runtime.deepagentsPlanSpecPath,
+    runtime.deepagentsInteractionContractPath,
   ]);
 
   const reasons: string[] = [];
@@ -1370,10 +1605,32 @@ async function collectPersistedPlanValidation(runtime: TextGeneratorRuntime): Pr
         reasons.push(...collectPlanSpecConsistencyIssues(planSpec).map(
           (issue) => `计划阶段未完成：artifacts.planSpec 一致性校验失败：${issue}`,
         ));
+        reasons.push(...(await collectPlanReferenceIssues(runtime, planSpec)).map(
+          (issue) => `计划阶段未完成：参考资料校验失败：${issue}`,
+        ));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       reasons.push(`计划阶段未完成：artifacts.planSpec 不是合法 JSON：${message}`);
+    }
+  }
+
+  reasons.push(...(await collectReferenceManifestIssues(runtime)).map(
+    (issue) => `计划阶段未完成：参考资料校验失败：${issue}`,
+  ));
+
+  const interactionContractContents = await readIfExists(runtime.deepagentsInteractionContractPath);
+  if (!interactionContractContents || interactionContractContents.trim().length === 0) {
+    reasons.push("计划阶段未完成：artifacts.interactionContract 尚未落盘有效内容。");
+  } else {
+    try {
+      const parsed = JSON.parse(interactionContractContents);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        reasons.push("计划阶段未完成：artifacts.interactionContract 必须是 JSON 对象。");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      reasons.push(`计划阶段未完成：artifacts.interactionContract 不是合法 JSON：${message}`);
     }
   }
 
@@ -1433,7 +1690,7 @@ function createSkippedDevServerValidationSteps(runtime: TextGeneratorRuntime): G
     .map((step) => ({
       name: step.name,
       ok: true,
-      detail: "已跳过：当前 runtime_validation 阶段复用同一个交互式 dev server/proxy 会话，不再单独启动 dev server。",
+      detail: "已跳过：当前 validation 阶段复用同一个交互式 dev server/proxy 会话，不再单独启动 dev server。",
     }));
 }
 
@@ -1928,6 +2185,8 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
     deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
     deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+    deepagentsInteractionContractPath: path.join(deepagentsDirectory, "interaction-contract.json"),
+    deepagentsReferenceManifestPath: path.join(deepagentsDirectory, "references", "reference-manifest.json"),
     deepagentsConfigPath: configPath,
     deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
     deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
@@ -2013,6 +2272,9 @@ async function updateRuntimeValidationWorkflowBoard(options: {
         ...(options.artifact.proxyUrl ? { proxyUrl: options.artifact.proxyUrl } : {}),
         ...(options.artifact.validationUrl ? { validationUrl: options.artifact.validationUrl } : {}),
         ...(options.artifact.manualCompleted ? { manualCompleted: true } : {}),
+        ...(options.artifact.completionMode ? { completionMode: options.artifact.completionMode } : {}),
+        coverageSatisfied: options.artifact.coverageSatisfied,
+        criticalUncoveredTargets: options.artifact.criticalUncoveredTargets,
         ...(options.artifact.implementationRequest
           ? { implementationRequest: options.artifact.implementationRequest.requirement }
           : {}),
@@ -2037,14 +2299,14 @@ async function updateRuntimeValidationWorkflowBoard(options: {
     sessionId: options.runtime.sessionId,
     outputDirectory: options.runtime.outputDirectory,
     runtimeStatus: {
-      phase: "runtime_validation",
+      phase: "validation",
       effort: undefined,
     },
     ...(runtimeInteraction ? { runtimeInteraction } : {}),
   });
 }
 
-async function markWorkflowComplete(runtime: TextGeneratorRuntime, completedPhases: Array<"plan" | "generate" | "runtime_validation">): Promise<void> {
+async function markWorkflowComplete(runtime: TextGeneratorRuntime, completedPhases: Array<"plan" | "generate" | "validation">): Promise<void> {
   await updateWorkflowState(runtime.deepagentsConfigPath, "complete", completedPhases);
   await showCompletedWorkflowBoard(runtime.sessionId, runtime.outputDirectory);
   await appendWorkflowLog("[host] 全部阶段完成，准备汇总输出。");
@@ -2055,7 +2317,14 @@ async function completeAfterGenerateValidation(options: {
   generator: TextGenerator;
   validator: GeneratedAppValidator;
   approvedPlan: PlanSpec;
+  skipValidation?: boolean;
 }): Promise<void> {
+  if (options.skipValidation) {
+    await appendWorkflowLog("[host] 已按 --skip-validation 跳过 validation 阶段。");
+    await markWorkflowComplete(options.runtime, ["plan", "generate"]);
+    return;
+  }
+
   if (!options.runtime.templateInteractiveRuntimeValidation.enabled) {
     await markWorkflowComplete(options.runtime, ["plan", "generate"]);
     return;
@@ -2068,7 +2337,7 @@ async function completeAfterGenerateValidation(options: {
   try {
     while (true) {
       if (retryReasons.length === 0) {
-        await updateWorkflowState(options.runtime.deepagentsConfigPath, "runtime_validation", ["plan", "generate"]);
+        await updateWorkflowState(options.runtime.deepagentsConfigPath, "validation", ["plan", "generate"]);
         await appendWorkflowLog("[host] 进入运行验证阶段，启动或复用 dev server，并启动本地请求代理，合并监听 HTTP 响应与 stdout/stderr。");
         await updateRuntimeValidationWorkflowBoard({
           runtime: options.runtime,
@@ -2119,7 +2388,7 @@ async function completeAfterGenerateValidation(options: {
               sessionId: options.runtime.sessionId,
               outputDirectory: options.runtime.outputDirectory,
               runtimeStatus: {
-                phase: "runtime_validation",
+                phase: "validation",
                 effort: undefined,
               },
               runtimeInteraction: {
@@ -2154,7 +2423,7 @@ async function completeAfterGenerateValidation(options: {
             narrative: "运行验证阶段已通过。",
             lifecycle: "verified",
           });
-          await markWorkflowComplete(options.runtime, ["plan", "generate", "runtime_validation"]);
+          await markWorkflowComplete(options.runtime, ["plan", "generate", "validation"]);
           return;
         }
 
@@ -2168,6 +2437,8 @@ async function completeAfterGenerateValidation(options: {
           narrative: "运行验证阶段失败，准备调用生成修复。",
           lifecycle: "validating",
         });
+        await closeRuntimeInteractionValidationSession(runtimeInteractionSession);
+        await appendWorkflowLog("[host] 已停止失败的运行验证 dev server，修复后将重新启动。");
       }
 
       const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "生成修复阶段");
@@ -2175,7 +2446,7 @@ async function completeAfterGenerateValidation(options: {
         throw new Error(`Runtime interaction validation failed: ${retryReasons.join(" | ")}`);
       }
 
-      await updateWorkflowState(options.runtime.deepagentsConfigPath, "runtime_validation", ["plan", "generate"]);
+      await updateWorkflowState(options.runtime.deepagentsConfigPath, "validation", ["plan", "generate"]);
       await appendRetryNote(
         options.runtime.deepagentsErrorLogPath,
         existingRepairAttempts + 1,
@@ -2241,6 +2512,7 @@ async function continueGenerateFlow(options: {
   validator: GeneratedAppValidator;
   approvedPlan: PlanSpec;
   initialRetryReasons: string[];
+  skipValidation?: boolean;
 }): Promise<void> {
   let generationRetryReasons = [...options.initialRetryReasons];
   const maxGenerationRepairs = options.runtime.maxGenerateRetries ?? 0;
@@ -2293,6 +2565,7 @@ async function continueGenerateFlow(options: {
         generator: options.generator,
         validator: options.validator,
         approvedPlan: options.approvedPlan,
+        ...(options.skipValidation ? { skipValidation: true } : {}),
       });
       return;
     }
@@ -2360,6 +2633,7 @@ async function continueGenerateFlow(options: {
         generator: options.generator,
         validator: options.validator,
         approvedPlan: options.approvedPlan,
+        ...(options.skipValidation ? { skipValidation: true } : {}),
       });
       return;
     }
@@ -2380,6 +2654,7 @@ async function continuePlanRepairFlow(options: {
   generator: TextGenerator;
   validator: GeneratedAppValidator;
   initialRetryReasons: string[];
+  skipValidation?: boolean;
 }): Promise<void> {
   let approvedPlan: PlanSpec | null = null;
   let planRetryReasons = [...options.initialRetryReasons];
@@ -2442,6 +2717,7 @@ async function continuePlanRepairFlow(options: {
     validator: options.validator,
     approvedPlan,
     initialRetryReasons: [],
+    ...(options.skipValidation ? { skipValidation: true } : {}),
   });
 }
 
@@ -2450,6 +2726,7 @@ export async function validateSessionPhase(options: {
   phase?: ValidationPhase;
   cwd?: string;
   stdoutMode?: StdoutMode;
+  skipValidation?: boolean;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
 }): Promise<SessionValidationResult> {
@@ -2477,6 +2754,7 @@ export async function validateSessionPhase(options: {
             generator,
             validator,
             initialRetryReasons: validation.reasons,
+            ...(options.skipValidation ? { skipValidation: true } : {}),
           });
         } finally {
           await closeWorkflowBoard();
@@ -2558,6 +2836,7 @@ export async function validateSessionPhase(options: {
           validator,
           approvedPlan: planValidation.planSpec,
           initialRetryReasons: reasons,
+          ...(options.skipValidation ? { skipValidation: true } : {}),
         });
       } finally {
         await closeWorkflowBoard();
@@ -2590,6 +2869,7 @@ export async function validateSessionPhase(options: {
           generator,
           validator,
           approvedPlan: planValidation.planSpec,
+          ...(options.skipValidation ? { skipValidation: true } : {}),
         });
       } finally {
         await closeWorkflowBoard();
@@ -2646,6 +2926,7 @@ export async function resumeSession(options: {
   sessionId: string;
   cwd?: string;
   stdoutMode?: StdoutMode;
+  skipValidation?: boolean;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
 }): Promise<SessionValidationResult> {
@@ -2678,6 +2959,7 @@ export async function resumeSession(options: {
             generator,
             validator,
             initialRetryReasons: validation.reasons,
+            ...(options.skipValidation ? { skipValidation: true } : {}),
           });
         } finally {
           await closeWorkflowBoard();
@@ -2698,6 +2980,7 @@ export async function resumeSession(options: {
           validator,
           approvedPlan: validation.planSpec,
           initialRetryReasons: [],
+          ...(options.skipValidation ? { skipValidation: true } : {}),
         });
       } finally {
         await closeWorkflowBoard();
@@ -2714,6 +2997,7 @@ export async function resumeSession(options: {
       phase: "generate",
       ...(options.cwd ? { cwd: options.cwd } : {}),
       ...(options.stdoutMode ? { stdoutMode: options.stdoutMode } : {}),
+      ...(options.skipValidation ? { skipValidation: true } : {}),
       ...(options.generator ? { generator: options.generator } : {}),
       ...(options.validator ? { validator: options.validator } : {}),
     });
@@ -2743,7 +3027,7 @@ async function resolveValidationPhase(
   if (
     persistedPhase === "generate" ||
     persistedPhase === "generate_repair" ||
-    persistedPhase === "runtime_validation" ||
+    persistedPhase === "validation" ||
     persistedPhase === "complete"
   ) {
     return "generate";
@@ -2780,11 +3064,14 @@ async function readPersistedWorkflowPhase(configPath: string): Promise<WorkflowP
       };
     };
     const phase = parsed.workflow?.phase;
+    if (phase === "runtime_validation") {
+      return "validation";
+    }
     return phase === "plan" ||
       phase === "plan_repair" ||
       phase === "generate" ||
       phase === "generate_repair" ||
-      phase === "runtime_validation" ||
+      phase === "validation" ||
       phase === "complete"
       ? phase
       : null;
@@ -2858,6 +3145,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
     const validator =
       options.validator ??
       (options.generator ? new PassthroughGeneratedAppValidator() : new ShellGeneratedAppValidator());
+    let localReferences: LocalReference[] = [];
     await copyStarterScaffold(template, workspace.outputDirectory);
 
     await writeDeepagentsConfig(workspace, {
@@ -2875,6 +3163,8 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         analysis: ".deepagents/prd-analysis.md",
         generatedSpec: ".deepagents/generated-spec.md",
         planSpec: ".deepagents/plan-spec.json",
+        interactionContract: ".deepagents/interaction-contract.json",
+        referenceManifest: ".deepagents/references/reference-manifest.json",
         planValidation: ".deepagents/plan-validation.json",
         generationValidation: ".deepagents/generation-validation.json",
         runtimeValidationLog: ".deepagents/runtime-validation.log",
@@ -2899,6 +3189,9 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       deepagentsErrorLogPath: workspace.deepagentsErrorLogPath,
       deepagentsRuntimeValidationLogPath: workspace.deepagentsRuntimeValidationLogPath,
       deepagentsRuntimeInteractionValidationPath: workspace.deepagentsRuntimeInteractionValidationPath,
+      deepagentsInteractionContractPath: workspace.deepagentsInteractionContractPath,
+      deepagentsReferenceManifestPath: workspace.deepagentsReferenceManifestPath,
+      localReferences,
       deepagentsConfigPath: workspace.deepagentsConfigPath,
       deepagentsPlanPromptSnapshotPath: workspace.deepagentsPlanPromptSnapshotPath,
       deepagentsPlanRepairPromptSnapshotPath: workspace.deepagentsPlanRepairPromptSnapshotPath,
@@ -2929,6 +3222,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
     const maxPlanRepairs = template.repairRetries.plan;
     const maxGenerationRepairs = template.repairRetries.generate;
 
+    localReferences = await resolveExternalReferences(createRuntime(), sourceMarkdown);
     await materializeSessionPromptSnapshots(createRuntime());
 
     let approvedPlan: PlanSpec | null = null;
@@ -3147,6 +3441,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       generator,
       validator,
       approvedPlan,
+      ...(options.skipValidation ? { skipValidation: true } : {}),
     });
 
     const outputDirectory = workspace.outputDirectory;

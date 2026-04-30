@@ -67,6 +67,9 @@ export type RuntimeInteractionValidationArtifact = {
   proxyUrl?: string;
   validationUrl?: string;
   manualCompleted?: boolean;
+  completionMode?: "manual_override" | "coverage_proven";
+  coverageSatisfied: boolean;
+  criticalUncoveredTargets: string[];
   implementationRequest?: RuntimeInteractionImplementationRequest;
   devServerUrl?: string;
   browserOpenAttempted?: boolean;
@@ -705,8 +708,21 @@ export function matchRuntimeInteractionTarget(
   return null;
 }
 
-function statusCountsForCoverage(status?: number): boolean {
-  return status !== undefined && status !== 404 && status < 500;
+function isApiAuthorizationFailure(
+  target: RuntimeInteractionTarget | null,
+  status: number | undefined,
+  pathname?: string,
+): boolean {
+  const isApiRequest = target?.kind === "api" ||
+    (pathname !== undefined && normalizeRoutePath(pathname).startsWith("/api/"));
+  return isApiRequest && (status === 401 || status === 403);
+}
+
+function statusCountsForCoverage(
+  status: number | undefined,
+  target: RuntimeInteractionTarget | null,
+): boolean {
+  return status !== undefined && status !== 404 && status < 500 && !isApiAuthorizationFailure(target, status);
 }
 
 export class RuntimeInteractionCoverageTracker {
@@ -722,7 +738,7 @@ export class RuntimeInteractionCoverageTracker {
     const rawPath = input.path;
     const pathname = normalizeRoutePath(input.path);
     const target = matchRuntimeInteractionTarget(input.method, pathname, this.targets);
-    const counted = Boolean(target && statusCountsForCoverage(input.status));
+    const counted = Boolean(target && statusCountsForCoverage(input.status, target));
     if (target && counted) {
       this.coveredTargetIds.add(target.id);
     }
@@ -795,6 +811,18 @@ export class RuntimeInteractionCoverageTracker {
       ].filter(Boolean).join(" ");
     }
 
+    if (isApiAuthorizationFailure(target, record.status, record.path)) {
+      return [
+        `API 权限错误 ${record.status}：${record.method} ${record.rawPath ?? record.path}`,
+        record.targetLabel ? `匹配目标：${record.targetLabel}。` : "",
+        "这通常表示 API key、鉴权头、环境变量或上游权限范围配置不正确，不能算作交互验证通过。",
+        record.responseBodySummary ? `响应体摘要：${record.responseBodySummary}` : "",
+        record.devServerOutputContext && record.devServerOutputContext.length > 0
+          ? `相邻 stdout/stderr：${record.devServerOutputContext.join(" | ")}`
+          : "",
+      ].filter(Boolean).join(" ");
+    }
+
     if (record.status !== undefined && record.status >= 500) {
       return [
         `请求返回 ${record.status}：${record.method} ${record.rawPath ?? record.path}`,
@@ -828,15 +856,19 @@ function buildRuntimeInteractionArtifact(options: {
   failureChain?: RuntimeInteractionFailureChain;
 }): RuntimeInteractionValidationArtifact {
   const artifact: RuntimeInteractionValidationArtifact = {
+    coverage: options.tracker.getSummary(),
+    recentRequests: options.tracker.getRecentRequests(),
     valid: options.valid,
     reasons: options.reasons,
     startedAt: options.startedAt,
     coverageThreshold: options.config.coverageThreshold,
     idleTimeoutMs: options.config.idleTimeoutMs,
     readyTimeoutMs: options.config.readyTimeoutMs,
-    coverage: options.tracker.getSummary(),
-    recentRequests: options.tracker.getRecentRequests(),
+    coverageSatisfied: false,
+    criticalUncoveredTargets: [],
   };
+  artifact.coverageSatisfied = artifact.coverage.ratio >= options.config.coverageThreshold;
+  artifact.criticalUncoveredTargets = artifact.coverage.uncoveredTargets;
 
   if (options.proxyUrl) {
     artifact.proxyUrl = options.proxyUrl;
@@ -846,6 +878,9 @@ function buildRuntimeInteractionArtifact(options: {
   }
   if (options.manualCompleted) {
     artifact.manualCompleted = true;
+    artifact.completionMode = "manual_override";
+  } else if (options.valid && artifact.coverageSatisfied) {
+    artifact.completionMode = "coverage_proven";
   }
   if (options.implementationRequest) {
     artifact.implementationRequest = options.implementationRequest;
@@ -937,6 +972,7 @@ function buildProxyRequestHeaders(
     devPort: number;
     proxyUrl: string;
     devServerUrl: string;
+    preserveConnectionHeader?: boolean;
   },
 ): IncomingHttpHeaders {
   const headers: IncomingHttpHeaders = {
@@ -947,7 +983,11 @@ function buildProxyRequestHeaders(
   };
 
   delete headers["accept-encoding"];
-  delete headers.connection;
+  if (!options.preserveConnectionHeader) {
+    delete headers.connection;
+  } else if (!headers.connection && headers.upgrade) {
+    headers.connection = "Upgrade";
+  }
   delete headers["proxy-connection"];
 
   const rewrittenOrigin = rewriteForwardedUrlHeader(
@@ -1168,6 +1208,7 @@ function writeUpgradeRequest(
     devPort,
     proxyUrl,
     devServerUrl,
+    preserveConnectionHeader: true,
   });
   const lines = [`${request.method ?? "GET"} ${request.url ?? "/"} HTTP/${request.httpVersion}`];
   for (const [key, value] of Object.entries(headers)) {
@@ -1845,7 +1886,7 @@ export async function runInteractiveRuntimeValidation(options: {
           steps: [{
             name: "interactive runtime validation",
             ok: true,
-            detail: `运行覆盖率 ${coverage.covered}/${coverage.total} 已达到 ${Math.round(config.coverageThreshold * 100)}%，代理 ${proxyUrl ?? devServerUrl} 已稳定 ${Math.round(idleForMs / 1000)}s，未检测到 HTTP 5xx、代理错误或 dev server 错误输出。`,
+            detail: `运行覆盖率 ${coverage.covered}/${coverage.total} 已达到 ${Math.round(config.coverageThreshold * 100)}%，代理 ${proxyUrl ?? devServerUrl} 已稳定 ${Math.round(idleForMs / 1000)}s，未检测到 API 401/403、HTTP 5xx、代理错误或 dev server 错误输出。`,
           }],
           artifact,
         };

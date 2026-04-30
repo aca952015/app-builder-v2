@@ -102,12 +102,21 @@ function buildPlanSpec(): PlanSpec {
   };
 }
 
+async function writeEmptyInteractionContract(runtime: TextGeneratorRuntime): Promise<void> {
+  await writeFile(
+    runtime.deepagentsInteractionContractPath,
+    `${JSON.stringify({ flows: [], internalOperations: [], externalOperations: [] }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 class CliTestGenerator implements TextGenerator {
   async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
     const planSpec = buildPlanSpec();
     await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划阶段成功。",
@@ -115,6 +124,7 @@ class CliTestGenerator implements TextGenerator {
         ".deepagents/prd-analysis.md",
         ".deepagents/generated-spec.md",
         ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -309,6 +319,7 @@ class CliPlanRepairingGenerator extends CliRepairingGenerator {
     await writeFile(runtime.deepagentsAnalysisPath, "# 修复后的分析稿\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# 修复后的详细 Spec\n", "utf8");
     await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
 
     return {
       summary: "计划修复阶段成功。",
@@ -316,6 +327,7 @@ class CliPlanRepairingGenerator extends CliRepairingGenerator {
         ".deepagents/prd-analysis.md",
         ".deepagents/generated-spec.md",
         ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -377,7 +389,40 @@ async function writeCliMiniAppTemplate(root: string): Promise<void> {
   );
 }
 
-test("runCli validate can validate an existing generate session by session id", async () => {
+test("runCli generate accepts --skip-validation", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-skip-validation-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    await writeCliMiniAppTemplate(tempRoot);
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+
+    await runCli(
+      ["generate", specPath, "--skip-validation", "--stdout", "log"],
+      {
+        generator: new CliTestGenerator(),
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), /- command: generate/);
+    assert.match(stdoutLines.join("\n"), /- skipValidation: true/);
+    assert.match(stdoutLines.join("\n"), /Generated Field Ops Planner/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runCli validate can validate an existing validation session by session id", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-"));
   const previousCwd = process.cwd();
   const stdoutLines: string[] = [];
@@ -400,8 +445,8 @@ test("runCli validate can validate an existing generate session by session id", 
       };
     };
     persistedConfig.workflow = {
-      phase: "generate",
-      completedPhases: ["plan"],
+      phase: "validation",
+      completedPhases: ["plan", "generate"],
     };
     await writeFile(configPath, `${JSON.stringify(persistedConfig, null, 2)}\n`, "utf8");
 
@@ -654,13 +699,14 @@ test("runCli prints generate execution parameters before running", async () => {
     );
 
     assert.equal(stderrLines.length, 0);
-    assert.deepEqual(stdoutLines.slice(0, 9), [
+    assert.deepEqual(stdoutLines.slice(0, 10), [
       "CLI execution parameters:",
       "- command: generate",
       `- specPath: ${specPath}`,
       "- appName: Ops Console",
       "- template: mini-app",
       "- force: true",
+      "- skipValidation: false",
       "- model: openai:gpt-4.1-mini",
       "- stdout: log",
       `- cwd: ${tempRoot}`,

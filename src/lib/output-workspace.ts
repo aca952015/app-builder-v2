@@ -41,6 +41,8 @@ export async function prepareOutputWorkspace(options: {
   const deepagentsDirectory = path.join(outputDirectory, ".deepagents");
   await fs.mkdir(deepagentsDirectory, { recursive: true });
   const deepagentsAgentsPath = path.join(deepagentsDirectory, "AGENTS.md");
+  const deepagentsReferencesDirectory = path.join(deepagentsDirectory, "references");
+  await fs.mkdir(deepagentsReferencesDirectory, { recursive: true });
   await fs.writeFile(deepagentsAgentsPath, `${buildSessionPolicyDocument()}\n`, "utf8");
 
   return {
@@ -52,6 +54,8 @@ export async function prepareOutputWorkspace(options: {
     deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
     deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
     deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+    deepagentsInteractionContractPath: path.join(deepagentsDirectory, "interaction-contract.json"),
+    deepagentsReferenceManifestPath: path.join(deepagentsReferencesDirectory, "reference-manifest.json"),
     deepagentsConfigPath: path.join(deepagentsDirectory, "config.json"),
     deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
     deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),

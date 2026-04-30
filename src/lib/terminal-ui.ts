@@ -42,6 +42,9 @@ export type TodoBoardState = {
     proxyUrl?: string;
     validationUrl?: string;
     manualCompleted?: boolean;
+    completionMode?: "manual_override" | "coverage_proven";
+    coverageSatisfied?: boolean;
+    criticalUncoveredTargets?: string[];
     implementationRequest?: string;
     devServerUrl?: string;
     browserOpenAttempted?: boolean;
@@ -548,7 +551,17 @@ function buildRuntimeInteractionLines(state: TodoBoardState): string[] {
     lines.push(`  代理 URL：${interaction.proxyUrl}`);
   }
   if (interaction.manualCompleted) {
-    lines.push("  人工确认：已完成");
+    lines.push(
+      interaction.completionMode === "manual_override" && interaction.coverageSatisfied === false
+        ? "  人工确认：已完成（未证明全部覆盖）"
+        : "  人工确认：已完成",
+    );
+  }
+  if (interaction.completionMode === "coverage_proven") {
+    lines.push("  完成方式：覆盖率证明通过");
+  }
+  if (interaction.criticalUncoveredTargets && interaction.criticalUncoveredTargets.length > 0) {
+    lines.push(`  关键未覆盖：${interaction.criticalUncoveredTargets.slice(0, 4).join(", ")}`);
   }
   if (interaction.implementationRequest) {
     lines.push(`  用户要求：${interaction.implementationRequest}`);
@@ -839,6 +852,7 @@ export function createArtifactItemsForStage(stage: WorkflowStage, status: Artifa
     { label: ".deepagents/prd-analysis.md", status: stage === "计划阶段" ? status : "verified" },
     { label: ".deepagents/generated-spec.md", status: stage === "计划阶段" ? status : "verified" },
     { label: ".deepagents/plan-spec.json", status: stage === "计划阶段" ? status : "verified" },
+    { label: ".deepagents/interaction-contract.json", status: stage === "计划阶段" ? status : "verified" },
     { label: ".deepagents/plan-validation.json", status: stage === "计划阶段" ? status : "verified" },
   ];
 

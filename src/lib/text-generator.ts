@@ -183,7 +183,7 @@ export function toVirtualWorkspacePath(outputDirectory: string, targetPath: stri
 }
 
 export function buildPlanSpecHardConstraints(
-  runtime: Pick<TextGeneratorRuntime, "outputDirectory" | "deepagentsPlanSpecPath">,
+  runtime: Pick<TextGeneratorRuntime, "outputDirectory" | "deepagentsPlanSpecPath" | "deepagentsInteractionContractPath" | "deepagentsReferenceManifestPath">,
 ): Record<string, unknown> {
   return {
     planSpecSchemaValidation: {
@@ -198,6 +198,19 @@ export function buildPlanSpecHardConstraints(
         "artifacts.planSpec 必须通过这里提供的 schema 校验后，才允许结束当前阶段并返回结构化响应。",
         "可选字符串字段如果没有值，必须省略，不能写成空字符串。",
         "必填字符串字段必须提供非空字符串。",
+      ],
+    },
+    interactionContractValidation: {
+      artifactKey: "artifacts.interactionContract",
+      artifactPath: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsInteractionContractPath),
+      blocking: true,
+      required: true,
+      mustValidateBeforeResponse: true,
+      rules: [
+        "artifacts.interactionContract 必须是合法 JSON 对象。",
+        "必须覆盖关键用户流程的触发控件、fallback 触发、loading/empty/error 状态。",
+        "如果包含外部 API 或第三方服务，必须写明 endpoint path、认证来源、参数格式/顺序、响应字段和 reference provenance。",
+        "如果没有关键交互或外部操作，也必须写入空数组结构，不能省略该 artifact。",
       ],
     },
   };
@@ -238,11 +251,14 @@ export function buildPlanProjectPayload(
       analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
       generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
       planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+      interactionContract: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsInteractionContractPath),
       planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+      referenceManifest: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsReferenceManifestPath),
       generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
       runtimeInteractionValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeInteractionValidationPath),
       errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
     },
+    localReferences: runtime.localReferences ?? [],
     planSpecSchema: z.toJSONSchema(planSpecSchema),
     hardConstraints: buildPlanSpecHardConstraints(runtime),
   };
@@ -271,9 +287,12 @@ export function buildPlanRepairPayload(runtime: TextGeneratorRuntime): Record<st
       analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
       generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
       planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+      interactionContract: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsInteractionContractPath),
       planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+      referenceManifest: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsReferenceManifestPath),
       errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
     },
+    localReferences: runtime.localReferences ?? [],
     planSpecSchema: z.toJSONSchema(planSpecSchema),
     hardConstraints: buildPlanSpecHardConstraints(runtime),
   };
@@ -1753,6 +1772,8 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
             generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
             planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+            interactionContract: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsInteractionContractPath),
+            referenceManifest: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsReferenceManifestPath),
             generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
             runtimeValidationLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeValidationLogPath),
             runtimeInteractionValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeInteractionValidationPath),
@@ -1801,6 +1822,8 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
             generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
             planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+            interactionContract: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsInteractionContractPath),
+            referenceManifest: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsReferenceManifestPath),
             generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
             runtimeValidationLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeValidationLogPath),
             runtimeInteractionValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeInteractionValidationPath),

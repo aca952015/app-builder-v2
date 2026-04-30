@@ -16,8 +16,16 @@
 - API 必须严格落到 `planSpec.apis[*].path`
 - 如果 `planSpec` 没有明确要求，不要擅自增加数据库、复杂鉴权或后台壳层
 - `planSpec.references` 是生成阶段的参考资料集合，用于理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构
+- 当 `planSpec.references[*].localPath` 存在时，必须先读取该本地文件，再实现外部 API route；endpoint、认证、参数顺序和响应字段以本地资料为准，不要凭记忆猜测
 - 你需要自行判断哪些 reference 与当前要实现的页面/API 相关；不要要求 reference 显式绑定到某个 API，也不要因为某个 reference 未被使用就额外生成无关功能
 - `references` 不是宿主强制验收项；强制实现范围仍以 `planSpec.resources`、`planSpec.pages`、`planSpec.apis`、`planSpec.environmentVariables` 和 `acceptanceChecks` 为准
+- 必须读取 `artifacts.interactionContract`；它记录关键用户动作、页面到 API 的触发映射和外部 API 操作细节
+- 对每个 `interactionContract.flows[*]`：
+  - 实现 `triggerControl` 对应的直接触发方式
+  - 实现 `fallbackTrigger`，避免候选列表、自动定位或外部服务失败后用户无路可走
+  - 实现可见的 loading、empty、error 状态，不要只写 `console.error`
+- 对每个 `interactionContract.internalOperations[*]`，页面控件必须真实触发对应 `planSpec.apis[*].path`
+- 对每个 `interactionContract.externalOperations[*]`，API route 必须按契约中的 endpointPath、authSource、parameterFormat、responseFields 和 reference provenance 实现；不要凭记忆猜 endpoint 或参数顺序
 
 ## 交付要求
 
@@ -30,6 +38,7 @@
   - 如果同名变量已存在但值不同，按 `planSpec.environmentVariables[*].value` 更新
   - 本轮写过 `.env.example` 时，`filesWritten` 必须包含 `.env.example`
 - 必须写出 `/app-builder-report.md`
+- `/app-builder-report.md` 必须包含 “Interaction contract trace” 章节，逐项列出 contract 中的关键 flow/internal operation/external operation 对应的文件、函数或 API route；未实现项必须写明原因
 
 ## 运行验证目标
 
