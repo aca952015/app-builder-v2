@@ -99,6 +99,65 @@ const REFERENCE_MARKDOWN_CONVERSION_SYSTEM_PROMPT = [
   "- `notes`: short notes about removed noise or extraction uncertainty.",
 ].join("\n");
 
+const PRD_ANALYSIS_SYSTEM_PROMPT = [
+  "# PRD Analysis Stage",
+  "",
+  "你是计划流水线中的 `protocol-analysis` 阶段代理。",
+  "",
+  "## Boundary",
+  "",
+  "- 只分析输入 PRD，并只写入 `artifacts.analysis` 指向的 `/.deepagents/prd-analysis.md`。",
+  "- 不要写入、读取或修补 `artifacts.generatedSpec`、`artifacts.planSpec`、`artifacts.interactionContract`。",
+  "- 不要等待外部参考资料转换完成；宿主会与本阶段并行下载/转换 references。",
+  "- 你可以把 `externalReferences` 中的 URL 和上下文作为依赖线索写入分析稿，但不要凭 URL 猜测 API 细节。",
+  "- 不要修改应用源码目录。",
+  "",
+  "## Analysis Contents",
+  "",
+  "- 产品目标、业务背景、用户角色和系统边界。",
+  "- 主要资源对象、页面/流程、状态和权限约束。",
+  "- 明确需求、缺口、默认假设、风险和待确认项。",
+  "- 外部 API/文档依赖只记录为待在 `prd-assembly` 阶段结合本地 Markdown 参考资料确认的事项。",
+  "",
+  "## Completion",
+  "",
+  "- 写入有效中文 Markdown 分析稿到 `artifacts.analysis`。",
+  "- 返回结构化结果：`summary`、`artifactsWritten`、`planSpecVersion: 1`、`notes`。",
+  "- `artifactsWritten` 应只列出 `.deepagents/prd-analysis.md`，除非你实际写入了其他允许的计划分析产物。",
+].join("\n");
+
+const PRD_ASSEMBLY_SYSTEM_PROMPT = [
+  "# PRD Assembly Stage",
+  "",
+  "你是计划流水线中的 `prd-assembly` 阶段代理。",
+  "",
+  "## Inputs",
+  "",
+  "- `prdAnalysisMarkdown`：上一阶段已经产出的 PRD 分析稿内容。",
+  "- `artifacts.analysis`：同一份分析稿的本地路径，必要时可读取确认。",
+  "- `externalReferences` / `localReferences` / `artifacts.referenceManifest`：宿主并行下载并转换后的参考资料结果。",
+  "",
+  "## Boundary",
+  "",
+  "- 必须基于 PRD 分析稿和已转换本地参考资料共同组装最终计划产物。",
+  "- 不要重做完整 PRD 分析；除非发现明显缺口，否则不要覆盖 `artifacts.analysis`。",
+  "- 如果存在 `retrievalStatus=downloaded` 的外部 API、第三方服务或文档 reference，必须先读取其 `localPath` 文件，再写入 `artifacts.generatedSpec`、`artifacts.planSpec`、`artifacts.interactionContract`。",
+  "- 不要凭模型记忆或远程 URL 猜测 API endpoint、认证、参数、响应字段、错误码或限制信息。",
+  "- 不要修改应用源码目录。",
+  "",
+  "## Required Artifacts",
+  "",
+  "1. `artifacts.generatedSpec`：面向人类审阅的详细中文实施 spec，包含 References 章节。",
+  "2. `artifacts.planSpec`：合法 JSON，必须满足输入的 `planSpecSchema`。",
+  "3. `artifacts.interactionContract`：关键交互、内部操作和外部操作契约。",
+  "",
+  "## Completion",
+  "",
+  "- 自检 `artifacts.planSpec` 满足 schema，且 reference localPath 已同步到 generatedSpec 与 planSpec.references。",
+  "- 返回结构化结果：`summary`、`artifactsWritten`、`planSpecVersion: 1`、`notes`。",
+  "- `artifactsWritten` 按实际落盘顺序列出本阶段写入的计划产物。",
+].join("\n");
+
 const SANDBOX_ALPHA_WARNING =
   "langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.";
 const DEEPAGENTS_IDLE_TIMEOUT_MS = 600_000;
@@ -153,6 +212,15 @@ async function loadSystemPrompt(
     fs.readFile(systemPromptPath, "utf8"),
     fs.readFile(runtime.deepagentsAgentsPath, "utf8").catch(() => buildSessionPolicyDocument()),
   ]);
+  return composeStageSystemPrompt(stage, templatePrompt, sessionPolicy);
+}
+
+async function composeInlineSystemPrompt(
+  runtime: Pick<TextGeneratorRuntime, "deepagentsAgentsPath">,
+  templatePrompt: string,
+  stage: SessionPolicyStage,
+): Promise<string> {
+  const sessionPolicy = await fs.readFile(runtime.deepagentsAgentsPath, "utf8").catch(() => buildSessionPolicyDocument());
   return composeStageSystemPrompt(stage, templatePrompt, sessionPolicy);
 }
 
@@ -211,6 +279,17 @@ async function pathExists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function readIfExists(filePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
   }
 }
 
@@ -1936,28 +2015,40 @@ export class DeepAgentsTextGenerator implements TextGenerator {
   private async runPhase<T>(
     runtime: TextGeneratorRuntime,
     options: {
-      promptPath: string;
+      promptPath?: string;
+      systemPrompt?: string;
       promptSnapshotPath: string;
       responseSchema: z.ZodType<T>;
       payload: Record<string, unknown>;
       stage: SessionPolicyStage;
+      runtimePhase?: RuntimeStatusPhase;
       timeoutLabel: string;
     },
   ): Promise<T> {
     const deepagents = await loadDeepagentsModule();
     const createDeepAgent = deepagents.createDeepAgent;
-    const phaseName =
-      options.stage === "plan"
+    const runtimePhase = options.runtimePhase ?? (
+      options.stage === "plan_analysis" || options.stage === "plan"
         ? "plan"
         : options.stage === "plan_repair"
           ? "planRepair"
           : options.stage === "generate"
             ? "generate"
-            : "generateRepair";
-    const modelRole = modelRoleForRuntimePhase(phaseName);
+            : "generateRepair"
+    );
+    const modelRole = modelRoleForRuntimePhase(runtimePhase);
     const modelConfig = modelRole ? (runtime.modelRoles?.[modelRole] ?? this.modelRoles[modelRole]) : this.modelRoles.plan;
-    const resolvedModel = await resolveModel(modelConfig, runtime.templatePhases[phaseName]?.effort);
-    const systemPrompt = await loadSystemPrompt(runtime, options.promptPath, options.stage);
+    const resolvedModel = await resolveModel(
+      modelConfig,
+      runtimePhase === "plan" || runtimePhase === "generate"
+        ? runtime.templatePhases[runtimePhase]?.effort
+        : runtimePhase === "planRepair" || runtimePhase === "plan_repair"
+          ? runtime.templatePhases.planRepair?.effort
+          : runtime.templatePhases.generateRepair?.effort,
+    );
+    const systemPrompt = options.systemPrompt !== undefined
+      ? await composeInlineSystemPrompt(runtime, options.systemPrompt, options.stage)
+      : await loadSystemPrompt(runtime, options.promptPath as string, options.stage);
     const skillsDirectory = path.join(runtime.templateDirectory, "skills");
 
     await fs.writeFile(options.promptSnapshotPath, systemPrompt, "utf8");
@@ -1991,7 +2082,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       agent as any,
       state,
       runtime,
-      phaseName,
+      runtimePhase,
       options.timeoutLabel,
       modelConfig.modelName,
     );
@@ -2053,6 +2144,56 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       }
       await appendWorkflowLog(`[host] 参考资料 Markdown 转换完成：${input.url}`);
       return structured;
+    } catch (error) {
+      await writeErrorLog(runtime.deepagentsErrorLogPath, error);
+      throw error;
+    }
+  }
+
+  async analyzePrd(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    try {
+      return await this.runPhase(runtime, {
+        systemPrompt: PRD_ANALYSIS_SYSTEM_PROMPT,
+        promptSnapshotPath: path.join(path.dirname(runtime.deepagentsPlanPromptSnapshotPath), "prd-analysis-system-prompt.md"),
+        responseSchema: planResultSchema,
+        stage: "plan_analysis",
+        runtimePhase: "plan",
+        timeoutLabel: "deepagents PRD analysis",
+        payload: {
+          ...buildPlanProjectPayload(spec, runtime),
+          planningPipeline: {
+            currentStage: "prd-analysis",
+            runsInParallelWith: "references.resolve_external",
+            nextStage: "prd-assembly",
+          },
+          localReferences: [],
+        },
+      });
+    } catch (error) {
+      await writeErrorLog(runtime.deepagentsErrorLogPath, error);
+      throw error;
+    }
+  }
+
+  async assemblePlanProject(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    try {
+      const prdAnalysisMarkdown = await readIfExists(runtime.deepagentsAnalysisPath) ?? "";
+      return await this.runPhase(runtime, {
+        systemPrompt: PRD_ASSEMBLY_SYSTEM_PROMPT,
+        promptSnapshotPath: path.join(path.dirname(runtime.deepagentsPlanPromptSnapshotPath), "prd-assembly-system-prompt.md"),
+        responseSchema: planResultSchema,
+        stage: "plan",
+        runtimePhase: "plan",
+        timeoutLabel: "deepagents PRD assembly",
+        payload: {
+          ...buildPlanProjectPayload(spec, runtime),
+          planningPipeline: {
+            currentStage: "prd-assembly",
+            completedStages: ["prd-analysis", "references.resolve_external"],
+          },
+          prdAnalysisMarkdown,
+        },
+      });
     } catch (error) {
       await writeErrorLog(runtime.deepagentsErrorLogPath, error);
       throw error;

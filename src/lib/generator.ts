@@ -50,6 +50,7 @@ import {
   GenerationValidationStep,
   GenerationReport,
   GenerationResult,
+  type NormalizedSpec,
   PlanResult,
   SessionValidationResult,
   type TemplatePhaseMap,
@@ -70,6 +71,7 @@ import {
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
+const DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY = 8;
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段";
 
 function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
@@ -116,6 +118,30 @@ function reserveReferencePath(
   }
   usedPaths.add(localPath);
   return localPath;
+}
+
+async function mapWithConcurrency<T, U>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<U>,
+): Promise<U[]> {
+  const results = new Array<U>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) {
+        return;
+      }
+
+      results[index] = await mapper(items[index] as T, index);
+    }
+  }));
+
+  return results;
 }
 
 function isLikelyHtmlDocument(input: ReferenceMarkdownConversionInput): boolean {
@@ -217,81 +243,75 @@ async function resolveExternalReferences(
   candidates: ExternalReferenceDraft[],
   generator: TextGenerator,
 ): Promise<LocalReference[]> {
-  const entries: LocalReference[] = [];
   const usedPaths = new Set<string>();
   const externalDirectory = path.join(runtime.deepagentsDirectory, "references", "external");
   await fs.mkdir(externalDirectory, { recursive: true });
 
-  for (const candidate of candidates) {
-    const retrievedAt = new Date().toISOString();
-    try {
-      const response = await fetch(candidate.url, {
-        headers: { "user-agent": "app-builder-v2-reference-resolver/1.0" },
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+  const reservations = candidates.map((candidate) => {
+    const baseSlug = slugifyReferenceUrl(candidate.url);
+    return {
+      rawHtmlPath: reserveReferencePath(externalDirectory, baseSlug, "html", usedPaths),
+      markdownPath: reserveReferencePath(externalDirectory, baseSlug, "md", usedPaths),
+    };
+  });
+
+  const entries = await mapWithConcurrency(
+    candidates,
+    DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY,
+    async (candidate, index): Promise<LocalReference> => {
+      const reservation = reservations[index];
+      if (!reservation) {
+        throw new Error(`Missing reference path reservation for ${candidate.url}`);
       }
 
-      const contentType = response.headers.get("content-type") ?? "text/plain";
-      const body = await response.text();
-      const baseSlug = slugifyReferenceUrl(candidate.url);
-      const rawExtension = extensionForContentType(contentType);
-      const localPath = reserveReferencePath(externalDirectory, baseSlug, rawExtension, usedPaths);
-      await fs.writeFile(localPath, body, "utf8");
-      entries.push({
-        url: candidate.url,
-        name: candidate.name,
-        type: candidate.type,
-        required: candidate.required,
-        retrievalStatus: "downloaded",
-        localPath: toReferenceVirtualPath(runtime.outputDirectory, localPath),
-        retrievedAt,
-        contentType,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      entries.push({
-        url: candidate.url,
-        name: candidate.name,
-        type: candidate.type,
-        required: candidate.required,
-        retrievalStatus: "failed",
-        retrievedAt,
-        error: message,
-      });
-    }
-  }
+      const retrievedAt = new Date().toISOString();
+      try {
+        const response = await fetch(candidate.url, {
+          headers: { "user-agent": "app-builder-v2-reference-resolver/1.0" },
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+        }
 
-  await writeReferenceManifest(runtime, entries);
+        const contentType = response.headers.get("content-type") ?? "text/plain";
+        const body = await response.text();
+        const rawExtension = extensionForContentType(contentType);
+        const rawPath = rawExtension === "html" ? reservation.rawHtmlPath : reservation.markdownPath;
+        await fs.writeFile(rawPath, body, "utf8");
 
-  for (const entry of entries) {
-    if (entry.retrievalStatus !== "downloaded" || !entry.localPath) {
-      continue;
-    }
+        const convertedMarkdown = await convertReferenceToMarkdown(generator, runtime, {
+          url: candidate.url,
+          name: candidate.name,
+          type: candidate.type,
+          contentType,
+          body,
+        });
+        await fs.writeFile(reservation.markdownPath, convertedMarkdown, "utf8");
 
-    const rawRelativePath = entry.localPath.replace(/^\/+/, "");
-    const rawPath = path.resolve(runtime.outputDirectory, rawRelativePath);
-    const rawExtension = path.extname(rawPath).toLowerCase() === ".html" ? "html" : "md";
-
-    try {
-      const body = await fs.readFile(rawPath, "utf8");
-      const convertedMarkdown = await convertReferenceToMarkdown(generator, runtime, {
-        url: entry.url,
-        name: entry.name,
-        type: entry.type,
-        contentType: entry.contentType ?? "text/plain",
-        body,
-      });
-      const convertedPath = rawExtension === "md"
-        ? rawPath
-        : reserveReferencePath(externalDirectory, slugifyReferenceUrl(entry.url), "md", usedPaths);
-      await fs.writeFile(convertedPath, convertedMarkdown, "utf8");
-      entry.localPath = toReferenceVirtualPath(runtime.outputDirectory, convertedPath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await appendWorkflowLog(`[host] 参考资料已下载，但 Markdown 转换落盘失败，保留原始文件：${entry.url}（${message}）`);
-    }
-  }
+        return {
+          url: candidate.url,
+          name: candidate.name,
+          type: candidate.type,
+          required: candidate.required,
+          retrievalStatus: "downloaded",
+          localPath: toReferenceVirtualPath(runtime.outputDirectory, reservation.markdownPath),
+          retrievedAt,
+          contentType,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          url: candidate.url,
+          name: candidate.name,
+          type: candidate.type,
+          required: candidate.required,
+          retrievalStatus: "failed",
+          retrievedAt,
+          error: message,
+        };
+      }
+    },
+  );
 
   await writeReferenceManifest(runtime, entries);
   return entries;
@@ -3355,6 +3375,12 @@ function defaultTemplateRepairRetries(): TemplateRepairRetries {
   };
 }
 
+function supportsParallelPrdAssembly(
+  generator: TextGenerator,
+): generator is TextGenerator & Required<Pick<TextGenerator, "analyzePrd" | "assemblePlanProject">> {
+  return typeof generator.analyzePrd === "function" && typeof generator.assemblePlanProject === "function";
+}
+
 export async function generateApplication(options: GenerateAppOptions): Promise<GenerationResult> {
   setWorkflowStdoutMode(options.stdoutMode);
   try {
@@ -3506,95 +3532,165 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       { name: "spec.extract_external_references", phase: "spec" },
       async () => extractExternalReferenceDrafts(parsed),
     );
-    await showPreparationWorkflowBoard({
-      sessionId: workspace.sessionId,
-      outputDirectory: workspace.outputDirectory,
-      activeStep: "references",
-      narrative: "正在本地化 PRD 分析阶段识别出的外部参考资料。",
-    });
-    localReferences = await measureRuntimeStep(
-      createRuntime(),
-      {
-        name: "references.resolve_external",
-        phase: "references",
-        metadata: { candidateCount: referenceCandidates.length },
-      },
-      async () => await resolveExternalReferences(createRuntime(), referenceCandidates, generator),
-    );
+    const useParallelPrdAssembly = supportsParallelPrdAssembly(generator);
+    let spec: NormalizedSpec;
 
-    const spec = await measureWorkflowStep(
-      workspace.deepagentsMetricsLogPath,
-      workspace.sessionId,
-      {
-        name: "spec.normalize",
-        phase: "spec",
-        metadata: {
-          appNameOverride: options.appNameOverride ?? null,
-          localReferenceCount: localReferences.length,
+    const preparePlanningWorkspace = async (appName: string): Promise<void> => {
+      await measureWorkflowStep(
+        workspace.deepagentsMetricsLogPath,
+        workspace.sessionId,
+        {
+          name: "workspace.copy_starter",
+          phase: "workspace",
+          metadata: { templateId: template.id },
         },
-      },
-      async () => normalizeSpec(parsed, sourceMarkdown, options.appNameOverride, localReferences),
-    );
-    await measureWorkflowStep(
-      workspace.deepagentsMetricsLogPath,
-      workspace.sessionId,
-      {
-        name: "workspace.copy_starter",
-        phase: "workspace",
-        metadata: { templateId: template.id },
-      },
-      async () => await copyStarterScaffold(template, workspace.outputDirectory),
-    );
+        async () => await copyStarterScaffold(template, workspace.outputDirectory),
+      );
 
-    await measureWorkflowStep(
-      workspace.deepagentsMetricsLogPath,
-      workspace.sessionId,
-      { name: "workspace.write_config", phase: "workspace" },
-      async () => await writeDeepagentsConfig(workspace, {
+      await measureWorkflowStep(
+        workspace.deepagentsMetricsLogPath,
+        workspace.sessionId,
+        { name: "workspace.write_config", phase: "workspace" },
+        async () => await writeDeepagentsConfig(workspace, {
+          sessionId: workspace.sessionId,
+          startedAt: new Date().toISOString(),
+          appName,
+          model: modelRoles.plan.modelName,
+          models: sanitizeModelRoleConfigs(modelRoles),
+          workflow: {
+            phase: "plan",
+            completedPhases: [],
+          },
+          artifacts: {
+            sourcePrd: ".deepagents/source-prd.md",
+            analysis: ".deepagents/prd-analysis.md",
+            generatedSpec: ".deepagents/generated-spec.md",
+            planSpec: ".deepagents/plan-spec.json",
+            interactionContract: ".deepagents/interaction-contract.json",
+            referenceManifest: ".deepagents/references/reference-manifest.json",
+            planValidation: ".deepagents/plan-validation.json",
+            generationValidation: ".deepagents/generation-validation.json",
+            runtimeValidationLog: ".deepagents/runtime-validation.log",
+            runtimeInteractionValidation: ".deepagents/runtime-interaction-validation.json",
+            metricsLog: ".deepagents/metrics.jsonl",
+            errorLog: ".deepagents/error.log",
+          },
+          prompts: {
+            plan: ".deepagents/plan-system-prompt.md",
+            planRepair: ".deepagents/plan-repair-system-prompt.md",
+            generate: ".deepagents/generate-system-prompt.md",
+            generateRepair: ".deepagents/generate-repair-system-prompt.md",
+          },
+          template: templateLock,
+        }),
+      );
+      await measureRuntimeStep(
+        createRuntime(),
+        { name: "workspace.materialize_prompt_snapshots", phase: "workspace" },
+        async () => await materializeSessionPromptSnapshots(createRuntime()),
+      );
+    };
+
+    if (useParallelPrdAssembly) {
+      spec = await measureWorkflowStep(
+        workspace.deepagentsMetricsLogPath,
+        workspace.sessionId,
+        {
+          name: "spec.normalize",
+          phase: "spec",
+          metadata: {
+            appNameOverride: options.appNameOverride ?? null,
+            localReferenceCount: 0,
+          },
+        },
+        async () => normalizeSpec(parsed, sourceMarkdown, options.appNameOverride, []),
+      );
+      await preparePlanningWorkspace(spec.appName);
+      await showPreparationWorkflowBoard({
         sessionId: workspace.sessionId,
-        startedAt: new Date().toISOString(),
-        appName: spec.appName,
-        model: modelRoles.plan.modelName,
-        models: sanitizeModelRoleConfigs(modelRoles),
-        workflow: {
+        outputDirectory: workspace.outputDirectory,
+        activeStep: "references",
+        narrative: "正在并行本地化 PRD 外部参考资料，并启动 PRD 分析阶段。",
+      });
+
+      const analysisRuntime = createRuntime({
+        planAttempt: 1,
+        retryReasons: [],
+      });
+      const referenceResolution = measureRuntimeStep(
+        createRuntime(),
+        {
+          name: "references.resolve_external",
+          phase: "references",
+          metadata: { candidateCount: referenceCandidates.length, parallelWith: "plan.prd_analysis" },
+        },
+        async () => await resolveExternalReferences(createRuntime(), referenceCandidates, generator),
+      );
+      const prdAnalysis = measureRuntimeStep(
+        analysisRuntime,
+        {
+          name: "plan.prd_analysis",
           phase: "plan",
-          completedPhases: [],
+          attempt: 1,
+          metadata: { parallelWith: "references.resolve_external" },
         },
-        artifacts: {
-          sourcePrd: ".deepagents/source-prd.md",
-          analysis: ".deepagents/prd-analysis.md",
-          generatedSpec: ".deepagents/generated-spec.md",
-          planSpec: ".deepagents/plan-spec.json",
-          interactionContract: ".deepagents/interaction-contract.json",
-          referenceManifest: ".deepagents/references/reference-manifest.json",
-          planValidation: ".deepagents/plan-validation.json",
-          generationValidation: ".deepagents/generation-validation.json",
-          runtimeValidationLog: ".deepagents/runtime-validation.log",
-          runtimeInteractionValidation: ".deepagents/runtime-interaction-validation.json",
-          metricsLog: ".deepagents/metrics.jsonl",
-          errorLog: ".deepagents/error.log",
+        async () => await generator.analyzePrd(spec, analysisRuntime),
+      );
+
+      const [resolvedReferences] = await Promise.all([referenceResolution, prdAnalysis]);
+      localReferences = resolvedReferences;
+      spec = await measureWorkflowStep(
+        workspace.deepagentsMetricsLogPath,
+        workspace.sessionId,
+        {
+          name: "spec.normalize_with_references",
+          phase: "spec",
+          metadata: {
+            appNameOverride: options.appNameOverride ?? null,
+            localReferenceCount: localReferences.length,
+          },
         },
-        prompts: {
-          plan: ".deepagents/plan-system-prompt.md",
-          planRepair: ".deepagents/plan-repair-system-prompt.md",
-          generate: ".deepagents/generate-system-prompt.md",
-          generateRepair: ".deepagents/generate-repair-system-prompt.md",
+        async () => normalizeSpec(parsed, sourceMarkdown, options.appNameOverride, localReferences),
+      );
+    } else {
+      await showPreparationWorkflowBoard({
+        sessionId: workspace.sessionId,
+        outputDirectory: workspace.outputDirectory,
+        activeStep: "references",
+        narrative: "正在本地化 PRD 分析阶段识别出的外部参考资料。",
+      });
+      localReferences = await measureRuntimeStep(
+        createRuntime(),
+        {
+          name: "references.resolve_external",
+          phase: "references",
+          metadata: { candidateCount: referenceCandidates.length },
         },
-        template: templateLock,
-      }),
-    );
-    await measureRuntimeStep(
-      createRuntime(),
-      { name: "workspace.materialize_prompt_snapshots", phase: "workspace" },
-      async () => await materializeSessionPromptSnapshots(createRuntime()),
-    );
+        async () => await resolveExternalReferences(createRuntime(), referenceCandidates, generator),
+      );
+
+      spec = await measureWorkflowStep(
+        workspace.deepagentsMetricsLogPath,
+        workspace.sessionId,
+        {
+          name: "spec.normalize",
+          phase: "spec",
+          metadata: {
+            appNameOverride: options.appNameOverride ?? null,
+            localReferenceCount: localReferences.length,
+          },
+        },
+        async () => normalizeSpec(parsed, sourceMarkdown, options.appNameOverride, localReferences),
+      );
+      await preparePlanningWorkspace(spec.appName);
+    }
+
     await showPreparationWorkflowBoard({
       sessionId: workspace.sessionId,
       outputDirectory: workspace.outputDirectory,
       activeStep: "model",
       narrative: "准备工作已完成，等待模型开始计划阶段。",
-    });
-    const maxPlanRepairs = template.repairRetries.plan;
+    });    const maxPlanRepairs = template.repairRetries.plan;
     const maxGenerationRepairs = template.repairRetries.generate;
 
     let approvedPlan: PlanSpec | null = null;
@@ -3609,8 +3705,10 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       try {
         planResult = await measureRuntimeStep(
           initialRuntime,
-          { name: "plan.project", phase: "plan", attempt: 1 },
-          async () => await generator.planProject(spec, initialRuntime),
+          { name: useParallelPrdAssembly ? "plan.prd_assembly" : "plan.project", phase: "plan", attempt: 1 },
+          async () => useParallelPrdAssembly
+            ? await generator.assemblePlanProject(spec, initialRuntime)
+            : await generator.planProject(spec, initialRuntime),
         );
       } catch (error) {
         const recovered = await synthesizeRecoveredPlanResult(initialRuntime, error);

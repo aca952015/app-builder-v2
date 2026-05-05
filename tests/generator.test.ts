@@ -1979,6 +1979,215 @@ class FailingReferenceConversionTextGenerator extends ReferenceAwareTextGenerato
   }
 }
 
+class MultiReferenceTextGenerator extends ReferenceAwareTextGenerator {
+  readonly conversionDelayMs: number;
+  readonly conversionFailures: Set<string>;
+  maxConcurrentConversions = 0;
+  private activeConversions = 0;
+
+  constructor(options: { conversionDelayMs?: number; conversionFailures?: string[] } = {}) {
+    super();
+    this.conversionDelayMs = options.conversionDelayMs ?? 0;
+    this.conversionFailures = new Set(options.conversionFailures ?? []);
+  }
+
+  override async planProject(spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    this.observedSpecExternalReferences = spec.externalReferences;
+    this.observedLocalReferences = runtime.localReferences;
+    const planSpec = buildPlanSpec();
+    const references = (runtime.localReferences ?? [])
+      .filter((reference) => reference.retrievalStatus === "downloaded" && reference.localPath)
+      .map((reference) => ({
+        name: reference.name,
+        type: reference.type,
+        url: reference.url,
+        description: `Local reference for ${reference.url}`,
+        usage: `Use ${reference.localPath} during generation.`,
+        localPath: reference.localPath,
+        retrievedAt: reference.retrievedAt,
+        contentType: reference.contentType,
+        retrievalStatus: reference.retrievalStatus,
+      }));
+    planSpec.references = references;
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# Multi Reference Analysis\n", "utf8");
+    await writeFile(
+      runtime.deepagentsDetailedSpecPath,
+      [
+        "# Multi Reference Spec",
+        "",
+        "## References",
+        ...references.map((reference) => `- ${reference.name}: ${reference.localPath}`),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "Multi-reference planner wrote local reference paths.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async convertReferenceToMarkdown(
+    input: ReferenceMarkdownConversionInput,
+    _runtime: TextGeneratorRuntime,
+  ): Promise<ReferenceMarkdownConversionResult> {
+    this.activeConversions += 1;
+    this.maxConcurrentConversions = Math.max(this.maxConcurrentConversions, this.activeConversions);
+
+    try {
+      if (this.conversionDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.conversionDelayMs));
+      }
+      if (this.conversionFailures.has(input.url)) {
+        throw new Error(`conversion failed for ${input.url}`);
+      }
+
+      return {
+        markdown: `# Converted reference\n\n${input.url}\n\n${input.body}`,
+        notes: [],
+      };
+    } finally {
+      this.activeConversions -= 1;
+    }
+  }
+}
+
+class SplitPlanReferenceTextGenerator implements TextGenerator {
+  analysisStartedAt = 0;
+  analysisCompletedAt = 0;
+  conversionStartedAt = 0;
+  conversionCompletedAt = 0;
+  assemblyStartedAt = 0;
+  assemblyObservedLocalReferences: TextGeneratorRuntime["localReferences"];
+  assemblyObservedAnalysis = "";
+  planProjectCalled = false;
+
+  async analyzePrd(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    this.analysisStartedAt = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await writeFile(
+      runtime.deepagentsAnalysisPath,
+      [
+        "# Parallel PRD Analysis",
+        "",
+        `App: ${spec.appName}`,
+        "External API details will be finalized during PRD assembly after Markdown conversion joins.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    this.analysisCompletedAt = Date.now();
+
+    return {
+      summary: "Wrote PRD analysis while references converted.",
+      artifactsWritten: [".deepagents/prd-analysis.md"],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async assemblePlanProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    this.assemblyStartedAt = Date.now();
+    this.assemblyObservedLocalReferences = runtime.localReferences;
+    this.assemblyObservedAnalysis = await readFile(runtime.deepagentsAnalysisPath, "utf8");
+    const planSpec = buildPlanSpec();
+    const references = (runtime.localReferences ?? [])
+      .filter((reference) => reference.retrievalStatus === "downloaded" && reference.localPath)
+      .map((reference) => ({
+        name: reference.name,
+        type: reference.type,
+        url: reference.url,
+        description: `Converted reference for ${reference.url}`,
+        usage: `Use ${reference.localPath} for API details.`,
+        localPath: reference.localPath,
+        retrievedAt: reference.retrievedAt,
+        contentType: reference.contentType,
+        retrievalStatus: reference.retrievalStatus,
+      }));
+    planSpec.references = references;
+
+    await writeFile(
+      runtime.deepagentsDetailedSpecPath,
+      [
+        "# Assembled Spec",
+        "",
+        this.assemblyObservedAnalysis,
+        "## References",
+        ...references.map((reference) => `- ${reference.url}: ${reference.localPath}`),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "Assembled final plan from PRD analysis and converted references.",
+      artifactsWritten: [
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async convertReferenceToMarkdown(
+    input: ReferenceMarkdownConversionInput,
+    _runtime: TextGeneratorRuntime,
+  ): Promise<ReferenceMarkdownConversionResult> {
+    this.conversionStartedAt = this.conversionStartedAt || Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    this.conversionCompletedAt = Date.now();
+
+    return {
+      markdown: `# Converted\n\n${input.url}\n\nEndpoint: GET /weather`,
+      notes: [],
+    };
+  }
+
+  async planProject(): Promise<PlanResult> {
+    this.planProjectCalled = true;
+    throw new Error("planProject should not be called when split PRD analysis/assembly is available");
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    throw new Error("planRepairProject should not be called in SplitPlanReferenceTextGenerator");
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject> {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Split Plan Reference Report\n",
+    });
+    return {
+      summary: "Generated from split plan.",
+      filesWritten: ["app-builder-report.md"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<GeneratedProject> {
+    throw new Error("generateRepairProject should not be called in SplitPlanReferenceTextGenerator");
+  }
+}
+
 class BrokenReferenceTextGenerator extends ReferenceAwareTextGenerator {
   async planRepairProject(runtime: TextGeneratorRuntime) {
     return this.planProject({} as NormalizedSpec, runtime);
@@ -3475,6 +3684,218 @@ test("generateApplication falls back to stripped Markdown when custom generator 
     assert.match(contents, /location,key/);
     assert.doesNotMatch(contents, /<html|<body|<code/i);
     assert.doesNotMatch(contents, /window\.noise|Docs menu|Copyright/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication converts multiple external references concurrently with stable manifest order", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-concurrent-"));
+  const specPath = path.join(tempRoot, "weather-prd.md");
+  const originalFetch = globalThis.fetch;
+  const generator = new MultiReferenceTextGenerator({ conversionDelayMs: 30 });
+  const referenceUrls = [
+    "https://docs.example.com/weather/current",
+    "https://docs.example.com/weather/current?lang=en",
+    "https://docs.example.com/weather/hourly",
+    "https://docs.example.com/weather/daily",
+    "https://docs.example.com/weather/alerts",
+    "https://docs.example.com/weather/indices",
+    "https://docs.example.com/weather/grid",
+    "https://docs.example.com/weather/minutely",
+    "https://docs.example.com/weather/air-quality",
+    "https://docs.example.com/weather/geocode",
+  ];
+
+  try {
+    await writeFile(
+      specPath,
+      [
+        "# Weather Console",
+        "",
+        "Implement the app using these API docs:",
+        ...referenceUrls.map((url, index) => `- API docs ${index + 1}: ${url}`),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    globalThis.fetch = (async (input) => {
+      const url = typeof input === "string" || input instanceof URL ? input.toString() : input.url;
+      const index = referenceUrls.indexOf(url);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, referenceUrls.length - index) * 2));
+      return new Response(
+        `<html><body><h1>Reference ${index + 1}</h1><p>${url}</p></body></html>`,
+        { headers: { "content-type": "text/html; charset=utf-8" } },
+      );
+    }) as typeof fetch;
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      entries: Array<{ url: string; localPath?: string; retrievalStatus: string }>;
+    };
+    const localPaths = manifest.entries.map((entry) => entry.localPath);
+
+    assert.deepEqual(manifest.entries.map((entry) => entry.url), referenceUrls);
+    assert.deepEqual(manifest.entries.map((entry) => entry.retrievalStatus), referenceUrls.map(() => "downloaded"));
+    assert.equal(new Set(localPaths).size, referenceUrls.length);
+    assert.equal(localPaths[0], "/.deepagents/references/external/docs-example-com-weather-current.md");
+    assert.equal(localPaths[1], "/.deepagents/references/external/docs-example-com-weather-current-2.md");
+    assert.equal(generator.maxConcurrentConversions <= 8, true);
+    assert.equal(generator.maxConcurrentConversions > 1, true);
+    assert.deepEqual(generator.observedLocalReferences?.map((reference) => reference.localPath), localPaths);
+
+    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8")) as PlanSpec;
+    assert.deepEqual(planSpec.references?.map((reference) => reference.localPath), localPaths);
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents/references/external/docs-example-com-weather-current.html"), "utf8"),
+      /Reference 1/,
+    );
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents/references/external/docs-example-com-weather-current-2.html"), "utf8"),
+      /Reference 2/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication runs reference conversion in parallel with PRD analysis before assembly", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-split-plan-"));
+  const specPath = path.join(tempRoot, "weather-prd.md");
+  const originalFetch = globalThis.fetch;
+  const generator = new SplitPlanReferenceTextGenerator();
+  const referenceUrl = "https://docs.example.com/weather/assembly";
+
+  try {
+    await writeFile(
+      specPath,
+      [
+        "# Weather Console",
+        "",
+        `Use API docs at ${referenceUrl} to implement weather endpoint parameters.`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    globalThis.fetch = (async () => new Response(
+      "<html><body><h1>Weather API</h1><code>GET /weather</code></body></html>",
+      { headers: { "content-type": "text/html; charset=utf-8" } },
+    )) as typeof fetch;
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      entries: Array<{ url: string; localPath?: string; retrievalStatus: string }>;
+    };
+    const localPath = manifest.entries[0]?.localPath;
+    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8")) as PlanSpec;
+    const generatedSpec = await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8");
+
+    assert.equal(generator.planProjectCalled, false);
+    assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
+    assert.equal(manifest.entries[0]?.url, referenceUrl);
+    assert.ok(localPath);
+    assert.match(generator.assemblyObservedAnalysis, /Parallel PRD Analysis/);
+    assert.deepEqual(generator.assemblyObservedLocalReferences?.map((reference) => reference.localPath), [localPath]);
+    assert.equal(planSpec.references?.[0]?.localPath, localPath);
+    assert.match(generatedSpec, /Parallel PRD Analysis/);
+    assert.match(generatedSpec, new RegExp(localPath!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    assert.equal(generator.analysisStartedAt > 0, true);
+    assert.equal(generator.conversionStartedAt > 0, true);
+    assert.equal(generator.analysisCompletedAt <= generator.assemblyStartedAt, true);
+    assert.equal(generator.conversionCompletedAt <= generator.assemblyStartedAt, true);
+    assert.equal(generator.analysisStartedAt < generator.conversionCompletedAt, true);
+    assert.equal(generator.conversionStartedAt < generator.analysisCompletedAt, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication isolates reference download and conversion failures", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-mixed-failures-"));
+  const specPath = path.join(tempRoot, "weather-prd.md");
+  const originalFetch = globalThis.fetch;
+  const successUrl = "https://docs.example.com/weather/success";
+  const conversionFailureUrl = "https://docs.example.com/weather/conversion-fails";
+  const downloadFailureUrl = "https://example.invalid/broken";
+  const generator = new MultiReferenceTextGenerator({
+    conversionFailures: [conversionFailureUrl],
+  });
+
+  try {
+    await writeFile(
+      specPath,
+      [
+        "# Weather Console",
+        "",
+        `Use API docs at ${successUrl}.`,
+        `Use API docs at ${conversionFailureUrl}.`,
+        "",
+        "## Inspiration",
+        "",
+        `See ${downloadFailureUrl} for an optional idea.`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    globalThis.fetch = (async (input) => {
+      const url = typeof input === "string" || input instanceof URL ? input.toString() : input.url;
+      if (url === downloadFailureUrl) {
+        return new Response("missing", { status: 503, statusText: "Unavailable" });
+      }
+
+      return new Response(
+        `<html><body><h1>${url === successUrl ? "Success" : "Fallback"}</h1><code>GET /weather</code></body></html>`,
+        { headers: { "content-type": "text/html; charset=utf-8" } },
+      );
+    }) as typeof fetch;
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      entries: Array<{ url: string; localPath?: string; retrievalStatus: string; error?: string }>;
+    };
+
+    assert.deepEqual(manifest.entries.map((entry) => entry.url), [successUrl, conversionFailureUrl, downloadFailureUrl]);
+    assert.deepEqual(manifest.entries.map((entry) => entry.retrievalStatus), ["downloaded", "downloaded", "failed"]);
+    assert.match(manifest.entries[2]?.error ?? "", /HTTP 503 Unavailable/);
+    assert.ok(manifest.entries[0]?.localPath);
+    assert.ok(manifest.entries[1]?.localPath);
+    assert.equal(manifest.entries[2]?.localPath, undefined);
+
+    const successContents = await readFile(path.join(result.outputDirectory, manifest.entries[0]!.localPath!.slice(1)), "utf8");
+    const fallbackContents = await readFile(path.join(result.outputDirectory, manifest.entries[1]!.localPath!.slice(1)), "utf8");
+    assert.match(successContents, /Converted reference/);
+    assert.match(fallbackContents, /Fallback/);
+    assert.match(fallbackContents, /GET \/weather/);
+    assert.doesNotMatch(fallbackContents, /<html|<body|<code/i);
+    assert.deepEqual(
+      generator.observedLocalReferences?.map((reference) => reference.retrievalStatus),
+      ["downloaded", "downloaded", "failed"],
+    );
   } finally {
     globalThis.fetch = originalFetch;
     await rm(tempRoot, { recursive: true, force: true });

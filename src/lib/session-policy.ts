@@ -1,4 +1,4 @@
-export type SessionPolicyStage = "plan" | "plan_repair" | "generate" | "generate_repair";
+export type SessionPolicyStage = "plan_analysis" | "plan" | "plan_repair" | "generate" | "generate_repair";
 
 export const SESSION_POLICY_HEADER = "# Host Session Policy";
 
@@ -29,12 +29,13 @@ export function buildSessionPolicyDocument(): string {
     "## Plan Rules",
     "",
     "- The plan stages may only read inputs and write planning artifacts. They must not modify application source files.",
-    "- `artifacts.planSpec` must be legal JSON and satisfy the input `planSpecSchema` before the stage can finish.",
-    "- `hardConstraints.planSpecSchemaValidation` is a blocking constraint, not a suggestion.",
-    "- `artifacts.interactionContract` records critical user-action triggers, internal API mappings, and external operation details; keep it aligned with `artifacts.planSpec` and references.",
-    "- `hardConstraints.interactionContractValidation` is a blocking constraint, not a suggestion.",
-    "- If downloaded external references are present in `externalReferences`, `localReferences`, or `artifacts.referenceManifest`, read their `localPath` files before assembling `artifacts.generatedSpec`, `artifacts.planSpec`, or `artifacts.interactionContract`.",
-    "- `hardConstraints.referenceUsageValidation` is a blocking constraint, not a suggestion.",
+    "- The PRD analysis stage writes only `artifacts.analysis`; final generated spec, plan spec, and interaction contract assembly happens in the plan assembly stage.",
+    "- In plan assembly and plan repair stages, `artifacts.planSpec` must be legal JSON and satisfy the input `planSpecSchema` before the stage can finish.",
+    "- In plan assembly and plan repair stages, `hardConstraints.planSpecSchemaValidation` is a blocking constraint, not a suggestion.",
+    "- In plan assembly and plan repair stages, `artifacts.interactionContract` records critical user-action triggers, internal API mappings, and external operation details; keep it aligned with `artifacts.planSpec` and references.",
+    "- In plan assembly and plan repair stages, `hardConstraints.interactionContractValidation` is a blocking constraint, not a suggestion.",
+    "- In plan assembly and plan repair stages, if downloaded external references are present in `externalReferences`, `localReferences`, or `artifacts.referenceManifest`, read their `localPath` files before assembling `artifacts.generatedSpec`, `artifacts.planSpec`, or `artifacts.interactionContract`.",
+    "- In plan assembly and plan repair stages, `hardConstraints.referenceUsageValidation` is a blocking constraint, not a suggestion.",
     "- Optional string fields with no value must be omitted. Do not write empty strings.",
     "- Required string fields must be non-empty strings.",
     "- `acceptanceChecks.target` must follow these rules:",
@@ -63,6 +64,8 @@ export function composeStageSystemPrompt(
 
   const stageLabel = (() => {
     switch (stage) {
+      case "plan_analysis":
+        return "PRD Analysis Stage";
       case "plan":
         return "Plan Stage";
       case "plan_repair":

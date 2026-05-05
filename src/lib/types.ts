@@ -362,6 +362,14 @@ export type TextGeneratorRuntime = {
 };
 
 export type TextGenerator = {
+  analyzePrd?(
+    spec: NormalizedSpec,
+    runtime: TextGeneratorRuntime,
+  ): Promise<PlanResult>;
+  assemblePlanProject?(
+    spec: NormalizedSpec,
+    runtime: TextGeneratorRuntime,
+  ): Promise<PlanResult>;
   planProject(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult>;
   planRepairProject(runtime: TextGeneratorRuntime): Promise<PlanResult>;
   generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject>;
