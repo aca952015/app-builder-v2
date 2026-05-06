@@ -4879,6 +4879,23 @@ test("template prompts delegate shell validation to the host", async () => {
   }
 });
 
+test("template generation prompts encourage bounded parallel subagents", async () => {
+  for (const templateId of ["mini-app", "full-stack"] as const) {
+    const template = await loadTemplatePack(templateId);
+    const promptPaths = [template.generatePromptPath, template.generateRepairPromptPath];
+
+    for (const promptPath of promptPaths) {
+      const prompt = await readFile(promptPath, "utf8");
+      assert.match(prompt, /鼓励.*subagent|鼓励.*子代理/);
+      assert.match(prompt, /frontend-|frontend/);
+      assert.match(prompt, /backend-|backend/);
+      assert.match(prompt, /integration-verifier/);
+      assert.match(prompt, /不重叠的文件路径或职责边界/);
+      assert.match(prompt, /不得.*shell 验证命令/);
+    }
+  }
+});
+
 test("mini-app template enables interactive runtime validation", async () => {
   const template = await loadTemplatePack("mini-app");
   const planPrompt = await readFile(template.planPromptPath, "utf8");
@@ -5299,8 +5316,11 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
   assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
   assert.doesNotMatch(generatePromptSource, /当前禁止执行：调用任何子代理/);
-  assert.match(generatePromptSource, /子代理只是并行提效手段，不是默认委派机制/);
-  assert.match(generatePromptSource, /至少两个有价值的实现或验证切片可以真正并行推进/);
+  assert.match(generatePromptSource, /鼓励在有明确并行价值时调用 `task`\/子代理/);
+  assert.match(generatePromptSource, /frontend-implementer/);
+  assert.match(generatePromptSource, /backend-implementer/);
+  assert.match(generatePromptSource, /integration-verifier/);
+  assert.match(generatePromptSource, /至少两个实现或验证切片可以真正并行推进/);
   assert.match(generatePromptSource, /无法通过并行带来生成提效，必须由主代理直接实现/);
   assert.match(generatePromptSource, /implementedPages/);
   assert.match(generatePromptSource, /必须先调用一次 `write_todos`/);
@@ -5327,8 +5347,11 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /validationFailures/);
   assert.doesNotMatch(generateRepairPromptSource, /当前禁止执行：调用任何子代理/);
-  assert.match(generateRepairPromptSource, /子代理只是并行提效手段，不是默认委派机制/);
-  assert.match(generateRepairPromptSource, /多个失败项或修补切片彼此独立、可以真正并行推进/);
+  assert.match(generateRepairPromptSource, /鼓励在多个失败项或修补切片彼此独立时调用 `task`\/子代理/);
+  assert.match(generateRepairPromptSource, /frontend-fixer/);
+  assert.match(generateRepairPromptSource, /backend-fixer/);
+  assert.match(generateRepairPromptSource, /integration-verifier/);
+  assert.match(generateRepairPromptSource, /修补切片可以真正并行推进/);
   assert.match(generateRepairPromptSource, /并行不会缩短总修复时间，必须由主代理直接修补/);
   assert.match(generateRepairPromptSource, /只补齐缺失实现或错误接线/);
   assert.match(generateRepairPromptSource, /planSpec\.references/);
