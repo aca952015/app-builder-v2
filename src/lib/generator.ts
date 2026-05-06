@@ -1618,6 +1618,35 @@ async function synthesizeRecoveredPlanResult(
   };
 }
 
+async function runPrdAnalysisWithStructuredResponseRetry(
+  generator: TextGenerator & Required<Pick<TextGenerator, "analyzePrd">>,
+  spec: NormalizedSpec,
+  runtime: TextGeneratorRuntime,
+): Promise<PlanResult> {
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await generator.analyzePrd(spec, runtime);
+    } catch (error) {
+      const recovered = await synthesizeRecoveredPlanResult(runtime, error);
+      if (recovered) {
+        return recovered;
+      }
+
+      if (!isMissingStructuredResponseError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      await appendWorkflowLog(
+        `[host] PRD 分析阶段结构化响应缺失且未发现可恢复 artifact，准备重试第 ${attempt + 1}/${maxAttempts} 次。`,
+      );
+    }
+  }
+
+  throw new Error("PRD analysis retry loop exited unexpectedly.");
+}
+
 async function synthesizeRecoveredGeneratedResult(
   runtime: TextGeneratorRuntime,
   planSpec: PlanSpec,
@@ -3656,7 +3685,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           attempt: 1,
           metadata: { parallelWith: "references.resolve_external" },
         },
-        async () => await generator.analyzePrd(spec, analysisRuntime),
+        async () => await runPrdAnalysisWithStructuredResponseRetry(generator, spec, analysisRuntime),
       );
 
       const [resolvedReferences] = await Promise.all([referenceResolution, prdAnalysis]);

@@ -2258,6 +2258,29 @@ class SplitPlanReferenceTextGenerator implements TextGenerator {
   }
 }
 
+class FlakyPrdAnalysisTextGenerator extends SplitPlanReferenceTextGenerator {
+  analysisAttempts = 0;
+
+  override async analyzePrd(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    this.analysisAttempts += 1;
+    if (this.analysisAttempts === 1) {
+      throw new Error("deepagents PRD analysis did not return a valid structured response.");
+    }
+
+    return super.analyzePrd(spec, runtime);
+  }
+}
+
+class MalformedPrdAnalysisResponseTextGenerator extends SplitPlanReferenceTextGenerator {
+  analysisAttempts = 0;
+
+  override async analyzePrd(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    this.analysisAttempts += 1;
+    await super.analyzePrd(spec, runtime);
+    throw new Error("deepagents PRD analysis did not return a valid structured response.");
+  }
+}
+
 class BrokenReferenceTextGenerator extends ReferenceAwareTextGenerator {
   async planRepairProject(runtime: TextGeneratorRuntime) {
     return this.planProject({} as NormalizedSpec, runtime);
@@ -3894,6 +3917,61 @@ test("generateApplication runs reference conversion in parallel with PRD analysi
     assert.equal(generator.conversionStartedAt < generator.analysisCompletedAt, true);
   } finally {
     globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication retries split PRD analysis when structured response is missing before artifacts exist", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-prd-analysis-retry-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new FlakyPrdAnalysisTextGenerator();
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const analysis = await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8");
+    const generatedSpec = await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8");
+    const metricRecords = (await readFile(path.join(result.outputDirectory, ".deepagents/metrics.jsonl"), "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { name?: string; status?: string });
+    const prdAnalysisMetric = metricRecords.find((record) => record.name === "plan.prd_analysis");
+
+    assert.equal(generator.analysisAttempts, 2);
+    assert.match(analysis, /Parallel PRD Analysis/);
+    assert.match(generatedSpec, /Parallel PRD Analysis/);
+    assert.equal(prdAnalysisMetric?.status, "success");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication recovers split PRD analysis when artifact was written but structured response is malformed", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-prd-analysis-recover-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new MalformedPrdAnalysisResponseTextGenerator();
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const analysis = await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8");
+    const generatedSpec = await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8");
+
+    assert.equal(generator.analysisAttempts, 1);
+    assert.match(analysis, /Parallel PRD Analysis/);
+    assert.match(generatedSpec, /Parallel PRD Analysis/);
+  } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
