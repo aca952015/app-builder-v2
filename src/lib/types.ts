@@ -372,6 +372,10 @@ export type TextGenerator = {
   ): Promise<PlanResult>;
   planProject(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult>;
   planRepairProject(runtime: TextGeneratorRuntime): Promise<PlanResult>;
+  generateProjectWithParallelAgents?(
+    planSpec: PlanSpec,
+    runtime: TextGeneratorRuntime,
+  ): Promise<GeneratedProject>;
   generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject>;
   generateRepairProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject>;
   convertReferenceToMarkdown?(

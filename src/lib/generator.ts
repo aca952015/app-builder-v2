@@ -2770,8 +2770,8 @@ async function continueGenerateFlow(options: {
     try {
       generatedProject = await measureRuntimeStep(
         initialRuntime,
-        { name: "generate.project", phase: "generate", attempt: 1 },
-        async () => await options.generator.generateProject(options.approvedPlan, initialRuntime),
+        { name: initialGenerateMetricName(options.generator), phase: "generate", attempt: 1 },
+        async () => await runInitialGenerateProject(options.generator, options.approvedPlan, initialRuntime),
       );
     } catch (error) {
       const recovered = await synthesizeRecoveredGeneratedResult(initialRuntime, options.approvedPlan, error);
@@ -3381,6 +3381,28 @@ function supportsParallelPrdAssembly(
   return typeof generator.analyzePrd === "function" && typeof generator.assemblePlanProject === "function";
 }
 
+function supportsParallelGeneration(
+  generator: TextGenerator,
+): generator is TextGenerator & Required<Pick<TextGenerator, "generateProjectWithParallelAgents">> {
+  return typeof generator.generateProjectWithParallelAgents === "function";
+}
+
+async function runInitialGenerateProject(
+  generator: TextGenerator,
+  approvedPlan: PlanSpec,
+  runtime: TextGeneratorRuntime,
+): Promise<GeneratedProject> {
+  return supportsParallelGeneration(generator)
+    ? await generator.generateProjectWithParallelAgents(approvedPlan, runtime)
+    : await generator.generateProject(approvedPlan, runtime);
+}
+
+function initialGenerateMetricName(generator: TextGenerator): string {
+  return supportsParallelGeneration(generator)
+    ? "generate.parallel_project"
+    : "generate.project";
+}
+
 export async function generateApplication(options: GenerateAppOptions): Promise<GenerationResult> {
   setWorkflowStdoutMode(options.stdoutMode);
   try {
@@ -3819,8 +3841,8 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       try {
         generatedProject = await measureRuntimeStep(
           initialRuntime,
-          { name: "generate.project", phase: "generate", attempt: 1 },
-          async () => await generator.generateProject(approvedPlan, initialRuntime),
+          { name: initialGenerateMetricName(generator), phase: "generate", attempt: 1 },
+          async () => await runInitialGenerateProject(generator, approvedPlan, initialRuntime),
         );
       } catch (error) {
         const recovered = await synthesizeRecoveredGeneratedResult(initialRuntime, approvedPlan, error);
