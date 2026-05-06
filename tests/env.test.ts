@@ -28,6 +28,7 @@ import {
 import type { TextGeneratorRuntime } from "../src/lib/types.js";
 import {
   buildRuntimeStatus,
+  buildGenerationSubagents,
   buildTodoBoardLines,
   createArtifactItemsForStage,
   createStepItemsForLifecycle,
@@ -130,6 +131,25 @@ test("resolveModelRoleConfigs applies role-specific model, base URL, and API key
   assert.equal(configs.plan.apiKey, "plan-key");
   assert.equal(configs.generate.apiKey, "generate-key");
   assert.equal(configs.repair.apiKey, "repair-key");
+});
+
+test("buildGenerationSubagents exposes subagents only for generation phases", () => {
+  assert.deepEqual(buildGenerationSubagents("plan", true), []);
+  assert.deepEqual(buildGenerationSubagents("plan_repair", true), []);
+
+  const generateSubagents = buildGenerationSubagents("generate", true);
+  assert.deepEqual(
+    generateSubagents.map((subagent) => subagent.name),
+    ["frontend-implementer", "backend-implementer", "integration-verifier"],
+  );
+  assert.deepEqual(generateSubagents[0]?.skills, ["/.deepagents/skills"]);
+  assert.match(String(generateSubagents[0]?.description), /parallel/);
+  assert.match(String(generateSubagents[0]?.systemPrompt), /throughput optimization/);
+  assert.match(String(generateSubagents[0]?.systemPrompt), /Do not edit files outside your assigned ownership/);
+
+  const repairSubagents = buildGenerationSubagents("generateRepair", false);
+  assert.equal(repairSubagents.length, 3);
+  assert.equal("skills" in repairSubagents[0]!, false);
 });
 
 test("resolveModelRoleConfigs rejects missing role API key coverage without a global key", () => {
@@ -808,6 +828,33 @@ test("buildTodoBoardLines appends a horizontal runtime bar for plain-text render
     "",
     "model: gpt-5.4-mini | effort: medium | token used: 2.5K total (in 2K, out 512) | context used: 2K | phase: generate",
   ]);
+});
+
+
+test("renderTodoBoardToString renders agent statuses below runtime status bar", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "生成阶段",
+    todos: [
+      { content: "读取已验证的 planSpec 与 starter", status: "in_progress" },
+    ],
+    artifacts: createArtifactItemsForStage("生成阶段", "generating"),
+    narrative: "模型正在工作中",
+    runtimeStatus: {
+      modelName: "gpt-5.4",
+      phase: "generate",
+    },
+    agentStatuses: [
+      { name: "leader", status: "working" },
+      { name: "frontend-implementer", status: "idle" },
+    ],
+  }, 140));
+
+  assert.match(output, /model: gpt-5\.4 .* phase: generate/);
+  assert.match(output, /leader: working \| frontend-implementer: idle/);
+  assert.ok(
+    output.indexOf("leader: working") > output.indexOf("phase: generate"),
+    "agent status row should render below the runtime status bar",
+  );
 });
 
 test("renderTodoBoardToString falls back to n/a for missing runtime status values", () => {

@@ -11,6 +11,7 @@ import type { RuntimeStatus, StdoutMode } from "./types.js";
 export type WorkflowStage = "计划阶段" | "生成阶段" | "运行验证阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export type ArtifactStatus = "pending" | "generating" | "generated" | "validating" | "verified";
+export type AgentWorkStatusValue = "idle" | "working";
 export type WorkflowStageMarker = WorkflowStage;
 
 export type TodoItem = {
@@ -23,6 +24,11 @@ export type ArtifactItem = {
   status: ArtifactStatus;
 };
 
+export type AgentWorkStatus = {
+  name: string;
+  status: AgentWorkStatusValue;
+};
+
 export type TodoBoardState = {
   stage: WorkflowStage;
   todos: TodoItem[];
@@ -33,6 +39,7 @@ export type TodoBoardState = {
   outputDirectory?: string;
   logs?: string[];
   runtimeStatus?: RuntimeStatus | undefined;
+  agentStatuses?: AgentWorkStatus[] | undefined;
   streamProgress?: {
     inputTokens?: number | undefined;
     outputTokens?: number | undefined;
@@ -525,6 +532,34 @@ function buildStatusBarLine(state: TodoBoardState): string {
     .join(" | ");
 }
 
+function normalizeAgentStatuses(agentStatuses?: AgentWorkStatus[]): AgentWorkStatus[] {
+  const seen = new Set<string>();
+  const normalized: AgentWorkStatus[] = [];
+
+  for (const agent of agentStatuses ?? []) {
+    const name = agent.name.trim();
+    if (!name || seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    normalized.push({
+      name,
+      status: agent.status === "working" ? "working" : "idle",
+    });
+  }
+
+  return normalized;
+}
+
+function buildAgentStatusLine(state: TodoBoardState): string | null {
+  const agentStatuses = normalizeAgentStatuses(state.agentStatuses);
+  if (agentStatuses.length === 0) {
+    return null;
+  }
+
+  return agentStatuses.map((agent) => `${agent.name}: ${agent.status}`).join(" | ");
+}
+
 function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
@@ -596,7 +631,12 @@ function buildRuntimeInteractionLines(state: TodoBoardState): string[] {
 
 export function buildTodoBoardLines(state: TodoBoardState): string[] {
   if (state.todos.length === 0 && state.artifacts.length === 0) {
-    return [buildActionLine(state), "", buildStatusBarLine(state)];
+    const compactLines = [buildActionLine(state), "", buildStatusBarLine(state)];
+    const agentStatusLine = buildAgentStatusLine(state);
+    if (agentStatusLine) {
+      compactLines.push(agentStatusLine);
+    }
+    return compactLines;
   }
 
   const sessionLabel = formatShortSessionId(state.sessionId);
@@ -643,6 +683,10 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
   }
   lines.push("");
   lines.push(buildStatusBarLine(state));
+  const agentStatusLine = buildAgentStatusLine(state);
+  if (agentStatusLine) {
+    lines.push(agentStatusLine);
+  }
   return lines;
 }
 
@@ -1137,7 +1181,56 @@ function createWorkflowBoardElement(state: TodoBoardState) {
         ],
       ),
       createStatusBarElement(state),
+      createAgentStatusElement(state),
     ],
+  );
+}
+
+function createAgentStatusElement(state: TodoBoardState): React.ReactNode | null {
+  const agentStatuses = normalizeAgentStatuses(state.agentStatuses);
+  if (agentStatuses.length === 0) {
+    return null;
+  }
+
+  return React.createElement(
+    Box,
+    {
+      key: "agent-status-bar",
+      flexDirection: "row",
+      flexWrap: "wrap",
+    },
+    agentStatuses.flatMap((agent, index) => {
+      const nodes: React.ReactNode[] = [
+        React.createElement(
+          Text,
+          {
+            key: `agent-status-label-${index}`,
+            color: "gray",
+          },
+          `${agent.name}: `,
+        ),
+        React.createElement(AnimatedGradientText, {
+          key: `agent-status-value-${index}`,
+          text: agent.status,
+          active: agent.status === "working",
+        }),
+      ];
+
+      if (index < agentStatuses.length - 1) {
+        nodes.push(
+          React.createElement(
+            Text,
+            {
+              key: `agent-status-separator-${index}`,
+              color: "gray",
+            },
+            " | ",
+          ),
+        );
+      }
+
+      return nodes;
+    }),
   );
 }
 
@@ -1470,6 +1563,7 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
           ...state.runtimeInteraction,
         }
       : activeWorkflowState?.runtimeInteraction,
+    agentStatuses: state.agentStatuses ?? activeWorkflowState?.agentStatuses,
   };
   activeWorkflowState = nextWorkflowState;
   activeWorkflowLogs = trimWorkflowLogs(nextWorkflowState.logs ?? []);

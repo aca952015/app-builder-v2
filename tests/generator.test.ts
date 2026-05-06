@@ -4697,6 +4697,17 @@ test("full-stack template starter copies scaffold files into the output root", a
   }
 });
 
+test("mini-app starter includes a design system document for generation agents", async () => {
+  const designSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/starter/DESIGN.md"),
+    "utf8",
+  );
+
+  assert.match(designSource, /Design System/);
+  assert.match(designSource, /Apple-Inspired/);
+  assert.match(designSource, /Palette/);
+});
+
 test("mini-app template enables interactive runtime validation", async () => {
   const template = await loadTemplatePack("mini-app");
   const planPrompt = await readFile(template.planPromptPath, "utf8");
@@ -5068,9 +5079,11 @@ test("mini-app prompts require interaction contract traceability", async () => {
   assert.match(planPromptSource, /triggerControl/);
   assert.match(planPromptSource, /endpointPath/);
   assert.match(generatePromptSource, /必须读取 `artifacts\.interactionContract`/);
+  assert.match(generatePromptSource, /先读取 `\/DESIGN\.md`/);
   assert.match(generatePromptSource, /fallbackTrigger/);
   assert.match(generatePromptSource, /Interaction contract trace/);
   assert.match(generateRepairPromptSource, /必须读取 `artifacts\.interactionContract`/);
+  assert.match(generateRepairPromptSource, /必须先读取 `\/DESIGN\.md`/);
   assert.match(generateRepairPromptSource, /endpointPath/);
   assert.match(generateRepairPromptSource, /Interaction contract trace/);
 });
@@ -5114,7 +5127,10 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /planSpec\.references/);
   assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
   assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
-  assert.match(generatePromptSource, /禁止执行：调用任何子代理/);
+  assert.doesNotMatch(generatePromptSource, /当前禁止执行：调用任何子代理/);
+  assert.match(generatePromptSource, /子代理只是并行提效手段，不是默认委派机制/);
+  assert.match(generatePromptSource, /至少两个有价值的实现或验证切片可以真正并行推进/);
+  assert.match(generatePromptSource, /无法通过并行带来生成提效，必须由主代理直接实现/);
   assert.match(generatePromptSource, /implementedPages/);
   assert.match(generatePromptSource, /必须先调用一次 `write_todos`/);
   assert.match(generatePromptSource, /必须持续更新 todo 状态/);
@@ -5139,7 +5155,10 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planRepairPromptSource, /`\/\.deepagents\/source-prd\.md`/);
   assert.match(planRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /validationFailures/);
-  assert.match(generateRepairPromptSource, /禁止执行：调用任何子代理/);
+  assert.doesNotMatch(generateRepairPromptSource, /当前禁止执行：调用任何子代理/);
+  assert.match(generateRepairPromptSource, /子代理只是并行提效手段，不是默认委派机制/);
+  assert.match(generateRepairPromptSource, /多个失败项或修补切片彼此独立、可以真正并行推进/);
+  assert.match(generateRepairPromptSource, /并行不会缩短总修复时间，必须由主代理直接修补/);
   assert.match(generateRepairPromptSource, /只补齐缺失实现或错误接线/);
   assert.match(generateRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);

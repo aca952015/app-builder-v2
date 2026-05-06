@@ -10,6 +10,7 @@
 ## 修复要求
 
 - 页面修复必须继续以 `planSpec.pages[*].route` 为准
+- 涉及页面、样式或交互修复时，必须先读取 `/DESIGN.md`，并保持实现符合其中的 design system 约束
 - API 修复必须继续以 `planSpec.apis[*].path` 为准
 - `planSpec.references` 是修复时理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构的参考资料；你需要自行判断哪些 reference 与当前失败项相关
 - `references` 不是宿主强制验收项，不要因为某个 reference 未被使用就额外生成无关功能

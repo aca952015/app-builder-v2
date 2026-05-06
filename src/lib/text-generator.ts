@@ -21,6 +21,7 @@ import {
   appendWorkflowLog,
   createArtifactItemsForStage,
   createDefaultStepItems,
+  type AgentWorkStatus,
   type TodoBoardState,
   type TodoItem,
   type TodoStatus,
@@ -830,6 +831,7 @@ type DeepAgentsTraceState = {
   lastNarrative: string;
   logFilePath?: string;
   runtimeStatus: RuntimeStatus;
+  agentStatuses: AgentWorkStatus[];
   modelOutputStarted: boolean;
   receivedOutputTokens: number;
   receivedOutputTokensEstimated: boolean;
@@ -1366,6 +1368,91 @@ function getStreamProgressSummary(trace: DeepAgentsTraceState): StreamProgressSu
   };
 }
 
+function buildDefaultAgentStatuses(runtimePhase: RuntimeStatusPhase): AgentWorkStatus[] {
+  const subagentNames = buildGenerationSubagents(runtimePhase, false)
+    .map((subagent) => typeof subagent.name === "string" ? subagent.name : null)
+    .filter((name): name is string => Boolean(name));
+
+  return ["leader", ...subagentNames].map((name, index) => ({
+    name,
+    status: index === 0 ? "working" : "idle",
+  }));
+}
+
+function markAgentWorking(agentStatuses: AgentWorkStatus[], activeNames: string[]): AgentWorkStatus[] {
+  const active = new Set(activeNames);
+  return agentStatuses.map((agent) => ({
+    ...agent,
+    status: active.has(agent.name) ? "working" : "idle",
+  }));
+}
+
+function markAllAgentsIdle(agentStatuses: AgentWorkStatus[]): AgentWorkStatus[] {
+  return agentStatuses.map((agent) => ({ ...agent, status: "idle" }));
+}
+
+function collectActiveAgentNames(payload: unknown, knownNames: Set<string>, activeNames = new Set<string>(), seen = new Set<object>()): Set<string> {
+  if (!payload || typeof payload !== "object") {
+    return activeNames;
+  }
+
+  if (seen.has(payload)) {
+    return activeNames;
+  }
+  seen.add(payload);
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      collectActiveAgentNames(item, knownNames, activeNames, seen);
+    }
+    return activeNames;
+  }
+
+  const record = payload as Record<string, unknown>;
+  for (const [key, value] of Object.entries(record)) {
+    if (knownNames.has(key)) {
+      activeNames.add(key);
+    }
+    if (typeof value === "string" && knownNames.has(value)) {
+      activeNames.add(value);
+    }
+  }
+
+  for (const key of ["agent", "agentName", "name", "node", "nodeName"] as const) {
+    const value = readStringField(record, [key]);
+    if (value && knownNames.has(value)) {
+      activeNames.add(value);
+    }
+  }
+
+  const metadata = readObjectField(record, ["metadata", "kwargs", "config", "langgraph_node"]);
+  if (metadata) {
+    collectActiveAgentNames(metadata, knownNames, activeNames, seen);
+  }
+
+  for (const value of Object.values(record)) {
+    collectActiveAgentNames(value, knownNames, activeNames, seen);
+  }
+
+  return activeNames;
+}
+
+function updateAgentStatusesFromChunk(trace: DeepAgentsTraceState, mode: string | undefined, payload: unknown): void {
+  const knownNames = new Set(trace.agentStatuses.map((agent) => agent.name));
+  const activeNames = Array.from(collectActiveAgentNames(payload, knownNames));
+
+  if (activeNames.length === 0) {
+    trace.agentStatuses = markAgentWorking(trace.agentStatuses, ["leader"]);
+    return;
+  }
+
+  if (mode === "values") {
+    activeNames.push("leader");
+  }
+
+  trace.agentStatuses = markAgentWorking(trace.agentStatuses, Array.from(new Set(activeNames)));
+}
+
 function getTodoBoardStreamProgress(trace: DeepAgentsTraceState): TodoBoardState["streamProgress"] {
   const progress: NonNullable<TodoBoardState["streamProgress"]> = {};
   const inputTokens = trace.runtimeStatus.usage?.inputTokens ?? trace.runtimeStatus.contextWindowUsedTokens;
@@ -1540,6 +1627,7 @@ async function updateTodoBoard(
   if (!progressAlreadyApplied) {
     applyStreamProgress(trace, mode ?? "unclassified", payload);
   }
+  updateAgentStatusesFromChunk(trace, mode, payload);
 
   const extractedTodos = extractTodosForBoard(payload);
   if (extractedTodos && extractedTodos.length > 0) {
@@ -1571,6 +1659,7 @@ async function updateTodoBoard(
     ...(runtime ? { outputDirectory: runtime.outputDirectory } : {}),
     runtimeStatus: trace.runtimeStatus,
     streamProgress: getTodoBoardStreamProgress(trace),
+    agentStatuses: trace.agentStatuses,
   });
 }
 
@@ -1802,6 +1891,7 @@ export async function runDeepAgentWithLogs(
       phase: runtimePhase,
       fallbackModelName,
     }),
+    agentStatuses: buildDefaultAgentStatuses(runtimePhase),
     modelOutputStarted: false,
     receivedOutputTokens: 0,
     receivedOutputTokensEstimated: false,
@@ -1815,6 +1905,7 @@ export async function runDeepAgentWithLogs(
     sessionId: runtime.sessionId,
     outputDirectory: runtime.outputDirectory,
     runtimeStatus: trace.runtimeStatus,
+    agentStatuses: trace.agentStatuses,
   });
 
   for (let retryCount = 0; ; retryCount += 1) {
@@ -1856,6 +1947,7 @@ export async function runDeepAgentWithLogs(
       );
 
       trace.lastNarrative = "生成流程结束。";
+      trace.agentStatuses = markAllAgentsIdle(trace.agentStatuses);
       await recordOpenModelTodoMetrics(trace, runtime, "stream_end");
       await appendWorkflowLog("[lifecycle] 本轮流式生成结束，等待宿主后续处理。");
       writeSystemTraceEvent(trace.logFilePath, "lifecycle", { result: lastValuesChunk }, "生成流程结束。");
@@ -1867,6 +1959,7 @@ export async function runDeepAgentWithLogs(
         sessionId: runtime.sessionId,
         outputDirectory: runtime.outputDirectory,
         runtimeStatus: trace.runtimeStatus,
+        agentStatuses: trace.agentStatuses,
       });
 
       return lastValuesChunk;
@@ -1896,6 +1989,7 @@ export async function runDeepAgentWithLogs(
         sessionId: runtime.sessionId,
         outputDirectory: runtime.outputDirectory,
         runtimeStatus: trace.runtimeStatus,
+        agentStatuses: trace.agentStatuses,
       });
     }
   }
@@ -2005,6 +2099,46 @@ function resolveConstructorModelRoles(options?: DeepAgentsTextGeneratorOptions):
   return resolveModelRoleConfigs();
 }
 
+export function buildGenerationSubagents(
+  runtimePhase: RuntimeStatusPhase,
+  includeTemplateSkills: boolean,
+): Array<Record<string, unknown>> {
+  if (runtimePhase !== "generate" && runtimePhase !== "generateRepair" && runtimePhase !== "generate_repair") {
+    return [];
+  }
+
+  const skills = includeTemplateSkills ? ["/.deepagents/skills"] : undefined;
+  const basePrompt = [
+    "You are a bounded implementation subagent for the app-builder generation workflow.",
+    "Only accept work when the main agent gives you an explicit non-overlapping file/path or responsibility scope.",
+    "Do not redefine product requirements, rewrite plan artifacts, or expand beyond the validated planSpec.",
+    "Do not edit files outside your assigned ownership. If the work appears coupled or conflict-prone, report that it should be handled by the main agent instead.",
+    "Subagents are allowed only as a throughput optimization for genuinely parallel work; if your slice cannot proceed independently, stop and report the blocker.",
+    "Return one concise final report listing files touched, work completed, blockers, and validation gaps.",
+  ].join("\n");
+  const withSkills = (subagent: Record<string, unknown>): Record<string, unknown> => (
+    skills ? { ...subagent, skills } : subagent
+  );
+
+  return [
+    withSkills({
+      name: "frontend-implementer",
+      description: "Implements independently owned pages, components, styles, and client interactions when that work can run in parallel with other generation slices.",
+      systemPrompt: `${basePrompt}\nFrontend scope: implement only assigned page/component/client-interaction files and preserve existing routing, shell, sidebar, and data-fetching contracts.`,
+    }),
+    withSkills({
+      name: "backend-implementer",
+      description: "Implements independently owned API routes, server logic, Prisma/data wiring, and persistence changes when that work can run in parallel with other generation slices.",
+      systemPrompt: `${basePrompt}\nBackend scope: implement only assigned API/server/data files. Do not split ownership of shared schema or configuration files with another agent.`,
+    }),
+    withSkills({
+      name: "integration-verifier",
+      description: "Checks independently verifiable integration coverage and reports gaps while other implementation slices run in parallel.",
+      systemPrompt: `${basePrompt}\nVerification scope: prefer read-only inspection. Only make narrow fixes when explicitly assigned; otherwise report missing pages, APIs, data wiring, or report coverage gaps.`,
+    }),
+  ];
+}
+
 export class DeepAgentsTextGenerator implements TextGenerator {
   private readonly modelRoles: ModelRoleConfigMap;
 
@@ -2059,8 +2193,14 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       systemPrompt,
     };
 
-    if (await pathExists(skillsDirectory)) {
+    const hasTemplateSkills = await pathExists(skillsDirectory);
+    if (hasTemplateSkills) {
       agentOptions.skills = ["/.deepagents/skills"];
+    }
+
+    const generationSubagents = buildGenerationSubagents(runtimePhase, hasTemplateSkills);
+    if (generationSubagents.length > 0) {
+      agentOptions.subagents = generationSubagents;
     }
 
     agentOptions.backend = new deepagents.FilesystemBackend({
