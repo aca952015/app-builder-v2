@@ -1582,6 +1582,51 @@ function isMissingStructuredResponseError(error: unknown): boolean {
   return error instanceof Error && /did not return a valid structured response/.test(error.message);
 }
 
+const STRUCTURED_RESPONSE_RETRY_LIMIT = 1;
+
+async function appendStructuredResponseRetryNote(
+  logPath: string,
+  stageLabel: string,
+  retry: number,
+  retryLimit: number,
+  error: unknown,
+): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  await fs.appendFile(
+    logPath,
+    `[${new Date().toISOString()}]\n${stageLabel}结构化响应缺失，准备重试当前阶段第 ${retry}/${retryLimit} 次。\nError: ${message}\n\n`,
+    "utf8",
+  );
+}
+
+async function runWithStructuredResponseRetry<T>(
+  runtime: TextGeneratorRuntime,
+  stageLabel: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  for (let retryCount = 0; ; retryCount += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isMissingStructuredResponseError(error) || retryCount >= STRUCTURED_RESPONSE_RETRY_LIMIT) {
+        throw error;
+      }
+
+      const currentRetry = retryCount + 1;
+      await appendWorkflowLog(
+        `[host] ${stageLabel}结构化响应缺失，准备重试当前阶段第 ${currentRetry}/${STRUCTURED_RESPONSE_RETRY_LIMIT} 次。`,
+      );
+      await appendStructuredResponseRetryNote(
+        runtime.deepagentsErrorLogPath,
+        stageLabel,
+        currentRetry,
+        STRUCTURED_RESPONSE_RETRY_LIMIT,
+        error,
+      );
+    }
+  }
+}
+
 async function synthesizeRecoveredPlanResult(
   runtime: TextGeneratorRuntime,
   error: unknown,
@@ -1623,28 +1668,20 @@ async function runPrdAnalysisWithStructuredResponseRetry(
   spec: NormalizedSpec,
   runtime: TextGeneratorRuntime,
 ): Promise<PlanResult> {
-  const maxAttempts = 2;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await generator.analyzePrd(spec, runtime);
-    } catch (error) {
-      const recovered = await synthesizeRecoveredPlanResult(runtime, error);
-      if (recovered) {
-        return recovered;
-      }
-
-      if (!isMissingStructuredResponseError(error) || attempt >= maxAttempts) {
-        throw error;
-      }
-
-      await appendWorkflowLog(
-        `[host] PRD 分析阶段结构化响应缺失且未发现可恢复 artifact，准备重试第 ${attempt + 1}/${maxAttempts} 次。`,
-      );
+  try {
+    return await runWithStructuredResponseRetry(
+      runtime,
+      "PRD 分析阶段",
+      async () => await generator.analyzePrd(spec, runtime),
+    );
+  } catch (error) {
+    const recovered = await synthesizeRecoveredPlanResult(runtime, error);
+    if (recovered) {
+      return recovered;
     }
-  }
 
-  throw new Error("PRD analysis retry loop exited unexpectedly.");
+    throw error;
+  }
 }
 
 async function synthesizeRecoveredGeneratedResult(
@@ -2731,7 +2768,12 @@ async function completeAfterGenerateValidation(options: {
             attempt: existingRepairAttempts + 1,
             metadata: { retryReasonCount: retryReasons.length },
           },
-          async () => await options.generator.generateRepairProject(options.approvedPlan, repairRuntime),
+          async () =>
+            await runWithStructuredResponseRetry(
+              repairRuntime,
+              "生成修复阶段",
+              async () => await options.generator.generateRepairProject(options.approvedPlan, repairRuntime),
+            ),
         );
       } catch (error) {
         const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, options.approvedPlan, error);
@@ -2800,7 +2842,11 @@ async function continueGenerateFlow(options: {
       generatedProject = await measureRuntimeStep(
         initialRuntime,
         { name: initialGenerateMetricName(options.generator), phase: "generate", attempt: 1 },
-        async () => await runInitialGenerateProject(options.generator, options.approvedPlan, initialRuntime),
+        async () => await runWithStructuredResponseRetry(
+          initialRuntime,
+          "生成阶段",
+          async () => await runInitialGenerateProject(options.generator, options.approvedPlan, initialRuntime),
+        ),
       );
     } catch (error) {
       const recovered = await synthesizeRecoveredGeneratedResult(initialRuntime, options.approvedPlan, error);
@@ -2877,7 +2923,11 @@ async function continueGenerateFlow(options: {
           attempt: existingRepairAttempts + repairIndex + 1,
           metadata: { retryReasonCount: generationRetryReasons.length },
         },
-        async () => await options.generator.generateRepairProject(options.approvedPlan, repairRuntime),
+        async () => await runWithStructuredResponseRetry(
+          repairRuntime,
+          "生成修复阶段",
+          async () => await options.generator.generateRepairProject(options.approvedPlan, repairRuntime),
+        ),
       );
     } catch (error) {
       const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, options.approvedPlan, error);
@@ -2967,7 +3017,11 @@ async function continuePlanRepairFlow(options: {
         attempt: existingRepairAttempts + repairIndex + 1,
         metadata: { retryReasonCount: planRetryReasons.length },
       },
-      async () => await options.generator.planRepairProject(repairRuntime),
+      async () => await runWithStructuredResponseRetry(
+        repairRuntime,
+        "计划修复阶段",
+        async () => await options.generator.planRepairProject(repairRuntime),
+      ),
     );
     await appendWorkflowLog("[host] 计划修复输出完成，开始复核。");
     await updateWorkflowBoard({
@@ -3757,9 +3811,13 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         planResult = await measureRuntimeStep(
           initialRuntime,
           { name: useParallelPrdAssembly ? "plan.prd_assembly" : "plan.project", phase: "plan", attempt: 1 },
-          async () => useParallelPrdAssembly
-            ? await generator.assemblePlanProject(spec, initialRuntime)
-            : await generator.planProject(spec, initialRuntime),
+          async () => await runWithStructuredResponseRetry(
+            initialRuntime,
+            "计划阶段",
+            async () => useParallelPrdAssembly
+              ? await generator.assemblePlanProject(spec, initialRuntime)
+              : await generator.planProject(spec, initialRuntime),
+          ),
         );
       } catch (error) {
         const recovered = await synthesizeRecoveredPlanResult(initialRuntime, error);
@@ -3815,7 +3873,11 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
             attempt: repairIndex + 1,
             metadata: { retryReasonCount: planRetryReasons.length },
           },
-          async () => await generator.planRepairProject(repairRuntime),
+          async () => await runWithStructuredResponseRetry(
+            repairRuntime,
+            "计划修复阶段",
+            async () => await generator.planRepairProject(repairRuntime),
+          ),
         );
       } catch (error) {
         const recovered = await synthesizeRecoveredPlanResult(repairRuntime, error);
@@ -3871,7 +3933,11 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         generatedProject = await measureRuntimeStep(
           initialRuntime,
           { name: initialGenerateMetricName(generator), phase: "generate", attempt: 1 },
-          async () => await runInitialGenerateProject(generator, approvedPlan, initialRuntime),
+          async () => await runWithStructuredResponseRetry(
+            initialRuntime,
+            "生成阶段",
+            async () => await runInitialGenerateProject(generator, approvedPlan, initialRuntime),
+          ),
         );
       } catch (error) {
         const recovered = await synthesizeRecoveredGeneratedResult(initialRuntime, approvedPlan, error);
@@ -3934,7 +4000,11 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
             attempt: repairIndex + 1,
             metadata: { retryReasonCount: generationRetryReasons.length },
           },
-          async () => await generator.generateRepairProject(approvedPlan, repairRuntime),
+          async () => await runWithStructuredResponseRetry(
+            repairRuntime,
+            "生成修复阶段",
+            async () => await generator.generateRepairProject(approvedPlan, repairRuntime),
+          ),
         );
       } catch (error) {
         const recovered = await synthesizeRecoveredGeneratedResult(repairRuntime, approvedPlan, error);

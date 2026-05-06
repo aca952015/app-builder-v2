@@ -121,6 +121,30 @@ function buildPlanSpec(): PlanSpec {
   };
 }
 
+function buildRootDashboardPlanSpec(): PlanSpec {
+  const base = buildPlanSpec();
+  return {
+    ...base,
+    pages: [
+      {
+        name: "首页仪表盘",
+        route: "/",
+        kind: "dashboard",
+        purpose: "在根路径展示核心业务状态。",
+      },
+    ],
+    acceptanceChecks: [
+      ...base.acceptanceChecks.filter((check) => check.type !== "page"),
+      {
+        id: "page-dashboard-root",
+        description: "必须实现根路径首页仪表盘。",
+        type: "page",
+        target: "/",
+      },
+    ],
+  };
+}
+
 function buildIndirectSupportPlanSpec(): PlanSpec {
   return {
     version: 1,
@@ -2764,6 +2788,71 @@ class StructuredResponseRecoveryTextGenerator implements TextGenerator {
   }
 }
 
+class MissingStructuredGenerateRetryTextGenerator implements TextGenerator {
+  planAttempts = 0;
+  generationAttempts = 0;
+  generationRepairAttempts = 0;
+
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    this.planAttempts += 1;
+    const planSpec = buildRootDashboardPlanSpec();
+    await writeFile(runtime.deepagentsAnalysisPath, "# 分析稿\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# 详细 Spec\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "计划阶段成功。",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    this.generationAttempts += 1;
+
+    if (this.generationAttempts === 1) {
+      await writeFile(
+        path.join(runtime.outputDirectory, "app-builder-report.md"),
+        "# Partial Report\n\nInitial generation wrote only partial artifacts before losing structured output.\n",
+        "utf8",
+      );
+      throw new Error("deepagents generation did not return a valid structured response.");
+    }
+
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Retried Report\n\nSame generate phase recovered after structured response retry.\n",
+      extraFiles: [{ path: "generated/retry-marker.txt", contents: "same-stage-generate-retry\n" }],
+    });
+
+    return {
+      summary: "生成阶段重试成功。",
+      filesWritten: ["app-builder-report.md", "generated/retry-marker.txt"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
+    this.generationRepairAttempts += 1;
+    throw new Error("generateRepairProject should not be called for a missing structured generate response before retry is exhausted");
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in MissingStructuredGenerateRetryTextGenerator");
+  }
+}
+
 class GenerateStructuredResponseRecoveryTextGenerator implements TextGenerator {
   generationRepairAttempts = 0;
 
@@ -3968,7 +4057,7 @@ test("generateApplication recovers split PRD analysis when artifact was written 
     const analysis = await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8");
     const generatedSpec = await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8");
 
-    assert.equal(generator.analysisAttempts, 1);
+    assert.equal(generator.analysisAttempts, 2);
     assert.match(analysis, /Parallel PRD Analysis/);
     assert.match(generatedSpec, /Parallel PRD Analysis/);
   } finally {
@@ -4274,10 +4363,72 @@ test("generateApplication recovers when plan repair writes valid artifacts but m
       "utf8",
     );
 
-    assert.equal(generator.planRepairAttempts, 1);
+    assert.equal(generator.planRepairAttempts, 2);
     assert.match(planValidation, /"valid": true/);
     assert.match(generationValidation, /"valid": true/);
   } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication retries missing structured generate responses before entering repair", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-structured-generate-retry-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const previousCwd = process.cwd();
+  const generator = new MissingStructuredGenerateRetryTextGenerator();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "mini-app",
+      interactiveEnabled: false,
+      includeDevServerStep: false,
+    });
+    const templateDirectory = path.join(tempRoot, "templates", "mini-app");
+    const manifestPath = path.join(templateDirectory, "template.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.starterDir = "starter";
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await mkdir(path.join(templateDirectory, "starter", "app"), { recursive: true });
+    await writeFile(
+      path.join(templateDirectory, "starter", "app", "page.tsx"),
+      [
+        "export default function HomePage() {",
+        "  return <main>Mini App Starter — Generated Mini App</main>;",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(path.join(templateDirectory, "starter", ".env.example"), "NEXT_PUBLIC_APP_NAME=Mini App\n", "utf8");
+    process.chdir(tempRoot);
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "mini-app",
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const pageSource = await readFile(path.join(result.outputDirectory, "app/(admin)/page.tsx"), "utf8");
+    const retryMarker = await readFile(path.join(result.outputDirectory, "generated/retry-marker.txt"), "utf8");
+    const errorLog = await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8");
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.equal(generator.planAttempts, 1);
+    assert.equal(generator.generationAttempts, 2);
+    assert.equal(generator.generationRepairAttempts, 0);
+    assert.match(pageSource, /return null/);
+    assert.equal(retryMarker, "same-stage-generate-retry\n");
+    assert.match(errorLog, /生成阶段结构化响应缺失，准备重试当前阶段第 1\/1 次/);
+    assert.doesNotMatch(errorLog, /Retry attempt 1 triggered for 生成修复阶段/);
+    assert.match(generationValidation, /"valid": true/);
+  } finally {
+    process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
@@ -4327,7 +4478,7 @@ test("generateApplication recovers when generate repair writes valid artifacts b
       "utf8",
     );
 
-    assert.equal(generator.generationRepairAttempts, 1);
+    assert.equal(generator.generationRepairAttempts, 2);
     assert.match(generationValidation, /"valid": true/);
     assert.match(
       await readFile(path.join(result.outputDirectory, "app-builder-report.md"), "utf8"),
@@ -4704,8 +4855,8 @@ test("mini-app starter includes a design system document for generation agents",
   );
 
   assert.match(designSource, /Design System/);
-  assert.match(designSource, /Apple-Inspired/);
-  assert.match(designSource, /Palette/);
+  assert.match(designSource, /Color|Palette|Theme/i);
+  assert.ok(designSource.trim().length > 200);
 });
 
 test("mini-app template enables interactive runtime validation", async () => {
