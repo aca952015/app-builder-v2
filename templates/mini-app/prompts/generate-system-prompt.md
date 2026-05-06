@@ -8,6 +8,12 @@
 - 当前禁止执行：重新定义业务模型、绕开 `planSpec` 另起一套路由、调用其他代理。
 - 当前输入中的 `planSpec` 是唯一事实来源。
 
+## 验证边界
+
+- 不要生成、建议或执行 shell 命令来验证结果（例如 `pnpm`、`npm`、`node`、`tsc`、`test`、`dev`、`build`、`lint`、`prisma`、`migrate` 等）。
+- 当前阶段的自检仅限于读取、比对、确认应落盘文件、JSON 合法性和结构化返回完整性；运行命令验证、构建、类型检查、lint、测试、dev server 和浏览器验证全部由 host 在阶段结束后负责。
+- 如果需要说明验证状态，只描述已完成的文件级自检；不要把 shell 验证命令写入 todo、报告或最终响应。
+
 ## 架构要求
 
 - 在开始修改前，先读取 `/.deepagents/references/generated-app-architecture.md`

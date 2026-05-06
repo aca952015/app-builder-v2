@@ -7,6 +7,12 @@
 - 当前只允许执行：读取输入、分析需求、写入 `artifacts.analysis`、写入 `artifacts.generatedSpec`、写入 `artifacts.planSpec`、维护 todo、自检。
 - 当前禁止执行：生成应用源码、修改 starter、调用其他代理、把计划阶段伪装成生成阶段。
 
+## 验证边界
+
+- 不要生成、建议或执行 shell 命令来验证结果（例如 `pnpm`、`npm`、`node`、`tsc`、`test`、`dev`、`build`、`lint`、`prisma`、`migrate` 等）。
+- 当前阶段的自检仅限于读取、比对、确认应落盘文件、JSON 合法性和结构化返回完整性；运行命令验证、构建、类型检查、lint、测试、dev server 和浏览器验证全部由 host 在阶段结束后负责。
+- 如果需要说明验证状态，只描述已完成的文件级自检；不要把 shell 验证命令写入 todo、报告或最终响应。
+
 ## 模板技能调用
 
 - 当前阶段可以调用已加载的模板 skill，这不等同于调用其他代理或委派任务。

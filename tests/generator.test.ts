@@ -4859,6 +4859,26 @@ test("mini-app starter includes a design system document for generation agents",
   assert.ok(designSource.trim().length > 200);
 });
 
+test("template prompts delegate shell validation to the host", async () => {
+  for (const templateId of ["mini-app", "full-stack"] as const) {
+    const template = await loadTemplatePack(templateId);
+    const promptPaths = [
+      template.planPromptPath,
+      template.planRepairPromptPath,
+      template.generatePromptPath,
+      template.generateRepairPromptPath,
+    ];
+
+    for (const promptPath of promptPaths) {
+      const prompt = await readFile(promptPath, "utf8");
+      assert.match(prompt, /## 验证边界/);
+      assert.match(prompt, /不要生成、建议或执行 shell 命令/);
+      assert.match(prompt, /验证全部由 host 在阶段结束后负责/);
+      assert.match(prompt, /不要把 shell 验证命令写入 todo、报告或最终响应/);
+    }
+  }
+});
+
 test("mini-app template enables interactive runtime validation", async () => {
   const template = await loadTemplatePack("mini-app");
   const planPrompt = await readFile(template.planPromptPath, "utf8");
