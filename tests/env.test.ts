@@ -704,6 +704,29 @@ test("renderTodoBoardToString preserves animated thinking action text", () => {
   assert.match(output, /当前动作：模型正在工作中（2m 34s, in: 12.5 k，out：1.5 k）/);
 });
 
+test("renderTodoBoardToString does not reset token progress with zero output", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "计划阶段",
+    todos: [
+      { content: "读取 PRD 与模板上下文", status: "in_progress" },
+    ],
+    artifacts: createArtifactItemsForStage("计划阶段", "generating"),
+    narrative: "模型正在工作中",
+    elapsedMs: 2_000,
+    runtimeStatus: {
+      usage: {
+        inputTokens: 8_192,
+      },
+    },
+    streamProgress: {
+      inputTokens: 8_192,
+    },
+  }, 120));
+
+  assert.match(output, /当前动作：模型正在工作中（2s, in: 8.2 k）/);
+  assert.doesNotMatch(output, /out：0/);
+});
+
 test("renderTodoBoardToString splits execution logs and repair progress into two sections", () => {
   const output = stripAnsi(renderTodoBoardToString({
     stage: "生成阶段",
@@ -1084,7 +1107,7 @@ test("mergeRuntimeStatus accumulates usage across multiple chunks", () => {
   );
 
   assert.equal(merged.modelName, "gpt-5.4-stream");
-  assert.equal(merged.contextWindowUsedTokens, 50);
+  assert.equal(merged.contextWindowUsedTokens, 100);
   assert.deepEqual(merged.usage, {
     inputTokens: 150,
     outputTokens: 30,

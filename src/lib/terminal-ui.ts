@@ -418,13 +418,10 @@ function formatActionNarrative(state: TodoBoardState): string {
   const inputTokens = state.streamProgress?.inputTokens ?? usage?.inputTokens ?? state.runtimeStatus?.contextWindowUsedTokens;
   const outputTokens = state.streamProgress?.outputTokens ?? usage?.outputTokens;
 
-  return [
-    "模型正在工作中（",
-    formatWorkingElapsedTime(state.elapsedMs ?? 0),
-    `, in: ${formatWorkingTokenCount(inputTokens)}`,
-    `，out：${formatWorkingTokenCount(outputTokens)}`,
-    "）",
-  ].join("");
+  const base = `模型正在工作中（${formatWorkingElapsedTime(state.elapsedMs ?? 0)}, in: ${formatWorkingTokenCount(inputTokens)}`;
+  return isFiniteNumber(outputTokens) && outputTokens > 0
+    ? `${base}，out：${formatWorkingTokenCount(outputTokens)}）`
+    : `${base}）`;
 }
 
 function buildTodoHeader(state: TodoBoardState): string {

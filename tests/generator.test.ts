@@ -3630,6 +3630,10 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(stagedTemplateManifest, /"generateRepair": \{[\s\S]*"effort": "high"/);
     assert.match(sessionAgents, /# Host Session Policy/);
     assert.match(sessionAgents, /acceptanceChecks\.target/);
+    assert.doesNotMatch(sessionAgents, /Do not delegate to child agents or task-style fanout tools/);
+    assert.match(sessionAgents, /prefer using `task` to launch bounded child agents/);
+    assert.match(sessionAgents, /frontend, backend, and verification slices/);
+    assert.match(sessionAgents, /main agent remains responsible for merging/);
     assert.match(planPromptSnapshot, /artifacts\.planSpec/);
     assert.match(planPromptSnapshot, /# Host Session Policy/);
     assert.match(planPromptSnapshot, /Current stage: Plan Stage/);

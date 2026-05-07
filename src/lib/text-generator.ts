@@ -712,7 +712,13 @@ export function mergeRuntimeStatus(current: RuntimeStatus, patch: Partial<Runtim
     ...current,
     ...(patch.modelName ? { modelName: patch.modelName } : {}),
     ...(patch.effort ? { effort: patch.effort } : {}),
-    ...(isFiniteNumber(patch.contextWindowUsedTokens) ? { contextWindowUsedTokens: patch.contextWindowUsedTokens } : {}),
+    ...(isFiniteNumber(patch.contextWindowUsedTokens)
+      ? {
+          contextWindowUsedTokens: isFiniteNumber(current.contextWindowUsedTokens)
+            ? Math.max(current.contextWindowUsedTokens, patch.contextWindowUsedTokens)
+            : patch.contextWindowUsedTokens,
+        }
+      : {}),
     ...(patch.sessionId ? { sessionId: patch.sessionId } : {}),
     ...(patch.phase ? { phase: patch.phase } : {}),
     ...(usage ? { usage } : current.usage ? { usage: current.usage } : {}),
@@ -1491,10 +1497,10 @@ function getTodoBoardStreamProgress(trace: DeepAgentsTraceState): TodoBoardState
   if (isFiniteNumber(inputTokens)) {
     progress.inputTokens = inputTokens;
   }
-  if (isFiniteNumber(trace.receivedOutputTokens)) {
+  if (isFiniteNumber(trace.receivedOutputTokens) && trace.receivedOutputTokens > 0) {
     progress.outputTokens = trace.receivedOutputTokens;
+    progress.outputTokensEstimated = trace.receivedOutputTokensEstimated;
   }
-  progress.outputTokensEstimated = trace.receivedOutputTokensEstimated;
 
   return progress;
 }
@@ -1946,8 +1952,6 @@ export async function runDeepAgentWithLogs(
   for (let retryCount = 0; ; retryCount += 1) {
     try {
       trace.modelOutputStarted = false;
-      trace.receivedOutputTokens = 0;
-      trace.receivedOutputTokensEstimated = false;
 
       const lastValuesChunk = await withActivityTimeout(
         async (signalActivity) => {

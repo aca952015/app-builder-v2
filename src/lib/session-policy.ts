@@ -23,7 +23,6 @@ export function buildSessionPolicyDocument(): string {
     "  - `artifacts.runtimeInteractionValidation` = `/.deepagents/runtime-interaction-validation.json`",
     "  - `artifacts.errorLog` = `/.deepagents/error.log`",
     "- Input `artifacts.*` values are the only source of truth. Do not infer, rename, shorten, or relocate them.",
-    "- Do not delegate to child agents or task-style fanout tools inside DeepAgents stages.",
     "- Use `write_todos` before substantive work and keep todo state updated until the stage is complete.",
     "",
     "## Plan Rules",
@@ -48,6 +47,8 @@ export function buildSessionPolicyDocument(): string {
     "",
     "- The generate stages must treat the validated `planSpec` as the only structured source of truth.",
     "- The generate stages must use `artifacts.interactionContract` to implement critical controls, fallback triggers, visible empty/error states, and external API operation details.",
+    "- In generate and generate repair stages, prefer using `task` to launch bounded child agents when frontend, backend, and verification slices can run in parallel with clear non-overlapping ownership.",
+    "- When using subagents, give each subagent the validated `planSpec`/interaction contract context, exact file or responsibility scope, no-shell-validation boundary, and required final handoff format; the main agent remains responsible for merging, conflict resolution, todo updates, and the final structured response.",
     "- Do not re-plan from the original PRD when `planSpec` is already available.",
     "- If host validation reports broken artifact paths or contract mismatches, repair the affected files in place instead of inventing new paths.",
   ].join("\n");
