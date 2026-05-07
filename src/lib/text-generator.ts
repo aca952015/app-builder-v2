@@ -719,9 +719,32 @@ export function mergeRuntimeStatus(current: RuntimeStatus, patch: Partial<Runtim
   };
 }
 
-export function extractRuntimeStatusPatch(payload: unknown): Partial<RuntimeStatus> {
+function runtimeUsageSignature(usage: RuntimeUsageSummary): string {
+  return [
+    usage.inputTokens ?? "",
+    usage.outputTokens ?? "",
+    usage.totalTokens ?? "",
+    usage.reasoningTokens ?? "",
+    usage.cachedInputTokens ?? "",
+  ].join(":");
+}
+
+export function extractRuntimeStatusPatch(
+  payload: unknown,
+  options: { seenUsageSignatures?: Set<string> } = {},
+): Partial<RuntimeStatus> {
   const usageSummaries = collectRuntimeUsageSummaries(payload);
-  const usage = usageSummaries.reduce<RuntimeUsageSummary | undefined>(
+  const usageSummariesToMerge = options.seenUsageSignatures
+    ? usageSummaries.filter((usage) => {
+        const signature = runtimeUsageSignature(usage);
+        if (options.seenUsageSignatures!.has(signature)) {
+          return false;
+        }
+        options.seenUsageSignatures!.add(signature);
+        return true;
+      })
+    : usageSummaries;
+  const usage = usageSummariesToMerge.reduce<RuntimeUsageSummary | undefined>(
     (current, item) => mergeRuntimeUsageSummary(current, item),
     undefined,
   );
@@ -832,6 +855,7 @@ type DeepAgentsTraceState = {
   logFilePath?: string;
   runtimeStatus: RuntimeStatus;
   agentStatuses: AgentWorkStatus[];
+  seenRuntimeUsageSignatures: Set<string>;
   modelOutputStarted: boolean;
   receivedOutputTokens: number;
   receivedOutputTokensEstimated: boolean;
@@ -1383,12 +1407,19 @@ function markAgentWorking(agentStatuses: AgentWorkStatus[], activeNames: string[
   const active = new Set(activeNames);
   return agentStatuses.map((agent) => ({
     ...agent,
-    status: active.has(agent.name) ? "working" : "idle",
+    status: active.has(agent.name)
+      ? "working"
+      : agent.status === "working"
+        ? "done"
+        : agent.status,
   }));
 }
 
-function markAllAgentsIdle(agentStatuses: AgentWorkStatus[]): AgentWorkStatus[] {
-  return agentStatuses.map((agent) => ({ ...agent, status: "idle" }));
+function markActiveAgentsDone(agentStatuses: AgentWorkStatus[]): AgentWorkStatus[] {
+  return agentStatuses.map((agent) => ({
+    ...agent,
+    status: agent.status === "working" ? "done" : agent.status,
+  }));
 }
 
 function collectActiveAgentNames(payload: unknown, knownNames: Set<string>, activeNames = new Set<string>(), seen = new Set<object>()): Set<string> {
@@ -1587,7 +1618,10 @@ function ensureTraceState(trace: DeepAgentsTraceState, todoSummary: string): voi
 }
 
 function applyStreamProgress(trace: DeepAgentsTraceState, mode: string, payload: unknown): void {
-  trace.runtimeStatus = mergeRuntimeStatus(trace.runtimeStatus, extractRuntimeStatusPatch(payload));
+  trace.runtimeStatus = mergeRuntimeStatus(
+    trace.runtimeStatus,
+    extractRuntimeStatusPatch(payload, { seenUsageSignatures: trace.seenRuntimeUsageSignatures }),
+  );
 
   const messageText = mode === "messages" ? extractMessageText(payload)?.trim() : undefined;
   if (messageText) {
@@ -1892,6 +1926,7 @@ export async function runDeepAgentWithLogs(
       fallbackModelName,
     }),
     agentStatuses: buildDefaultAgentStatuses(runtimePhase),
+    seenRuntimeUsageSignatures: new Set(),
     modelOutputStarted: false,
     receivedOutputTokens: 0,
     receivedOutputTokensEstimated: false,
@@ -1947,7 +1982,7 @@ export async function runDeepAgentWithLogs(
       );
 
       trace.lastNarrative = "生成流程结束。";
-      trace.agentStatuses = markAllAgentsIdle(trace.agentStatuses);
+      trace.agentStatuses = markActiveAgentsDone(trace.agentStatuses);
       await recordOpenModelTodoMetrics(trace, runtime, "stream_end");
       await appendWorkflowLog("[lifecycle] 本轮流式生成结束，等待宿主后续处理。");
       writeSystemTraceEvent(trace.logFilePath, "lifecycle", { result: lastValuesChunk }, "生成流程结束。");

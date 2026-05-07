@@ -11,7 +11,7 @@ import type { RuntimeStatus, StdoutMode } from "./types.js";
 export type WorkflowStage = "计划阶段" | "生成阶段" | "运行验证阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export type ArtifactStatus = "pending" | "generating" | "generated" | "validating" | "verified";
-export type AgentWorkStatusValue = "idle" | "working";
+export type AgentWorkStatusValue = "idle" | "working" | "done";
 export type WorkflowStageMarker = WorkflowStage;
 
 export type TodoItem = {
@@ -544,7 +544,7 @@ function normalizeAgentStatuses(agentStatuses?: AgentWorkStatus[]): AgentWorkSta
     seen.add(name);
     normalized.push({
       name,
-      status: agent.status === "working" ? "working" : "idle",
+      status: agent.status === "working" || agent.status === "done" ? agent.status : "idle",
     });
   }
 
@@ -1209,11 +1209,20 @@ function createAgentStatusElement(state: TodoBoardState): React.ReactNode | null
           },
           `${agent.name}: `,
         ),
-        React.createElement(AnimatedGradientText, {
-          key: `agent-status-value-${index}`,
-          text: agent.status,
-          active: agent.status === "working",
-        }),
+        agent.status === "working"
+          ? React.createElement(AnimatedGradientText, {
+              key: `agent-status-value-${index}`,
+              text: agent.status,
+              active: true,
+            })
+          : React.createElement(
+              Text,
+              {
+                key: `agent-status-value-${index}`,
+                color: agent.status === "done" ? "green" : "white",
+              },
+              agent.status,
+            ),
       ];
 
       if (index < agentStatuses.length - 1) {

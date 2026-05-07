@@ -845,12 +845,13 @@ test("renderTodoBoardToString renders agent statuses below runtime status bar", 
     },
     agentStatuses: [
       { name: "leader", status: "working" },
-      { name: "frontend-implementer", status: "idle" },
+      { name: "frontend-implementer", status: "done" },
+      { name: "backend-implementer", status: "idle" },
     ],
   }, 140));
 
   assert.match(output, /model: gpt-5\.4 .* phase: generate/);
-  assert.match(output, /leader: working \| frontend-implementer: idle/);
+  assert.match(output, /leader: working \| frontend-implementer: done \| backend-implementer: idle/);
   assert.ok(
     output.indexOf("leader: working") > output.indexOf("phase: generate"),
     "agent status row should render below the runtime status bar",
@@ -1091,6 +1092,58 @@ test("mergeRuntimeStatus accumulates usage across multiple chunks", () => {
     reasoningTokens: 8,
     cachedInputTokens: 12,
   });
+});
+
+test("extractRuntimeStatusPatch deduplicates repeated usage snapshots", () => {
+  const seenUsageSignatures = new Set<string>();
+  const repeatedPayload = {
+    messages: [
+      {
+        usage_metadata: {
+          input_tokens: 75_000,
+          output_tokens: 859,
+          total_tokens: 75_859,
+          output_token_details: {
+            reasoning: 572,
+          },
+          input_token_details: {
+            cache_read: 70_000,
+          },
+        },
+      },
+    ],
+  };
+
+  const firstPatch = extractRuntimeStatusPatch(repeatedPayload, { seenUsageSignatures });
+  const repeatedPatch = extractRuntimeStatusPatch(repeatedPayload, { seenUsageSignatures });
+  const merged = mergeRuntimeStatus(
+    mergeRuntimeStatus(
+      buildRuntimeStatus({
+        runtime: {
+          sessionId: "runtime-session-dedupe",
+          templatePhases: {
+            plan: { effort: "high" },
+            planRepair: { effort: "high" },
+            generate: { effort: "medium" },
+            generateRepair: { effort: "low" },
+          },
+        },
+        phase: "generate",
+        fallbackModelName: "gpt-5.4",
+      }),
+      firstPatch,
+    ),
+    repeatedPatch,
+  );
+
+  assert.deepEqual(merged.usage, {
+    inputTokens: 75_000,
+    outputTokens: 859,
+    totalTokens: 75_859,
+    reasoningTokens: 572,
+    cachedInputTokens: 70_000,
+  });
+  assert.equal(merged.contextWindowUsedTokens, 75_000);
 });
 
 test("buildRuntimeStatus maps effort to the active phase", () => {

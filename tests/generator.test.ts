@@ -4887,6 +4887,8 @@ test("template generation prompts encourage bounded parallel subagents", async (
     for (const promptPath of promptPaths) {
       const prompt = await readFile(promptPath, "utf8");
       assert.match(prompt, /鼓励.*subagent|鼓励.*子代理/);
+      assert.match(prompt, /`task`/);
+      assert.match(prompt, /启动.*subagent|启动子代理/);
       assert.match(prompt, /frontend-|frontend/);
       assert.match(prompt, /backend-|backend/);
       assert.match(prompt, /integration-verifier/);
@@ -5316,7 +5318,8 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
   assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
   assert.doesNotMatch(generatePromptSource, /当前禁止执行：调用任何子代理/);
-  assert.match(generatePromptSource, /鼓励在有明确并行价值时调用 `task`\/子代理/);
+  assert.match(generatePromptSource, /鼓励在有明确并行价值时调用 `task` 工具启动子代理/);
+  assert.match(generatePromptSource, /通过 `task` 同时启动多个 subagent/);
   assert.match(generatePromptSource, /frontend-implementer/);
   assert.match(generatePromptSource, /backend-implementer/);
   assert.match(generatePromptSource, /integration-verifier/);
@@ -5347,7 +5350,8 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /validationFailures/);
   assert.doesNotMatch(generateRepairPromptSource, /当前禁止执行：调用任何子代理/);
-  assert.match(generateRepairPromptSource, /鼓励在多个失败项或修补切片彼此独立时调用 `task`\/子代理/);
+  assert.match(generateRepairPromptSource, /鼓励在多个失败项或修补切片彼此独立时调用 `task` 工具启动子代理/);
+  assert.match(generateRepairPromptSource, /通过 `task` 同时启动多个 subagent/);
   assert.match(generateRepairPromptSource, /frontend-fixer/);
   assert.match(generateRepairPromptSource, /backend-fixer/);
   assert.match(generateRepairPromptSource, /integration-verifier/);
