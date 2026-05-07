@@ -156,7 +156,7 @@ export type WorkflowPhase =
   | "generate_repair"
   | "validation"
   | "complete";
-export type ValidationPhase = "plan" | "generate";
+export type ValidationPhase = "plan" | "generate" | "runtimeValidation";
 
 export type RuntimeUsageSummary = {
   inputTokens?: number | undefined;

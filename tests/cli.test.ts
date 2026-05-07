@@ -481,6 +481,50 @@ test("runCli validate can validate an existing validation session by session id"
   }
 });
 
+test("runCli validate accepts runtimeValidation flag and enters runtime validation phase", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-runtime-validation-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+    const result = await generateApplication({
+      specPath,
+      generator: new CliTestGenerator(),
+      validator: new SuccessfulCliValidator(),
+    });
+
+    await runCli(
+      ["validate", result.sessionId, "--runtimeValidation", "--stdout", "log"],
+      {
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    assert.equal(stderrLines.length, 0);
+    assert.match(stdoutLines.join("\n"), /- runtimeValidation: true/);
+    assert.match(stdoutLines.join("\n"), /Phase: runtimeValidation/);
+    assert.match(stdoutLines.join("\n"), /Validation steps:/);
+    assert.match(stdoutLines.join("\n"), /Workflow: complete/);
+    assert.match(stdoutLines.join("\n"), /OK pnpm install: 执行成功。/);
+    assert.match(stdoutLines.join("\n"), /OK pnpm dev: 执行成功。/);
+    assert.match(stdoutLines.join("\n"), /Validation passed\./);
+    assert.match(
+      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      /"valid": true/,
+    );
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("runCli validate resolves a unique short session id prefix", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-validate-short-id-"));
   const previousCwd = process.cwd();

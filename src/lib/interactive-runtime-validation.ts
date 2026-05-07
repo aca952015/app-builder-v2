@@ -1,5 +1,4 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { once } from "node:events";
 import {
   createServer as createHttpServer,
   request as httpRequest,
@@ -15,6 +14,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import {
+  isChildProcessRunning,
+  isPidRunning,
+  spawnManagedDevServerProcess,
+  terminateDevServerProcess,
+  terminateManagedDevServerProcess,
+  terminateProcessTreeByPid,
+  type DevServerProcessCleanupResult,
+  type ManagedDevServerProcess,
+} from "./dev-server-process.js";
 import type { PlanSpec } from "./plan-spec.js";
 import type {
   GenerationValidationStep,
@@ -77,6 +86,7 @@ export type RuntimeInteractionValidationArtifact = {
   browserOpenError?: string;
   devServerOutputSummary?: string;
   detectedDevServerError?: string;
+  devServerProcessCleanup?: DevServerProcessCleanupResult;
   recentDevServerOutput?: string[];
   startedAt: string;
   completedAt?: string;
@@ -160,10 +170,15 @@ export type RuntimeInteractionValidationSession = {
   browserOpenResult?: BrowserOpenResult;
   browserOpenUrl?: string;
   devServerProcess?: ChildProcess;
+  devServerProcessGroupId?: number;
   devServerOutput?: string;
   devServerOutputListeners?: Set<(chunk: Buffer) => void>;
   devServerOutputHandler?: (chunk: Buffer) => void;
   devServerLogPath?: string;
+  devServerSpawnedAt?: string;
+  devServerSpawnCommand?: string;
+  devServerSpawnCwd?: string;
+  devServerProcessCleanup?: DevServerProcessCleanupResult;
 };
 
 const MAX_RECORDED_REQUESTS = 100;
@@ -183,6 +198,9 @@ const IMPLEMENTATION_REQUEST_PATH_PLACEHOLDER = "__APP_BUILDER_IMPLEMENTATION_RE
 const DEV_SERVER_ERROR_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bblocked cross-origin request\b/i, label: "跨源资源阻止" },
   { pattern: /\bcross-origin access\b.*\bblocked\b/i, label: "跨源资源阻止" },
+  { pattern: /\banother\s+next(?:\.js)?\s+dev\s+server\s+is\s+already\s+running\b/i, label: "Next.js dev server 冲突" },
+  { pattern: /\berror:\s+can't\s+resolve\b/i, label: "模块解析失败" },
+  { pattern: /\bcan't\s+resolve\s+['"][^'"]+['"]/i, label: "模块解析失败" },
   { pattern: /\bfailed to compile\b/i, label: "编译失败" },
   { pattern: /\bcompilation failed\b/i, label: "编译失败" },
   { pattern: /\bbuild failed\b/i, label: "构建失败" },
@@ -193,6 +211,10 @@ const DEV_SERVER_ERROR_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\b(?:TypeError|ReferenceError|RangeError|EvalError|URIError):/i, label: "运行时异常" },
   { pattern: /^⨯\s+/, label: "Next.js 错误输出" },
   { pattern: /\berror:\s+(?!.*\b(?:ready|started|compiled|listening)\b)/i, label: "错误输出" },
+];
+
+const IGNORABLE_DEV_SERVER_OUTPUT_PATTERNS = [
+  /\bMallocStackLogging:\s+can't turn off malloc stack logging because it was not enabled\./i,
 ];
 
 const DISABLED_OPEN_BROWSER_VALUES = new Set(["0", "false", "no", "off"]);
@@ -280,32 +302,6 @@ async function reserveFreePort(): Promise<number> {
   });
 }
 
-async function terminateChildProcess(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  const exitPromise = once(child, "exit").catch(() => undefined);
-  const settled = await Promise.race([
-    exitPromise.then(() => true),
-    sleep(3_000).then(() => false),
-  ]);
-
-  if (settled) {
-    return;
-  }
-
-  if (child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-  }
-  await exitPromise;
-}
-
-function isChildProcessRunning(child: ChildProcess): boolean {
-  return child.exitCode === null && child.signalCode === null && child.killed !== true;
-}
-
 function appendBoundedDevServerOutput(current: string | undefined, text: string): string {
   const output = `${current ?? ""}${text}`;
   if (output.length <= MAX_DEV_SERVER_OUTPUT_CHARS) {
@@ -329,21 +325,33 @@ function clearSessionDevServerProcess(session: RuntimeInteractionValidationSessi
     child.stderr?.off("data", handler);
   }
   delete session.devServerProcess;
+  delete session.devServerProcessGroupId;
   delete session.devServerOutput;
   delete session.devServerOutputListeners;
   delete session.devServerOutputHandler;
   delete session.devServerLogPath;
+  delete session.devServerSpawnedAt;
+  delete session.devServerSpawnCommand;
+  delete session.devServerSpawnCwd;
 }
 
 function attachDevServerProcessToSession(
   session: RuntimeInteractionValidationSession,
-  child: ChildProcess,
+  managed: ManagedDevServerProcess,
   logPath: string,
 ): void {
   clearSessionDevServerProcess(session);
+  const { child } = managed;
   session.devServerProcess = child;
+  if (managed.processGroupId !== undefined) {
+    session.devServerProcessGroupId = managed.processGroupId;
+  }
   session.devServerOutput = "";
   session.devServerLogPath = logPath;
+  session.devServerSpawnedAt = managed.spawnedAt;
+  session.devServerSpawnCommand = [managed.command, ...managed.args].join(" ");
+  session.devServerSpawnCwd = managed.cwd;
+  delete session.devServerProcessCleanup;
   session.devServerOutputListeners = new Set();
 
   const handler = (chunk: Buffer) => {
@@ -364,12 +372,19 @@ function attachDevServerProcessToSession(
 
 export async function closeRuntimeInteractionValidationSession(
   session: RuntimeInteractionValidationSession,
-): Promise<void> {
+): Promise<DevServerProcessCleanupResult | undefined> {
   const child = session.devServerProcess;
+  let cleanup: DevServerProcessCleanupResult | undefined;
   if (child) {
-    await terminateChildProcess(child);
+    cleanup = await terminateDevServerProcess(child, {
+      ...(session.devServerProcessGroupId !== undefined
+        ? { processGroupId: session.devServerProcessGroupId }
+        : {}),
+    });
+    session.devServerProcessCleanup = cleanup;
   }
   clearSessionDevServerProcess(session);
+  return cleanup;
 }
 
 function resolveDefaultBrowserCommand(url: string): { command: string; args: string[] } {
@@ -439,8 +454,9 @@ function shouldOpenBrowser(explicit: boolean | undefined): boolean {
 function summarizeCommandOutput(output: string): string {
   const lines = output
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+    .map((line) => stripAnsi(line).trim())
+    .filter(Boolean)
+    .filter((line) => !isIgnorableDevServerOutputLine(line));
   if (lines.length === 0) {
     return "没有捕获到额外输出。";
   }
@@ -493,11 +509,24 @@ function recentOutputLines(output: string, limit = 12): string[] {
     .split(/\r?\n/)
     .map((line) => stripAnsi(line).trim())
     .filter(Boolean)
+    .filter((line) => !isIgnorableDevServerOutputLine(line))
     .slice(-limit);
 }
 
+function allSignificantOutputLines(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => stripAnsi(line).trim())
+    .filter(Boolean)
+    .filter((line) => !isIgnorableDevServerOutputLine(line));
+}
+
+function isIgnorableDevServerOutputLine(line: string): boolean {
+  return IGNORABLE_DEV_SERVER_OUTPUT_PATTERNS.some((pattern) => pattern.test(line));
+}
+
 export function detectDevServerOutputFailure(output: string): string | undefined {
-  for (const line of recentOutputLines(output, 24)) {
+  for (const line of allSignificantOutputLines(output)) {
     const matchedPattern = DEV_SERVER_ERROR_PATTERNS.find(({ pattern }) => pattern.test(line));
     if (matchedPattern) {
       return `开发服务器 stdout/stderr 检测到${matchedPattern.label}：${line}`;
@@ -511,7 +540,7 @@ async function spawnDevServer(options: {
   step: TemplateRuntimeValidationStep;
   cwd: string;
   port: number;
-}): Promise<ChildProcess> {
+}): Promise<ManagedDevServerProcess> {
   const env = {
     ...process.env,
     ...options.step.env,
@@ -520,11 +549,170 @@ async function spawnDevServer(options: {
   };
   const resolvedCommand = await resolveSpawnCommand(options.step.command, env);
 
-  return spawn(resolvedCommand, options.step.args, {
+  return spawnManagedDevServerProcess({
+    command: resolvedCommand,
+    args: options.step.args,
     cwd: options.cwd,
     env,
-    stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+type NextDevServerLockInfo = {
+  pid: number;
+  dir: string;
+  source: string;
+  appUrl?: string;
+};
+
+async function readOptionalText(filePath: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function parseNextDevServerLockInfo(
+  source: string,
+  contents: string,
+  outputDirectory: string,
+): NextDevServerLockInfo | null {
+  try {
+    const parsed = JSON.parse(contents) as Partial<{
+      pid: unknown;
+      appUrl: unknown;
+    }>;
+    const pid = typeof parsed.pid === "number" ? parsed.pid : Number(parsed.pid);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return null;
+    }
+    return {
+      pid,
+      dir: outputDirectory,
+      source,
+      ...(typeof parsed.appUrl === "string" ? { appUrl: parsed.appUrl } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveComparablePath(filePath: string): Promise<string> {
+  try {
+    return await fs.realpath(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+async function isSameDirectory(left: string, right: string): Promise<boolean> {
+  return path.normalize(await resolveComparablePath(left)) === path.normalize(await resolveComparablePath(right));
+}
+
+async function readCurrentOutputNextDevServerLocks(outputDirectory: string): Promise<NextDevServerLockInfo[]> {
+  const lockPaths = [
+    path.join(outputDirectory, ".next", "dev", "lock"),
+    path.join(outputDirectory, ".next", "lock"),
+  ];
+  const locks: NextDevServerLockInfo[] = [];
+  for (const lockPath of lockPaths) {
+    const contents = await readOptionalText(lockPath);
+    if (!contents) {
+      continue;
+    }
+    const lockInfo = parseNextDevServerLockInfo(lockPath, contents, outputDirectory);
+    if (lockInfo) {
+      locks.push(lockInfo);
+    }
+  }
+  return locks;
+}
+
+async function findStaleDevServerPidsByDirectory(directory: string): Promise<number[]> {
+  if (process.platform === "win32") {
+    return [];
+  }
+
+  return await new Promise<number[]>((resolve) => {
+    const child = spawn("ps", ["-A", "-o", "pid=", "-o", "args="], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let output = "";
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+    });
+    child.once("error", () => resolve([]));
+    child.once("exit", (exitCode) => {
+      if (exitCode !== 0) {
+        resolve([]);
+        return;
+      }
+
+      const resolvedDir = path.resolve(directory);
+      const pids: number[] = [];
+      for (const line of output.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
+        }
+        const parts = trimmed.split(/\s+/);
+        if (parts.length < 2) {
+          continue;
+        }
+        const pid = Number(parts[0]);
+        if (!Number.isInteger(pid) || pid <= 0) {
+          continue;
+        }
+
+        const args = parts.slice(1).join(" ");
+        if (args.includes(resolvedDir) && args.includes("next")) {
+          pids.push(pid);
+        }
+      }
+      resolve(pids);
+    });
+  });
+}
+
+async function cleanupStaleNextDevServerBeforeStart(options: {
+  outputDirectory: string;
+  logPath: string;
+}): Promise<DevServerProcessCleanupResult | undefined> {
+  const locks = await readCurrentOutputNextDevServerLocks(options.outputDirectory);
+  for (const lockInfo of locks) {
+    if (lockInfo.pid === process.pid || !(await isSameDirectory(lockInfo.dir, options.outputDirectory))) {
+      continue;
+    }
+    if (!isPidRunning(lockInfo.pid)) {
+      continue;
+    }
+
+    const cleanup = await terminateProcessTreeByPid({ pid: lockInfo.pid });
+    await appendRuntimeValidationLog(options.logPath, [
+      `[interactive] Stopped stale Next dev server PID ${lockInfo.pid} for ${options.outputDirectory} before starting validation.`,
+      `[interactive] Stale source: ${lockInfo.source}${lockInfo.appUrl ? ` (${lockInfo.appUrl})` : ""}; cleanup exited=${cleanup.exited} forced=${cleanup.forced}.`,
+      "",
+    ]);
+    return cleanup;
+  }
+
+  const orphanPids = await findStaleDevServerPidsByDirectory(options.outputDirectory);
+  for (const pid of orphanPids) {
+    if (pid === process.pid || !isPidRunning(pid)) {
+      continue;
+    }
+
+    const cleanup = await terminateProcessTreeByPid({ pid });
+    await appendRuntimeValidationLog(options.logPath, [
+      `[interactive] Stopped orphan dev server PID ${pid} for ${options.outputDirectory} before starting validation (detected by command-line scan).`,
+      `[interactive] Cleanup exited=${cleanup.exited} forced=${cleanup.forced}.`,
+      "",
+    ]);
+    return cleanup;
+  }
+
+  return undefined;
 }
 
 async function pingDevServer(port: number): Promise<boolean> {
@@ -849,6 +1037,7 @@ function buildRuntimeInteractionArtifact(options: {
   browserOpenResult?: BrowserOpenResult;
   devServerOutput?: string;
   detectedDevServerError?: string;
+  devServerProcessCleanup?: DevServerProcessCleanupResult;
   startedAt: string;
   completedAt?: string;
   config: TemplateInteractiveRuntimeValidation;
@@ -901,6 +1090,9 @@ function buildRuntimeInteractionArtifact(options: {
   }
   if (options.detectedDevServerError) {
     artifact.detectedDevServerError = options.detectedDevServerError;
+  }
+  if (options.devServerProcessCleanup) {
+    artifact.devServerProcessCleanup = options.devServerProcessCleanup;
   }
   if (options.completedAt) {
     artifact.completedAt = options.completedAt;
@@ -1497,6 +1689,8 @@ export async function runInteractiveRuntimeValidation(options: {
   let lastActivityAt = Date.now();
   let persistQueue = Promise.resolve();
   let child: ChildProcess | null = null;
+  let managedDevServer: ManagedDevServerProcess | null = null;
+  let devServerProcessCleanup: DevServerProcessCleanupResult | undefined;
   let proxyServer: HttpServer | null = null;
   let pendingOutputLine = "";
   let finished = false;
@@ -1534,6 +1728,7 @@ export async function runInteractiveRuntimeValidation(options: {
       ...(browserOpenResult ? { browserOpenResult } : {}),
       devServerOutput: output,
       ...(includeFailure && failureReason ? { detectedDevServerError: failureReason } : {}),
+      ...(devServerProcessCleanup ? { devServerProcessCleanup } : {}),
       startedAt,
       ...(completedAt ? { completedAt } : {}),
       config,
@@ -1561,6 +1756,30 @@ export async function runInteractiveRuntimeValidation(options: {
     return await persist(valid, reasons, new Date().toISOString());
   };
 
+  const stopDevServerBeforeRepair = async (reason: string) => {
+    if (!child || devServerProcessCleanup) {
+      return;
+    }
+
+    stopping = true;
+    if (options.session?.devServerProcess) {
+      devServerProcessCleanup = await closeRuntimeInteractionValidationSession(options.session);
+    } else if (managedDevServer) {
+      devServerProcessCleanup = await terminateManagedDevServerProcess(managedDevServer);
+    } else {
+      devServerProcessCleanup = await terminateDevServerProcess(child);
+    }
+    child = null;
+    managedDevServer = null;
+    await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+      `[interactive] Stopped failing dev server before repair: ${reason}`,
+      devServerProcessCleanup
+        ? `[interactive] Dev server cleanup attempted=${devServerProcessCleanup.attempted} exited=${devServerProcessCleanup.exited} forced=${devServerProcessCleanup.forced} pids=${devServerProcessCleanup.killedPids.join(",") || "none"}.`
+        : "[interactive] Dev server cleanup skipped: no live process was recorded.",
+      "",
+    ]);
+  };
+
   const publishUpdate = async () => {
     if (!options.onUpdate) {
       return;
@@ -1586,6 +1805,9 @@ export async function runInteractiveRuntimeValidation(options: {
 
   const recordDevServerOutput = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
+    const detectedOutputFailure = failureReason
+      ? undefined
+      : detectDevServerOutputFailure(`${output}${text}`) ?? detectDevServerOutputFailure(text);
     output = appendBoundedDevServerOutput(output, text);
     lastActivityAt = Date.now();
 
@@ -1606,7 +1828,7 @@ export async function runInteractiveRuntimeValidation(options: {
     }
 
     if (!failureReason) {
-      failureReason = detectDevServerOutputFailure(output) ?? null;
+      failureReason = detectedOutputFailure ?? detectDevServerOutputFailure(output) ?? null;
     }
     if (!options.session) {
       void fs.appendFile(options.runtime.deepagentsRuntimeValidationLogPath, text, "utf8");
@@ -1632,18 +1854,23 @@ export async function runInteractiveRuntimeValidation(options: {
       "",
     ]);
   } else {
+    await cleanupStaleNextDevServerBeforeStart({
+      outputDirectory: options.runtime.outputDirectory,
+      logPath: options.runtime.deepagentsRuntimeValidationLogPath,
+    });
     await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
       `$ PORT=${devPort} HOSTNAME=127.0.0.1 ${[devServerStep.command, ...devServerStep.args].join(" ")}`,
       "",
     ]);
     try {
-      child = await spawnDevServer({
+      managedDevServer = await spawnDevServer({
         step: devServerStep,
         cwd: options.runtime.outputDirectory,
         port: devPort,
       });
+      child = managedDevServer.child;
       if (options.session) {
-        attachDevServerProcessToSession(options.session, child, options.runtime.deepagentsRuntimeValidationLogPath);
+        attachDevServerProcessToSession(options.session, managedDevServer, options.runtime.deepagentsRuntimeValidationLogPath);
       }
     } catch (error) {
       const reason = `交互式运行验证无法启动开发服务器：${errorSummary(error)}`;
@@ -1664,6 +1891,11 @@ export async function runInteractiveRuntimeValidation(options: {
     const listeners = ensureSessionOutputListeners(options.session);
     listeners.add(recordDevServerOutput);
     removeDevServerOutputListener = () => listeners.delete(recordDevServerOutput);
+    if (managedDevServer && options.session.devServerOutput) {
+      const bufferedOutput = options.session.devServerOutput;
+      output = appendBoundedDevServerOutput(output, bufferedOutput);
+      failureReason = detectDevServerOutputFailure(bufferedOutput) ?? failureReason;
+    }
   } else {
     child.stdout!.on("data", recordDevServerOutput);
     child.stderr!.on("data", recordDevServerOutput);
@@ -1686,6 +1918,7 @@ export async function runInteractiveRuntimeValidation(options: {
     const readyTimeoutAt = Date.now() + config.readyTimeoutMs;
     while (Date.now() < readyTimeoutAt) {
       if (failureReason) {
+        await stopDevServerBeforeRepair(failureReason);
         const artifact = await finish(false, [failureReason]);
         return {
           reasons: [failureReason],
@@ -1707,6 +1940,7 @@ export async function runInteractiveRuntimeValidation(options: {
         `[error] ${reason}`,
         "",
       ]);
+      await stopDevServerBeforeRepair(reason);
       const artifact = await finish(false, [reason]);
       return {
         reasons: [reason],
@@ -1755,6 +1989,7 @@ export async function runInteractiveRuntimeValidation(options: {
         `[error] ${reason}`,
         "",
       ]);
+      await stopDevServerBeforeRepair(reason);
       const artifact = await finish(false, [reason]);
       return {
         reasons: [reason],
@@ -1838,6 +2073,7 @@ export async function runInteractiveRuntimeValidation(options: {
       if (implementationRequest) {
         const requirementSummary = summarizeImplementationRequirement(implementationRequest.requirement);
         const reason = `用户在运行验证页提交实现要求：${requirementSummary}`;
+        await stopDevServerBeforeRepair(reason);
         const artifact = await finish(false, [reason]);
         await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
           `[repair] Runtime validation implementation request from /validate: ${requirementSummary}`,
@@ -1855,6 +2091,7 @@ export async function runInteractiveRuntimeValidation(options: {
       }
 
       if (failureReason) {
+        await stopDevServerBeforeRepair(failureReason);
         const artifact = await finish(false, [failureReason]);
         await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
           `[error] ${failureReason}`,
@@ -1912,7 +2149,11 @@ export async function runInteractiveRuntimeValidation(options: {
       await closeHttpServer(proxyServer);
     }
     if (child && !options.session) {
-      await terminateChildProcess(child);
+      if (managedDevServer) {
+        await terminateManagedDevServerProcess(managedDevServer);
+      } else {
+        await terminateDevServerProcess(child);
+      }
     }
   }
 }

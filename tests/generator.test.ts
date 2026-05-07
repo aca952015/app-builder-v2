@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { connect as connectNet, createServer as createNetServer } from "node:net";
@@ -532,6 +533,37 @@ async function canListenOnLocalhost(): Promise<boolean> {
   });
 }
 
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function waitForPidExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isPidRunning(pid)) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return !isPidRunning(pid);
+}
+
+function stopTestProcess(child: ChildProcess | undefined): void {
+  if (!child || child.pid === undefined || !isPidRunning(child.pid)) {
+    return;
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // Best-effort cleanup for tests that intentionally launch stale processes.
+  }
+}
+
 async function writeMinimalTemplatePack(options: {
   root: string;
   id: string;
@@ -542,6 +574,8 @@ async function writeMinimalTemplatePack(options: {
   coverageThreshold?: number;
   serverCommand?: string;
   serverArgs?: string[];
+  generateRepairRetries?: number;
+  planRepairRetries?: number;
 }): Promise<void> {
   const templateDirectory = path.join(options.root, "templates", options.id);
   const promptsDirectory = path.join(templateDirectory, "prompts");
@@ -582,8 +616,8 @@ async function writeMinimalTemplatePack(options: {
       version: "1.0.0",
       projectRenderer: "interactive-test",
       repairRetries: {
-        plan: 2,
-        generate: 2,
+        plan: options.planRepairRetries ?? 2,
+        generate: options.generateRepairRetries ?? 2,
       },
       phases: {
         plan: { prompt: "prompts/plan-system-prompt.md", effort: "high" },
@@ -1520,6 +1554,168 @@ test("interactive runtime reuses ports and does not reopen browser within a sess
   }
 });
 
+test("closeRuntimeInteractionValidationSession terminates dev server descendants", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-process-tree-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const childPath = path.join(tempRoot, "child.mjs");
+  const childPidPath = path.join(tempRoot, "child.pid");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+  const session: RuntimeInteractionValidationSession = {};
+  let childPid: number | undefined;
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(childPath, "setInterval(() => {}, 1000);\n", "utf8");
+    await writeFile(
+      serverPath,
+      [
+        "import { spawn } from 'node:child_process';",
+        "import { writeFileSync } from 'node:fs';",
+        "import http from 'node:http';",
+        `const childPidPath = ${JSON.stringify(childPidPath)};`,
+        "const child = spawn(process.execPath, ['child.mjs'], { stdio: 'ignore' });",
+        "writeFileSync(childPidPath, String(child.pid));",
+        "const port = Number(process.env.PORT);",
+        "http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); }).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 0,
+        idleTimeoutMs: 20,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+
+    const result = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      session,
+      openBrowser: false,
+    });
+
+    childPid = Number(await readFile(childPidPath, "utf8"));
+    assert.equal(result.artifact.valid, true);
+    assert.equal(isPidRunning(childPid), true);
+
+    await closeRuntimeInteractionValidationSession(session);
+    assert.equal(await waitForPidExit(childPid), true);
+    assert.equal(session.devServerProcessCleanup?.attempted, true);
+  } finally {
+    await closeRuntimeInteractionValidationSession(session);
+    if (childPid !== undefined && isPidRunning(childPid)) {
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("interactive runtime clears stale Next dev lock for the current output directory before startup", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-stale-next-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const nextDevDirectory = path.join(tempRoot, ".next", "dev");
+  const staleProcessPath = path.join(tempRoot, "stale-next.mjs");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+  let staleProcess: ChildProcess | undefined;
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await mkdir(nextDevDirectory, { recursive: true });
+    await writeFile(staleProcessPath, "setInterval(() => {}, 1000);\n", "utf8");
+    staleProcess = spawn(process.execPath, ["stale-next.mjs"], {
+      cwd: tempRoot,
+      stdio: "ignore",
+    });
+    const stalePid = staleProcess.pid;
+    assert.ok(stalePid);
+    await writeFile(
+      path.join(nextDevDirectory, "lock"),
+      `${JSON.stringify({
+        pid: stalePid,
+        port: 64115,
+        hostname: "localhost",
+        appUrl: "http://localhost:64115",
+        startedAt: Date.now(),
+      })}\n`,
+      "utf8",
+    );
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); }).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 0,
+        idleTimeoutMs: 20,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+
+    const result = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      openBrowser: false,
+    });
+
+    assert.equal(result.artifact.valid, true);
+    assert.equal(await waitForPidExit(stalePid), true);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /Stopped stale Next dev server PID/);
+  } finally {
+    stopTestProcess(staleProcess);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("interactive runtime fails on blocked cross-origin dev resource output", async (context) => {
   if (!await canListenOnLocalhost()) {
     context.skip("local port binding is not available in this sandbox");
@@ -1633,6 +1829,73 @@ test("interactive runtime fails from dev server stdout errors", async (context) 
     assert.equal(result.artifact.valid, false);
     assert.match(result.reasons.join("\n"), /stdout\/stderr/);
     assert.match(result.reasons.join("\n"), /Failed to compile/);
+    assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /detectedDevServerError/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("interactive runtime detects compile errors before MallocStackLogging noise", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-stdout-noise-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "process.stderr.write([",
+        "  \"Error: Can't resolve 'tailwindcss' in '/tmp/generated-app'\",",
+        "  ...Array.from({ length: 80 }, (_, index) => `node(${64000 + index}) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.`),",
+        "].join('\\n') + '\\n');",
+        "http.createServer((_req, res) => { res.writeHead(200); res.end('ok'); }).listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      templateInteractiveRuntimeValidation: {
+        enabled: true,
+        coverageThreshold: 0,
+        idleTimeoutMs: 20,
+        readyTimeoutMs: 5_000,
+        devServerStep,
+      },
+    });
+
+    const session: RuntimeInteractionValidationSession = {};
+    const result = await runInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      config: runtime.templateInteractiveRuntimeValidation,
+      session,
+      openBrowser: false,
+    });
+
+    assert.equal(result.artifact.valid, false);
+    assert.match(result.reasons.join("\n"), /Can't resolve 'tailwindcss'/);
+    assert.doesNotMatch(result.reasons.join("\n"), /MallocStackLogging/);
+    assert.equal(session.devServerProcess, undefined);
+    assert.equal(result.artifact.devServerProcessCleanup?.attempted, true);
     assert.match(await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8"), /detectedDevServerError/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
@@ -3175,6 +3438,62 @@ class InteractiveRuntimeRepairingTextGenerator implements TextGenerator {
   }
 }
 
+class InteractiveRuntimeRepairingAfterGenerateRetryBudgetTextGenerator extends InteractiveRuntimeRepairingTextGenerator {
+  initialDevServerPidWasRunningWhenRepairStarted: boolean | undefined;
+
+  override async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Interactive Runtime Report\n\nInitial delivery.\n",
+      extraFiles: [
+        {
+          path: "server.mjs",
+          contents: [
+            "import { writeFileSync } from 'node:fs';",
+            "writeFileSync('dev-server.pid', String(process.pid));",
+            "console.error(\"Error: Can't resolve 'tailwindcss' in '/tmp/generated-app'\");",
+            "setInterval(() => undefined, 1000);",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+    await writeFile(
+      runtime.deepagentsErrorLogPath,
+      [
+        "[2026-05-07T00:00:00.000Z]",
+        "Retry attempt 1 triggered for 生成修复阶段 because:",
+        "- pre-existing generated artifact failure.",
+        "",
+        "[2026-05-07T00:00:01.000Z]",
+        "Retry attempt 2 triggered for 生成修复阶段 because:",
+        "- another pre-existing generated artifact failure.",
+        "",
+      ].join("\n"),
+      { encoding: "utf8", flag: "a" },
+    );
+
+    return {
+      summary: "生成阶段覆盖完整，但交互式 dev server 会输出模块解析错误。",
+      filesWritten: ["app-builder-report.md", "server.mjs"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  override async generateRepairProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    const rawPid = await readFile(path.join(runtime.outputDirectory, "dev-server.pid"), "utf8").catch(() => "");
+    const pid = Number(rawPid.trim());
+    this.initialDevServerPidWasRunningWhenRepairStarted = Number.isInteger(pid) && pid > 0
+      ? isPidRunning(pid)
+      : undefined;
+    return await super.generateRepairProject(planSpec, runtime);
+  }
+}
+
 class LooseDeclarationTextGenerator implements TextGenerator {
   async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
     const planSpec = buildPlanSpec();
@@ -4642,6 +4961,102 @@ test("generateApplication runs enabled interactive validation and repairs inside
   }
 });
 
+test("generateApplication repairs first interactive runtime failure even when generate retry limit is zero", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-runtime-zero-retry-"));
+  const previousCwd = process.cwd();
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new InteractiveRuntimeRepairingTextGenerator();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "interactive-runtime-zero-retry",
+      interactiveEnabled: true,
+      coverageThreshold: 0,
+      idleTimeoutMs: 20,
+      readyTimeoutMs: 1_000,
+      serverCommand: process.execPath,
+      serverArgs: ["server.mjs"],
+      generateRepairRetries: 0,
+    });
+    process.chdir(tempRoot);
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "interactive-runtime-zero-retry",
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const errorLog = await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8");
+    const interactionArtifact = await readFile(
+      path.join(result.outputDirectory, ".deepagents/runtime-interaction-validation.json"),
+      "utf8",
+    );
+
+    assert.equal(generator.generationRepairAttempts, 1);
+    assert.match(errorLog, /Retry attempt 1 triggered for 运行验证修复阶段/);
+    assert.match(interactionArtifact, /"valid": true/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication stops failing interactive dev server and repairs even after generate retry budget was used", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-runtime-budget-"));
+  const previousCwd = process.cwd();
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new InteractiveRuntimeRepairingAfterGenerateRetryBudgetTextGenerator();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "interactive-runtime-budget",
+      interactiveEnabled: true,
+      coverageThreshold: 0,
+      idleTimeoutMs: 20,
+      readyTimeoutMs: 1_000,
+      serverCommand: process.execPath,
+      serverArgs: ["server.mjs"],
+    });
+    process.chdir(tempRoot);
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "interactive-runtime-budget",
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const errorLog = await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8");
+    const interactionArtifact = await readFile(
+      path.join(result.outputDirectory, ".deepagents/runtime-interaction-validation.json"),
+      "utf8",
+    );
+
+    assert.equal(generator.generationRepairAttempts, 1);
+    assert.equal(generator.initialDevServerPidWasRunningWhenRepairStarted, false);
+    assert.match(errorLog, /Retry attempt 1 triggered for 运行验证修复阶段/);
+    assert.match(interactionArtifact, /"valid": true/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication validates generated coverage from actual files instead of decorative declarations", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-loose-declarations-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -4930,8 +5345,8 @@ test("mini-app template enables interactive runtime validation", async () => {
 
   const nextConfig = await readFile(path.join(template.starterDirectory ?? "", "next.config.ts"), "utf8");
   assert.match(nextConfig, /allowedDevOrigins:\s*\["127\.0\.0\.1", "localhost"\]/);
-  assert.doesNotMatch(nextConfig, /turbopack:\s*\{/);
-  assert.doesNotMatch(nextConfig, /root:\s*__dirname/);
+  assert.match(nextConfig, /turbopack:\s*\{/);
+  assert.match(nextConfig, /root:\s*path\.resolve\(__dirname\)/);
 });
 
 test("loadTemplatePack parses enabled interactive runtime validation defaults", async () => {

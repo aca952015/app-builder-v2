@@ -6,6 +6,11 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import {
+  spawnManagedDevServerProcess,
+  terminateManagedDevServerProcess,
+  type ManagedDevServerProcess,
+} from "./dev-server-process.js";
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { routeToPageFileCandidates } from "./app-router.js";
 import { parseDotEnv } from "./env.js";
@@ -72,7 +77,7 @@ import {
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 const DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY = 8;
-type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段";
+type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段" | "运行验证修复阶段";
 
 function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
   return {
@@ -507,10 +512,31 @@ async function runCommandStep(options: {
     };
   }
 
+  const DASHBOARD_LOG_INTERVAL_MS = 3_000;
+  let lastDashboardLogAt = 0;
+  let pendingOutputLine = "";
+
   const onChunk = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
     output += text;
     void fs.appendFile(options.logPath, text, "utf8");
+
+    const outputWithPending = `${pendingOutputLine}${text}`;
+    const outputLines = outputWithPending.split(/\r?\n/);
+    pendingOutputLine = outputLines.pop() ?? "";
+
+    const now = Date.now();
+    if (now - lastDashboardLogAt > DASHBOARD_LOG_INTERVAL_MS && outputLines.length > 0) {
+      lastDashboardLogAt = now;
+      const recentLines = outputLines
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .slice(-3);
+      for (const line of recentLines) {
+        const truncated = line.length > 200 ? `${line.slice(0, 200)}...` : line;
+        void appendWorkflowLog(`[host] ${options.name}: ${truncated}`);
+      }
+    }
   };
 
   child.stdout!.on("data", onChunk);
@@ -665,17 +691,22 @@ async function runDevValidationStep(outputDirectory: string, logPath: string): P
     "",
   ]);
 
+  let managedDevServer: ManagedDevServerProcess;
   let child: ChildProcess;
   try {
-    child = await spawnValidationCommand({
-      command: "pnpm",
-      args: ["dev"],
-      cwd: outputDirectory,
-      env: {
+    const env = {
+      ...process.env,
         HOSTNAME: "127.0.0.1",
         PORT: String(port),
-      },
+    };
+    const resolvedCommand = await resolveSpawnCommand("pnpm", env);
+    managedDevServer = spawnManagedDevServerProcess({
+      command: resolvedCommand,
+      args: ["dev"],
+      cwd: outputDirectory,
+      env,
     });
+    child = managedDevServer.child;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     await appendRuntimeValidationLog(logPath, [
@@ -689,10 +720,31 @@ async function runDevValidationStep(outputDirectory: string, logPath: string): P
     };
   }
 
+  const DASHBOARD_LOG_INTERVAL_MS = 3_000;
+  let lastDashboardLogAt = 0;
+  let pendingOutputLine = "";
+
   const onChunk = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
     output += text;
     void fs.appendFile(logPath, text, "utf8");
+
+    const outputWithPending = `${pendingOutputLine}${text}`;
+    const outputLines = outputWithPending.split(/\r?\n/);
+    pendingOutputLine = outputLines.pop() ?? "";
+
+    const now = Date.now();
+    if (now - lastDashboardLogAt > DASHBOARD_LOG_INTERVAL_MS && outputLines.length > 0) {
+      lastDashboardLogAt = now;
+      const recentLines = outputLines
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .slice(-3);
+      for (const line of recentLines) {
+        const truncated = line.length > 200 ? `${line.slice(0, 200)}...` : line;
+        void appendWorkflowLog(`[host] pnpm dev: ${truncated}`);
+      }
+    }
   };
 
   child.stdout!.on("data", onChunk);
@@ -703,7 +755,7 @@ async function runDevValidationStep(outputDirectory: string, logPath: string): P
       return step;
     }
     finished = true;
-    await terminateChildProcess(child);
+    await terminateManagedDevServerProcess(managedDevServer);
     await appendRuntimeValidationLog(logPath, [
       "",
       step.ok ? `[ok] ${step.detail}` : `[error] ${step.detail}`,
@@ -713,7 +765,13 @@ async function runDevValidationStep(outputDirectory: string, logPath: string): P
   };
 
   const timeoutAt = Date.now() + DEFAULT_DEV_SERVER_READY_TIMEOUT_MS;
+  let lastWaitLogAt = 0;
   while (!finished && Date.now() < timeoutAt) {
+    if (Date.now() - lastWaitLogAt > 5_000) {
+      lastWaitLogAt = Date.now();
+      void appendWorkflowLog("[host] pnpm dev: 等待开发服务器就绪...");
+    }
+
     if (child.exitCode !== null || child.signalCode !== null) {
       const exitCode = child.exitCode;
       const signal = child.signalCode;
@@ -760,18 +818,23 @@ async function runConfiguredDevValidationStep(options: {
     "",
   ]);
 
+  let managedDevServer: ManagedDevServerProcess;
   let child: ChildProcess;
   try {
-    child = await spawnValidationCommand({
-      command: options.command,
+    const env = {
+      ...process.env,
+      ...options.env,
+      HOSTNAME: "127.0.0.1",
+      PORT: String(port),
+    };
+    const resolvedCommand = await resolveSpawnCommand(options.command, env);
+    managedDevServer = spawnManagedDevServerProcess({
+      command: resolvedCommand,
       args: options.args,
       cwd: options.outputDirectory,
-      env: {
-        ...options.env,
-        HOSTNAME: "127.0.0.1",
-        PORT: String(port),
-      },
+      env,
     });
+    child = managedDevServer.child;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     await appendRuntimeValidationLog(options.logPath, [
@@ -785,10 +848,31 @@ async function runConfiguredDevValidationStep(options: {
     };
   }
 
+  const DASHBOARD_LOG_INTERVAL_MS = 3_000;
+  let lastDashboardLogAt = 0;
+  let pendingOutputLine = "";
+
   const onChunk = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
     output += text;
     void fs.appendFile(options.logPath, text, "utf8");
+
+    const outputWithPending = `${pendingOutputLine}${text}`;
+    const outputLines = outputWithPending.split(/\r?\n/);
+    pendingOutputLine = outputLines.pop() ?? "";
+
+    const now = Date.now();
+    if (now - lastDashboardLogAt > DASHBOARD_LOG_INTERVAL_MS && outputLines.length > 0) {
+      lastDashboardLogAt = now;
+      const recentLines = outputLines
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .slice(-3);
+      for (const line of recentLines) {
+        const truncated = line.length > 200 ? `${line.slice(0, 200)}...` : line;
+        void appendWorkflowLog(`[host] ${options.name}: ${truncated}`);
+      }
+    }
   };
 
   child.stdout!.on("data", onChunk);
@@ -799,7 +883,7 @@ async function runConfiguredDevValidationStep(options: {
       return step;
     }
     finished = true;
-    await terminateChildProcess(child);
+    await terminateManagedDevServerProcess(managedDevServer);
     await appendRuntimeValidationLog(options.logPath, [
       "",
       step.ok ? `[ok] ${step.detail}` : `[error] ${step.detail}`,
@@ -809,7 +893,13 @@ async function runConfiguredDevValidationStep(options: {
   };
 
   const timeoutAt = Date.now() + DEFAULT_DEV_SERVER_READY_TIMEOUT_MS;
+  let lastWaitLogAt = 0;
   while (!finished && Date.now() < timeoutAt) {
+    if (Date.now() - lastWaitLogAt > 5_000) {
+      lastWaitLogAt = Date.now();
+      void appendWorkflowLog(`[host] ${options.name}: 等待开发服务器就绪...`);
+    }
+
     if (child.exitCode !== null || child.signalCode !== null) {
       const exitCode = child.exitCode;
       const signal = child.signalCode;
@@ -849,6 +939,7 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
     const runtimeValidation = runtime.templateRuntimeValidation ?? defaultTemplateRuntimeValidation();
 
     if (runtimeValidation.copyEnvExample !== false) {
+      await appendWorkflowLog("[host] 正在运行 mv .env.example .env...");
       const envStep = await measureRuntimeStep(
         runtime,
         {
@@ -865,9 +956,11 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
           steps,
         };
       }
+      await appendWorkflowLog("[host] mv .env.example .env 通过。");
     }
 
     for (const validationStep of runtimeValidation.steps) {
+      await appendWorkflowLog(`[host] 正在运行 ${validationStep.name}...`);
       const step = await measureRuntimeStep(
         runtime,
         {
@@ -907,6 +1000,7 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
           steps,
         };
       }
+      await appendWorkflowLog(`[host] ${validationStep.name} 通过。${step.detail}`);
     }
 
     return {
@@ -2580,7 +2674,7 @@ async function markWorkflowComplete(runtime: TextGeneratorRuntime, completedPhas
 
 async function completeAfterGenerateValidation(options: {
   runtime: TextGeneratorRuntime;
-  generator: TextGenerator;
+  generator?: TextGenerator;
   validator: GeneratedAppValidator;
   approvedPlan: PlanSpec;
   skipValidation?: boolean;
@@ -2616,6 +2710,7 @@ async function completeAfterGenerateValidation(options: {
 
   let retryReasons: string[] = [];
   const maxGenerationRepairs = options.runtime.maxGenerateRetries ?? 0;
+  const maxRuntimeInteractionRepairs = Math.max(maxGenerationRepairs, 1);
   const runtimeInteractionSession: RuntimeInteractionValidationSession = {};
   let validationAttempt = 0;
 
@@ -2740,24 +2835,30 @@ async function completeAfterGenerateValidation(options: {
         await appendWorkflowLog("[host] 已停止失败的运行验证 dev server，修复后将重新启动。");
       }
 
-      const existingRepairAttempts = await countRetryAttempts(options.runtime.deepagentsErrorLogPath, "生成修复阶段");
-      if (existingRepairAttempts >= maxGenerationRepairs) {
+      const existingRuntimeRepairAttempts = await countRetryAttempts(
+        options.runtime.deepagentsErrorLogPath,
+        "运行验证修复阶段",
+      );
+      if (existingRuntimeRepairAttempts >= maxRuntimeInteractionRepairs) {
         throw new Error(`Runtime interaction validation failed: ${retryReasons.join(" | ")}`);
       }
+      const repairAttempt = existingRuntimeRepairAttempts + 1;
+      const generateAttempt = repairAttempt + 1;
 
       await updateWorkflowState(options.runtime.deepagentsConfigPath, "validation", ["plan", "generate"]);
       await appendRetryNote(
         options.runtime.deepagentsErrorLogPath,
-        existingRepairAttempts + 1,
-        "生成修复阶段",
+        repairAttempt,
+        "运行验证修复阶段",
         retryReasons,
       );
-      await appendWorkflowLog(`[host] 运行验证触发生成修复轮次 ${existingRepairAttempts + 1}。`);
+      await appendWorkflowLog(`[host] 运行验证触发生成修复轮次 ${repairAttempt}。`);
 
       const repairRuntime = createSessionRuntime(options.runtime, {
-        generateAttempt: existingRepairAttempts + 2,
+        generateAttempt,
         retryReasons,
       });
+      const generator = requireSessionGenerator(options.runtime, options.generator);
       let repairedProject: GeneratedProject;
       try {
         repairedProject = await measureRuntimeStep(
@@ -2765,14 +2866,14 @@ async function completeAfterGenerateValidation(options: {
           {
             name: "validation.generate_repair_project",
             phase: "validation",
-            attempt: existingRepairAttempts + 1,
+            attempt: repairAttempt,
             metadata: { retryReasonCount: retryReasons.length },
           },
           async () =>
             await runWithStructuredResponseRetry(
               repairRuntime,
               "生成修复阶段",
-              async () => await options.generator.generateRepairProject(options.approvedPlan, repairRuntime),
+              async () => await generator.generateRepairProject(options.approvedPlan, repairRuntime),
             ),
         );
       } catch (error) {
@@ -3136,6 +3237,15 @@ export async function validateSessionPhase(options: {
       };
     }
 
+    if (phase === "runtimeValidation") {
+      await updateWorkflowState(runtime.deepagentsConfigPath, "validation", ["plan", "generate"]);
+      await updateRuntimeValidationWorkflowBoard({
+        runtime,
+        narrative: "按 runtimeValidation 参数进入运行验证阶段，正在执行生成门禁与运行验证。",
+        lifecycle: "validating",
+      });
+    }
+
     const planValidation = await collectPersistedPlanValidation(runtime);
     const reasons = [...planValidation.reasons];
     let steps: GenerationValidationStep[] = [];
@@ -3196,7 +3306,9 @@ export async function validateSessionPhase(options: {
         valid: true,
         reasons: [],
         steps: (await readPersistedGenerationValidation(runtime.deepagentsGenerationValidationPath))?.steps ?? steps,
-        validationPath: runtime.deepagentsGenerationValidationPath,
+        validationPath: phase === "runtimeValidation"
+          ? runtime.deepagentsRuntimeInteractionValidationPath
+          : runtime.deepagentsGenerationValidationPath,
         runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
         runtimeInteractionValidationPath: runtime.deepagentsRuntimeInteractionValidationPath,
         workflowPhase: "complete",
@@ -3205,15 +3317,20 @@ export async function validateSessionPhase(options: {
     }
 
     if (
-      runtime.templateInteractiveRuntimeValidation.enabled &&
+      (
+        phase === "runtimeValidation" ||
+        runtime.templateInteractiveRuntimeValidation.enabled
+      ) &&
       planValidation.planSpec &&
-      persistedWorkflowPhase !== "complete"
+      (
+        phase === "runtimeValidation" ||
+        persistedWorkflowPhase !== "complete"
+      )
     ) {
-      const generator = requireSessionGenerator(runtime, options.generator);
       try {
         await completeAfterGenerateValidation({
           runtime,
-          generator,
+          ...(options.generator ? { generator: options.generator } : {}),
           validator,
           approvedPlan: planValidation.planSpec,
           ...(options.skipValidation ? { skipValidation: true } : {}),
@@ -3232,7 +3349,9 @@ export async function validateSessionPhase(options: {
       valid: true,
       reasons: [],
       steps,
-      validationPath: runtime.deepagentsGenerationValidationPath,
+      validationPath: phase === "runtimeValidation"
+        ? runtime.deepagentsRuntimeInteractionValidationPath
+        : runtime.deepagentsGenerationValidationPath,
       runtimeValidationLogPath: runtime.deepagentsRuntimeValidationLogPath,
       runtimeInteractionValidationPath: runtime.deepagentsRuntimeInteractionValidationPath,
       workflowPhase: "complete",
@@ -3411,7 +3530,7 @@ async function readPersistedWorkflowPhase(configPath: string): Promise<WorkflowP
       };
     };
     const phase = parsed.workflow?.phase;
-    if (phase === "runtime_validation") {
+    if (phase === "runtime_validation" || phase === "runtimeValidation") {
       return "validation";
     }
     return phase === "plan" ||

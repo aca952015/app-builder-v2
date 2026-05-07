@@ -7,6 +7,13 @@ function isBunRuntime(): boolean {
 }
 
 async function runWithNodeRuntime(): Promise<void> {
+  const { performance } = await import("node:perf_hooks");
+  const cleanupInterval = setInterval(() => {
+    performance.clearMeasures();
+    performance.clearMarks();
+  }, 60_000);
+  cleanupInterval.unref();
+
   const { loadProjectEnv } = await import("./lib/env.js");
   const { runCli } = await import("./lib/cli.js");
 

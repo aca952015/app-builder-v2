@@ -57,7 +57,7 @@ function printSessionValidationResult(
   if (result.resumedFromPhase) {
     stdout.log(`Resumed from: ${result.resumedFromPhase}`);
   }
-  if (result.phase === "generate" && result.steps && result.steps.length > 0) {
+  if ((result.phase === "generate" || result.phase === "runtimeValidation") && result.steps && result.steps.length > 0) {
     stdout.log("Validation steps:");
     for (const step of result.steps) {
       stdout.log(formatValidationStepLine(step));
@@ -73,14 +73,52 @@ type CliDeps = {
   cwd?: string;
 };
 
+type CliValidationPhase = ValidationPhase | "auto";
+
+function hasRuntimeValidationFlag(values: Record<string, unknown>): boolean {
+  return values.runtimeValidation === true || values["runtime-validation"] === true;
+}
+
+function normalizeValidationPhase(value: string | undefined): CliValidationPhase {
+  if (value === undefined || value === "auto") {
+    return "auto";
+  }
+
+  if (value === "plan" || value === "generate" || value === "runtimeValidation") {
+    return value;
+  }
+
+  if (value === "runtime-validation" || value === "runtime_validation" || value === "validation") {
+    return "runtimeValidation";
+  }
+
+  throw new Error('The --phase option must be one of "plan", "generate", "runtimeValidation", or "auto".');
+}
+
+function resolveValidationPhaseOption(
+  phaseValue: string | undefined,
+  runtimeValidationFlag: boolean,
+): CliValidationPhase {
+  const phase = normalizeValidationPhase(phaseValue);
+  if (!runtimeValidationFlag) {
+    return phase;
+  }
+
+  if (phase !== "auto" && phase !== "runtimeValidation") {
+    throw new Error('The runtimeValidation flag cannot be combined with --phase values other than "runtimeValidation" or "auto".');
+  }
+
+  return "runtimeValidation";
+}
+
 function helpText(): string {
   return `Usage:
   app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--force] [--skip-validation] [--stdout <log|dashboard>]
-  app-builder generate --resume <session-id> [--skip-validation] [--stdout <log|dashboard>]
+  app-builder generate --resume <session-id> [--skip-validation] [--runtimeValidation] [--stdout <log|dashboard>]
   app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--force] [--skip-validation] [--stdout <log|dashboard>]
-  app-builder -g --resume <session-id> [--skip-validation] [--stdout <log|dashboard>]
-  app-builder validate <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
-  app-builder -v <session-id> [--phase <plan|generate|auto>] [--stdout <log|dashboard>]
+  app-builder -g --resume <session-id> [--skip-validation] [--runtimeValidation] [--stdout <log|dashboard>]
+  app-builder validate <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--stdout <log|dashboard>]
+  app-builder -v <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--stdout <log|dashboard>]
 
 Environment:
   APP_BUILDER_API_KEY Required unless role-specific API keys or a custom generator are used
@@ -120,6 +158,8 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       allowPositionals: true,
       options: {
         phase: { type: "string" },
+        runtimeValidation: { type: "boolean" },
+        "runtime-validation": { type: "boolean" },
         stdout: { type: "string" },
       },
     });
@@ -129,18 +169,15 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       throw new Error("A session id is required.");
     }
 
-    const phaseValue = parsed.values.phase;
-    if (phaseValue !== undefined && phaseValue !== "plan" && phaseValue !== "generate" && phaseValue !== "auto") {
-      throw new Error('The --phase option must be one of "plan", "generate", or "auto".');
-    }
     const stdoutModeValue = parsed.values.stdout;
     const stdoutMode = resolveWorkflowStdoutMode(stdoutModeValue);
-    const phase = phaseValue === "plan" || phaseValue === "generate" ? phaseValue : "auto";
+    const phase = resolveValidationPhaseOption(parsed.values.phase, hasRuntimeValidationFlag(parsed.values));
 
     logCliExecutionParameters(stdoutMode, stdout, {
       command: "validate",
       sessionId,
       phase,
+      runtimeValidation: phase === "runtimeValidation",
       model: resolveCliModelName(),
       stdout: stdoutMode,
       cwd,
@@ -148,8 +185,8 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
 
     const result = await validateSessionPhase({
       sessionId,
-      ...(phaseValue === "plan" || phaseValue === "generate"
-        ? { phase: phaseValue satisfies ValidationPhase }
+      ...(phase !== "auto"
+        ? { phase }
         : {}),
       stdoutMode,
       cwd,
@@ -178,6 +215,8 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       template: { type: "string" },
       force: { type: "boolean" },
       "skip-validation": { type: "boolean" },
+      runtimeValidation: { type: "boolean" },
+      "runtime-validation": { type: "boolean" },
       resume: { type: "string" },
       stdout: { type: "string" },
     },
@@ -188,6 +227,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       ? parsed.values.resume.trim()
       : undefined;
   const stdoutMode: StdoutMode = resolveWorkflowStdoutMode(parsed.values.stdout);
+  const runtimeValidationFlag = hasRuntimeValidationFlag(parsed.values);
 
   if (parsed.values.resume !== undefined) {
     if (!resumeSessionId) {
@@ -206,19 +246,30 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       command: "generate",
       resume: resumeSessionId,
       skipValidation: parsed.values["skip-validation"] === true,
+      runtimeValidation: runtimeValidationFlag,
       model: resolveCliModelName(),
       stdout: stdoutMode,
       cwd,
     });
 
-    const result = await resumeSession({
-      sessionId: resumeSessionId,
-      stdoutMode,
-      cwd,
-      ...(parsed.values["skip-validation"] === true ? { skipValidation: true } : {}),
-      ...(deps.generator ? { generator: deps.generator } : {}),
-      ...(deps.validator ? { validator: deps.validator } : {}),
-    });
+    const result = runtimeValidationFlag
+      ? await validateSessionPhase({
+          sessionId: resumeSessionId,
+          phase: "runtimeValidation",
+          stdoutMode,
+          cwd,
+          ...(parsed.values["skip-validation"] === true ? { skipValidation: true } : {}),
+          ...(deps.generator ? { generator: deps.generator } : {}),
+          ...(deps.validator ? { validator: deps.validator } : {}),
+        })
+      : await resumeSession({
+          sessionId: resumeSessionId,
+          stdoutMode,
+          cwd,
+          ...(parsed.values["skip-validation"] === true ? { skipValidation: true } : {}),
+          ...(deps.generator ? { generator: deps.generator } : {}),
+          ...(deps.validator ? { validator: deps.validator } : {}),
+        });
 
     printSessionValidationResult(result, stdout);
 
@@ -229,13 +280,21 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       throw new Error(`Resume failed for session "${result.sessionId}" phase "${result.phase}".`);
     }
 
-    stdout.log(result.resumedFromPhase ? "Session resumed." : "Session already complete.");
+    if (runtimeValidationFlag) {
+      stdout.log(result.resumedFromPhase ? "Runtime validation recovered and workflow resumed." : "Runtime validation passed.");
+    } else {
+      stdout.log(result.resumedFromPhase ? "Session resumed." : "Session already complete.");
+    }
     return;
   }
 
   const specPath = parsed.positionals[0];
   if (!specPath) {
     throw new Error("A Markdown spec path is required.");
+  }
+
+  if (runtimeValidationFlag) {
+    throw new Error("The runtimeValidation flag can only be used with validate or generate --resume.");
   }
 
   const resolvedSpecPath = path.resolve(cwd, specPath);

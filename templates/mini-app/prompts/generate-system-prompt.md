@@ -28,7 +28,17 @@
 - 继续沿用当前 starter 的 Next.js App Router 结构
 - 页面必须严格落到 `planSpec.pages[*].route` 对应的 `app/**/page.tsx`
 - API 必须严格落到 `planSpec.apis[*].path`
-- 如果 `planSpec` 没有明确要求，不要擅自增加数据库、复杂鉴权或后台壳层
+- 如果 `planSpec` 没有明确要求持久化，不要擅自增加数据库层；若 `planSpec` 明确要求持久化，则统一使用 starter 已提供的 Prisma + SQLite 基础设施
+- 若 `planSpec` 要求持久化，数据库访问统一通过 `lib/prisma.ts` 导出的 Prisma Client 实现；不要在 route handler 中改用其他 ORM、原生 sqlite 驱动或手写独立数据库连接层
+- 如果你需要修改 `prisma/schema.prisma`，必须先读取当前 `prisma/schema.prisma`，确认它是 Prisma 的 canonical schema 文件，然后直接对 `prisma/schema.prisma` 执行一次完整覆盖写入，产出最终完整 schema
+- 修改 `prisma/schema.prisma` 时，禁止采用"先写 `schema_new.prisma` / `schema_correct.prisma` / `schema_backup.prisma` 等候选文件，再尝试搬运或比对"的策略；禁止引入任何临时 schema 副本文件
+- 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态
+- 如果 `planSpec` 没有明确要求改变 starter 基础数据库契约，优先保持兼容并在既有契约上扩展，而不是重写或漂移它的依赖链
+- 如果你改动了 starter 自带的数据库契约，必须把所有受该契约影响的 Prisma 配置、schema、seed、脚本视为同一变更面，逐一读取并同步修改；禁止只改其中一部分就结束
+- 如果 `planSpec` 要求登录功能，必须提供一组默认用户名和密码，让用户可以立即登录：
+  - 若使用数据库持久化，必须通过 `prisma/seed.ts` 将默认用户写入 `User` 模型（`email: "demo@example.com"`，`passwordHash: "demo12345"`）
+  - 若不使用数据库持久化，必须在 `.env` 和 `.env.example` 中保留默认凭证（`SYSTEM_USER_EMAIL="demo@example.com"`，`SYSTEM_USER_PASSWORD="demo12345"`），并在登录 API 中读取这些环境变量进行校验
+  - 登录页面或登录响应中必须向用户展示这组默认凭证（例如登录表单下方的提示文字）
 - `planSpec.references` 是生成阶段的参考资料集合，用于理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构
 - 当 `planSpec.references[*].localPath` 存在时，必须先读取该本地文件，再实现外部 API route；endpoint、认证、参数顺序和响应字段以本地资料为准，不要凭记忆猜测
 - 你需要自行判断哪些 reference 与当前要实现的页面/API 相关；不要要求 reference 显式绑定到某个 API，也不要因为某个 reference 未被使用就额外生成无关功能
@@ -58,6 +68,6 @@
 
 宿主随后会按输入里的 `template.runtimeValidation` 执行运行验证；若 `copyEnvExample` 未禁用，还会先准备 `.env`。
 
-你生成的代码必须让这些步骤可通过。
+你生成的代码必须让这些步骤连续通过。若 `planSpec` 要求持久化，请确保 schema、seed、Prisma 配置和环境文件与 starter 基础设施保持一致。
 
 如果输入里的 `template.interactiveRuntimeValidation.enabled` 为 true，宿主还会在生成门禁通过后启动 dev server，并用本机默认浏览器打开真实 dev server URL；宿主会收集 dev server stdout/stderr 判断是否需要修复。页面必须支持真实用户操作触发 API，而不是只输出静态占位内容。
