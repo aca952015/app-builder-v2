@@ -547,19 +547,38 @@ function parseRuntimeUsageSummary(value: unknown): RuntimeUsageSummary | null {
   }
 
   const record = value as Record<string, unknown>;
-  const inputDetails = readObjectField(record, ["input_token_details", "inputTokenDetails"]);
-  const outputDetails = readObjectField(record, ["output_token_details", "outputTokenDetails"]);
+  const inputDetails = readObjectField(record, [
+    "input_token_details",
+    "inputTokenDetails",
+    "prompt_tokens_details",
+    "promptTokensDetails",
+  ]);
+  const outputDetails = readObjectField(record, [
+    "output_token_details",
+    "outputTokenDetails",
+    "completion_tokens_details",
+    "completionTokenDetails",
+  ]);
+
+  const inputTokens = readNumberField(record, ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]);
+  const outputTokens = readNumberField(record, ["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]);
+  const totalTokens = readNumberField(record, ["total_tokens", "totalTokens"]);
+
+  if (!isFiniteNumber(inputTokens) && !isFiniteNumber(outputTokens) && !isFiniteNumber(totalTokens)) {
+    return null;
+  }
 
   const usage: RuntimeUsageSummary = {
-    inputTokens: readNumberField(record, ["input_tokens", "inputTokens"]),
-    outputTokens: readNumberField(record, ["output_tokens", "outputTokens"]),
-    totalTokens: readNumberField(record, ["total_tokens", "totalTokens"]),
+    inputTokens,
+    outputTokens,
+    totalTokens,
     reasoningTokens:
       readNumberField(record, ["reasoning_tokens", "reasoningTokens"]) ??
       readNumberField(outputDetails, ["reasoning", "reasoning_tokens", "reasoningTokens"]),
     cachedInputTokens:
       readNumberField(record, ["cached_input_tokens", "cachedInputTokens"]) ??
-      readNumberField(inputDetails, ["cache_read", "cacheRead", "cached_tokens", "cachedTokens"]),
+      readNumberField(inputDetails, ["cache_read", "cacheRead", "cached_tokens", "cachedTokens"]) ??
+      readNumberField(record, ["prompt_cache_hit_tokens", "promptCacheHitTokens"]),
   };
 
   return hasRuntimeUsageSummary(usage) ? usage : null;
@@ -651,6 +670,27 @@ export function modelRoleForRuntimePhase(phase?: RuntimeStatusPhase): ModelRole 
   }
 }
 
+function resolveRuntimeStatusAttempt(
+  runtime: Partial<Pick<TextGeneratorRuntime, "planAttempt" | "generateAttempt">>,
+  phase: RuntimeStatusPhase,
+): number | undefined {
+  const attempt =
+    phase === "generate" || phase === "generateRepair" || phase === "generate_repair"
+      ? runtime.generateAttempt
+      : phase === "plan" || phase === "planRepair" || phase === "plan_repair"
+        ? runtime.planAttempt
+        : undefined;
+
+  if (attempt !== undefined) {
+    return isFiniteNumber(attempt) && attempt > 0 ? attempt : undefined;
+  }
+
+  return phase === "plan" || phase === "planRepair" || phase === "plan_repair" ||
+    phase === "generate" || phase === "generateRepair" || phase === "generate_repair"
+    ? 1
+    : undefined;
+}
+
 function runtimePhaseToWorkflowStage(phase: RuntimeStatusPhase): "计划阶段" | "生成阶段" {
   return phase === "plan" || phase === "planRepair" || phase === "plan_repair" ? "计划阶段" : "生成阶段";
 }
@@ -686,7 +726,8 @@ export function resolveRuntimeStatusEffort(
 }
 
 export function buildRuntimeStatus(options: {
-  runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases"> & Partial<Pick<TextGeneratorRuntime, "modelRoles">>;
+  runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases"> &
+    Partial<Pick<TextGeneratorRuntime, "modelRoles" | "planAttempt" | "generateAttempt">>;
   phase: RuntimeStatusPhase;
   modelName?: string | undefined;
   usage?: RuntimeUsageSummary | undefined;
@@ -695,12 +736,14 @@ export function buildRuntimeStatus(options: {
   const usage = hasRuntimeUsageSummary(options.usage) ? options.usage : undefined;
   const modelRole = modelRoleForRuntimePhase(options.phase);
   const roleModelName = modelRole ? options.runtime.modelRoles?.[modelRole]?.modelName : undefined;
+  const attempt = resolveRuntimeStatusAttempt(options.runtime, options.phase);
 
   return {
     modelName: options.modelName ?? roleModelName ?? resolveRuntimeModelFallback(options.fallbackModelName),
     effort: resolveRuntimeStatusEffort(options.runtime.templatePhases, options.phase),
     sessionId: options.runtime.sessionId,
     phase: options.phase,
+    ...(attempt ? { attempt } : {}),
     ...(usage ? { usage } : {}),
   };
 }
@@ -730,9 +773,34 @@ function runtimeUsageSignature(usage: RuntimeUsageSummary): string {
     usage.inputTokens ?? "",
     usage.outputTokens ?? "",
     usage.totalTokens ?? "",
-    usage.reasoningTokens ?? "",
-    usage.cachedInputTokens ?? "",
   ].join(":");
+}
+
+function mergeEquivalentRuntimeUsageSummary(
+  current: RuntimeUsageSummary | undefined,
+  patch: RuntimeUsageSummary,
+): RuntimeUsageSummary {
+  if (!current) {
+    return patch;
+  }
+
+  const mergeValue = (left?: number, right?: number): number | undefined => {
+    if (!isFiniteNumber(left)) {
+      return right;
+    }
+    if (!isFiniteNumber(right)) {
+      return left;
+    }
+    return Math.max(left, right);
+  };
+
+  return {
+    inputTokens: mergeValue(current.inputTokens, patch.inputTokens),
+    outputTokens: mergeValue(current.outputTokens, patch.outputTokens),
+    totalTokens: mergeValue(current.totalTokens, patch.totalTokens),
+    reasoningTokens: mergeValue(current.reasoningTokens, patch.reasoningTokens),
+    cachedInputTokens: mergeValue(current.cachedInputTokens, patch.cachedInputTokens),
+  };
 }
 
 export function extractRuntimeStatusPatch(
@@ -740,16 +808,18 @@ export function extractRuntimeStatusPatch(
   options: { seenUsageSignatures?: Set<string> } = {},
 ): Partial<RuntimeStatus> {
   const usageSummaries = collectRuntimeUsageSummaries(payload);
-  const usageSummariesToMerge = options.seenUsageSignatures
-    ? usageSummaries.filter((usage) => {
-        const signature = runtimeUsageSignature(usage);
-        if (options.seenUsageSignatures!.has(signature)) {
-          return false;
-        }
-        options.seenUsageSignatures!.add(signature);
-        return true;
-      })
-    : usageSummaries;
+  const payloadUsageSummariesBySignature = usageSummaries.reduce<Map<string, RuntimeUsageSummary>>((current, usage) => {
+    const signature = runtimeUsageSignature(usage);
+    current.set(signature, mergeEquivalentRuntimeUsageSummary(current.get(signature), usage));
+    return current;
+  }, new Map());
+  const usageSummariesToMerge = Array.from(payloadUsageSummariesBySignature.entries()).flatMap(([signature, usage]) => {
+    if (options.seenUsageSignatures?.has(signature)) {
+      return [];
+    }
+    options.seenUsageSignatures?.add(signature);
+    return [usage];
+  });
   const usage = usageSummariesToMerge.reduce<RuntimeUsageSummary | undefined>(
     (current, item) => mergeRuntimeUsageSummary(current, item),
     undefined,

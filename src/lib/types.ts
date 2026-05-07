@@ -175,6 +175,7 @@ export type RuntimeStatus = {
   contextWindowUsedTokens?: number | undefined;
   sessionId?: string | undefined;
   phase?: RuntimeStatusPhase | undefined;
+  attempt?: number | undefined;
 };
 
 export type StdoutMode = "dashboard" | "log";

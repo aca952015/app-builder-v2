@@ -6,7 +6,7 @@ import { Box, Text, render, renderToString, type Instance } from "ink";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { routeToPageFileCandidates } from "./app-router.js";
-import type { RuntimeStatus, StdoutMode } from "./types.js";
+import type { RuntimeStatus, RuntimeUsageSummary, StdoutMode } from "./types.js";
 
 export type WorkflowStage = "计划阶段" | "生成阶段" | "运行验证阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -484,19 +484,12 @@ function formatContextUsedValue(runtimeStatus?: RuntimeStatus): string {
     details.push(`cache ${formatTokenCount(usage.cachedInputTokens)}`);
   }
 
-  const rawTotalTokens =
+  const totalTokens =
     isFiniteNumber(usage.totalTokens)
       ? usage.totalTokens
       : isFiniteNumber(usage.inputTokens) && isFiniteNumber(usage.outputTokens)
         ? usage.inputTokens + usage.outputTokens
         : undefined;
-  const totalTokens =
-    rawTotalTokens !== undefined
-      ? Math.max(
-          0,
-          rawTotalTokens - (isFiniteNumber(usage.cachedInputTokens) ? usage.cachedInputTokens : 0),
-        )
-      : undefined;
 
   if (totalTokens !== undefined) {
     return details.length > 0
@@ -1453,6 +1446,7 @@ let activeWorkflowState: TodoBoardState | null = null;
 let activeWorkflowLogs: string[] = [];
 let activeWorkflowStartedAt: number | null = null;
 let activeWorkflowRenderedArtifacts: ArtifactItem[] | null = null;
+let activeWorkflowUsageSnapshots = new Map<string, RuntimeUsageSummary>();
 let elapsedRefreshTimer: NodeJS.Timeout | null = null;
 let artifactRefreshTimer: NodeJS.Timeout | null = null;
 let artifactRefreshInFlight = false;
@@ -1464,6 +1458,109 @@ export function setWorkflowStdoutMode(mode?: StdoutMode): void {
 
 function trimWorkflowLogs(logs: string[], maxEntries = 200): string[] {
   return logs.slice(-maxEntries);
+}
+
+function hasRuntimeUsageSummary(usage?: RuntimeUsageSummary): usage is RuntimeUsageSummary {
+  return Boolean(
+    usage &&
+      (isFiniteNumber(usage.inputTokens) ||
+        isFiniteNumber(usage.outputTokens) ||
+        isFiniteNumber(usage.totalTokens) ||
+        isFiniteNumber(usage.reasoningTokens) ||
+        isFiniteNumber(usage.cachedInputTokens)),
+  );
+}
+
+function compactRuntimeUsageSummary(usage?: RuntimeUsageSummary): RuntimeUsageSummary | undefined {
+  const compact: RuntimeUsageSummary = {};
+
+  if (isFiniteNumber(usage?.inputTokens)) {
+    compact.inputTokens = usage.inputTokens;
+  }
+  if (isFiniteNumber(usage?.outputTokens)) {
+    compact.outputTokens = usage.outputTokens;
+  }
+  if (isFiniteNumber(usage?.totalTokens)) {
+    compact.totalTokens = usage.totalTokens;
+  }
+  if (isFiniteNumber(usage?.reasoningTokens)) {
+    compact.reasoningTokens = usage.reasoningTokens;
+  }
+  if (isFiniteNumber(usage?.cachedInputTokens)) {
+    compact.cachedInputTokens = usage.cachedInputTokens;
+  }
+
+  return hasRuntimeUsageSummary(compact) ? compact : undefined;
+}
+
+function sumRuntimeUsageField(left?: number, right?: number): number | undefined {
+  const hasLeft = isFiniteNumber(left);
+  const hasRight = isFiniteNumber(right);
+  if (!hasLeft && !hasRight) {
+    return undefined;
+  }
+
+  return (left ?? 0) + (right ?? 0);
+}
+
+function sumRuntimeUsageSummaries(
+  current: RuntimeUsageSummary | undefined,
+  next: RuntimeUsageSummary,
+): RuntimeUsageSummary {
+  return {
+    inputTokens: sumRuntimeUsageField(current?.inputTokens, next.inputTokens),
+    outputTokens: sumRuntimeUsageField(current?.outputTokens, next.outputTokens),
+    totalTokens: sumRuntimeUsageField(current?.totalTokens, next.totalTokens),
+    reasoningTokens: sumRuntimeUsageField(current?.reasoningTokens, next.reasoningTokens),
+    cachedInputTokens: sumRuntimeUsageField(current?.cachedInputTokens, next.cachedInputTokens),
+  };
+}
+
+function aggregateRuntimeUsageSnapshots(snapshots: Iterable<RuntimeUsageSummary>): RuntimeUsageSummary | undefined {
+  let aggregate: RuntimeUsageSummary | undefined;
+  for (const snapshot of snapshots) {
+    aggregate = sumRuntimeUsageSummaries(aggregate, snapshot);
+  }
+
+  return compactRuntimeUsageSummary(aggregate);
+}
+
+function runtimeUsageSnapshotKey(state: TodoBoardState, runtimeStatus: RuntimeStatus): string {
+  const phase = runtimeStatus.phase ?? state.stage;
+  const attempt = isFiniteNumber(runtimeStatus.attempt) && runtimeStatus.attempt > 0
+    ? runtimeStatus.attempt
+    : "current";
+
+  return `${phase}:${attempt}`;
+}
+
+export function mergeWorkflowRuntimeStatus(
+  previousRuntimeStatus: RuntimeStatus | undefined,
+  incomingRuntimeStatus: RuntimeStatus | undefined,
+  state: TodoBoardState,
+  usageSnapshots: Map<string, RuntimeUsageSummary> = activeWorkflowUsageSnapshots,
+): RuntimeStatus | undefined {
+  if (!incomingRuntimeStatus) {
+    const aggregateUsage = aggregateRuntimeUsageSnapshots(usageSnapshots.values());
+    return previousRuntimeStatus && aggregateUsage
+      ? { ...previousRuntimeStatus, usage: aggregateUsage }
+      : previousRuntimeStatus;
+  }
+
+  if (hasRuntimeUsageSummary(incomingRuntimeStatus.usage)) {
+    usageSnapshots.set(runtimeUsageSnapshotKey(state, incomingRuntimeStatus), incomingRuntimeStatus.usage);
+  }
+
+  const aggregateUsage = aggregateRuntimeUsageSnapshots(usageSnapshots.values());
+  const usage = aggregateUsage ?? incomingRuntimeStatus.usage ?? previousRuntimeStatus?.usage;
+  const runtimeStatus: RuntimeStatus = {
+    ...previousRuntimeStatus,
+    ...incomingRuntimeStatus,
+  };
+
+  return hasRuntimeUsageSummary(usage)
+    ? { ...runtimeStatus, usage }
+    : runtimeStatus;
 }
 
 function formatWorkflowLogTimestamp(date = new Date()): string {
@@ -1544,25 +1641,34 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
   if (!activeRenderer) {
     activeRenderer = createTodoBoardRenderer();
   }
+  if (!activeWorkflowState) {
+    activeWorkflowUsageSnapshots.clear();
+  }
   if (activeWorkflowStartedAt === null) {
     activeWorkflowStartedAt = Date.now();
   }
 
-  const nextWorkflowState: TodoBoardState = {
-    ...state,
-    logs: state.logs ?? activeWorkflowLogs,
-    runtimeStatus: state.runtimeStatus
-      ? {
-          ...activeWorkflowState?.runtimeStatus,
-          ...state.runtimeStatus,
-        }
-      : activeWorkflowState?.runtimeStatus,
-    streamProgress: state.streamProgress
-      ? {
+  const previousRuntimeStatus = activeWorkflowState?.runtimeStatus;
+  const incomingRuntimeStatus = state.runtimeStatus;
+  const runtimePhaseChanged =
+    Boolean(incomingRuntimeStatus?.phase) && incomingRuntimeStatus?.phase !== previousRuntimeStatus?.phase;
+  const runtimeStatus = mergeWorkflowRuntimeStatus(previousRuntimeStatus, incomingRuntimeStatus, state);
+  const streamProgress = state.streamProgress
+    ? runtimePhaseChanged
+      ? state.streamProgress
+      : {
           ...activeWorkflowState?.streamProgress,
           ...state.streamProgress,
         }
-      : activeWorkflowState?.streamProgress,
+    : runtimePhaseChanged
+      ? undefined
+      : activeWorkflowState?.streamProgress;
+
+  const nextWorkflowState: TodoBoardState = {
+    ...state,
+    logs: state.logs ?? activeWorkflowLogs,
+    runtimeStatus,
+    streamProgress,
     runtimeInteraction: state.runtimeInteraction
       ? {
           ...activeWorkflowState?.runtimeInteraction,
@@ -1609,6 +1715,7 @@ export async function closeWorkflowBoard(): Promise<void> {
     activeWorkflowLogs = [];
     activeWorkflowStartedAt = null;
     activeWorkflowRenderedArtifacts = null;
+    activeWorkflowUsageSnapshots.clear();
     clearWorkflowTimers();
     return;
   }
@@ -1620,4 +1727,5 @@ export async function closeWorkflowBoard(): Promise<void> {
   activeWorkflowLogs = [];
   activeWorkflowStartedAt = null;
   activeWorkflowRenderedArtifacts = null;
+  activeWorkflowUsageSnapshots.clear();
 }

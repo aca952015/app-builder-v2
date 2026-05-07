@@ -21,11 +21,12 @@ import {
 } from "../src/lib/model-config.js";
 import {
   createTodoBoardRenderer,
+  mergeWorkflowRuntimeStatus,
   releaseWorkflowInputStream,
   resolveWorkflowStdoutMode,
   setWorkflowStdoutMode,
 } from "../src/lib/terminal-ui.js";
-import type { TextGeneratorRuntime } from "../src/lib/types.js";
+import type { RuntimeUsageSummary, TextGeneratorRuntime } from "../src/lib/types.js";
 import {
   buildRuntimeStatus,
   buildGenerationSubagents,
@@ -675,7 +676,7 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /\[12:34:57\] \[READ\]/);
   assert.match(output, /读取文件：\.deepagents\/source-prd\.md（1-1000行）/);
   assert.match(output, /\[12:34:58\] \[CHECK\] 正在校验计划阶段产出物/);
-  assert.match(output, /model: gpt-5\.4 \| effort: high \| token used: 978 total \(.+\) \| context used: 900/);
+  assert.match(output, /model: gpt-5\.4 \| effort: high \| token used: 1\.2K total \(.+\) \| context used: 900/);
   assert.match(output, /reasoning 120/);
   assert.match(output, /cache 256/);
   assert.match(output, /context used: 900 \| phase: plan/);
@@ -851,6 +852,123 @@ test("buildTodoBoardLines appends a horizontal runtime bar for plain-text render
     "",
     "model: gpt-5.4-mini | effort: medium | token used: 2.5K total (in 2K, out 512) | context used: 2K | phase: generate",
   ]);
+});
+
+test("mergeWorkflowRuntimeStatus aggregates usage snapshots without repeated frame inflation", () => {
+  const usageSnapshots = new Map<string, RuntimeUsageSummary>();
+  const state = {
+    stage: "计划阶段" as const,
+    todos: [],
+    artifacts: [],
+    narrative: "模型正在工作中",
+  };
+
+  const firstPlanFrame = mergeWorkflowRuntimeStatus(
+    undefined,
+    {
+      phase: "plan",
+      attempt: 1,
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+        cachedInputTokens: 10,
+      },
+    },
+    state,
+    usageSnapshots,
+  );
+  const secondPlanFrame = mergeWorkflowRuntimeStatus(
+    firstPlanFrame,
+    {
+      phase: "plan",
+      attempt: 1,
+      usage: {
+        inputTokens: 150,
+        outputTokens: 30,
+        totalTokens: 180,
+        cachedInputTokens: 10,
+      },
+    },
+    state,
+    usageSnapshots,
+  );
+  const firstRepairFrame = mergeWorkflowRuntimeStatus(
+    secondPlanFrame,
+    {
+      phase: "planRepair",
+      attempt: 2,
+      usage: {
+        inputTokens: 50,
+        outputTokens: 10,
+        totalTokens: 60,
+        cachedInputTokens: 5,
+      },
+    },
+    state,
+    usageSnapshots,
+  );
+  const secondRepairFrame = mergeWorkflowRuntimeStatus(
+    firstRepairFrame,
+    {
+      phase: "planRepair",
+      attempt: 2,
+      usage: {
+        inputTokens: 70,
+        outputTokens: 15,
+        totalTokens: 85,
+        cachedInputTokens: 8,
+      },
+    },
+    state,
+    usageSnapshots,
+  );
+  const nextRepairAttempt = mergeWorkflowRuntimeStatus(
+    secondRepairFrame,
+    {
+      phase: "planRepair",
+      attempt: 3,
+      usage: {
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        cachedInputTokens: 7,
+      },
+    },
+    state,
+    usageSnapshots,
+  );
+
+  assert.deepEqual(firstPlanFrame?.usage, {
+    inputTokens: 100,
+    outputTokens: 20,
+    totalTokens: 120,
+    cachedInputTokens: 10,
+  });
+  assert.deepEqual(secondPlanFrame?.usage, {
+    inputTokens: 150,
+    outputTokens: 30,
+    totalTokens: 180,
+    cachedInputTokens: 10,
+  });
+  assert.deepEqual(firstRepairFrame?.usage, {
+    inputTokens: 200,
+    outputTokens: 40,
+    totalTokens: 240,
+    cachedInputTokens: 15,
+  });
+  assert.deepEqual(secondRepairFrame?.usage, {
+    inputTokens: 220,
+    outputTokens: 45,
+    totalTokens: 265,
+    cachedInputTokens: 18,
+  });
+  assert.deepEqual(nextRepairAttempt?.usage, {
+    inputTokens: 300,
+    outputTokens: 65,
+    totalTokens: 365,
+    cachedInputTokens: 25,
+  });
 });
 
 
@@ -1062,6 +1180,69 @@ test("extractRuntimeStatusPatch reads model and usage metadata from stream paylo
   });
 });
 
+test("extractRuntimeStatusPatch deduplicates OpenAI response usage and LangChain usage metadata", () => {
+  const patch = extractRuntimeStatusPatch({
+    message: {
+      response_metadata: {
+        model_name: "gpt-5.4-actual",
+        usage: {
+          prompt_tokens: 120,
+          completion_tokens: 30,
+          total_tokens: 150,
+        },
+      },
+      usage_metadata: {
+        input_tokens: 120,
+        output_tokens: 30,
+        total_tokens: 150,
+        output_token_details: {
+          reasoning: 12,
+        },
+        input_token_details: {
+          cache_read: 40,
+        },
+      },
+    },
+  });
+
+  assert.equal(patch.modelName, "gpt-5.4-actual");
+  assert.equal(patch.contextWindowUsedTokens, 120);
+  assert.deepEqual(patch.usage, {
+    inputTokens: 120,
+    outputTokens: 30,
+    totalTokens: 150,
+    reasoningTokens: 12,
+    cachedInputTokens: 40,
+  });
+});
+
+test("extractRuntimeStatusPatch parses OpenAI response usage without usage metadata", () => {
+  const patch = extractRuntimeStatusPatch({
+    response_metadata: {
+      usage: {
+        prompt_tokens: 200,
+        completion_tokens: 50,
+        total_tokens: 250,
+        prompt_tokens_details: {
+          cached_tokens: 64,
+        },
+        completion_tokens_details: {
+          reasoning_tokens: 16,
+        },
+      },
+    },
+  });
+
+  assert.equal(patch.contextWindowUsedTokens, 200);
+  assert.deepEqual(patch.usage, {
+    inputTokens: 200,
+    outputTokens: 50,
+    totalTokens: 250,
+    reasoningTokens: 16,
+    cachedInputTokens: 64,
+  });
+});
+
 test("mergeRuntimeStatus accumulates usage across multiple chunks", () => {
   const runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases"> = {
     sessionId: "runtime-session-1",
@@ -1169,9 +1350,11 @@ test("extractRuntimeStatusPatch deduplicates repeated usage snapshots", () => {
   assert.equal(merged.contextWindowUsedTokens, 75_000);
 });
 
-test("buildRuntimeStatus maps effort to the active phase", () => {
-  const runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases"> = {
+test("buildRuntimeStatus maps effort and attempt to the active phase", () => {
+  const runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases" | "planAttempt" | "generateAttempt"> = {
     sessionId: "runtime-session-2",
+    planAttempt: 2,
+    generateAttempt: 3,
     templatePhases: {
       plan: { effort: "high" },
       planRepair: { effort: "low" },
@@ -1181,8 +1364,11 @@ test("buildRuntimeStatus maps effort to the active phase", () => {
   };
 
   assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).effort, "low");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).attempt, 2);
   assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).effort, "medium");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).attempt, 3);
   assert.equal(buildRuntimeStatus({ runtime, phase: "complete" }).effort, undefined);
+  assert.equal(buildRuntimeStatus({ runtime, phase: "complete" }).attempt, undefined);
 });
 
 test("buildRuntimeStatus reports the active role model name", () => {
