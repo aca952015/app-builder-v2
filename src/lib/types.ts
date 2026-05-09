@@ -176,6 +176,7 @@ export type RuntimeStatus = {
   sessionId?: string | undefined;
   phase?: RuntimeStatusPhase | undefined;
   attempt?: number | undefined;
+  subagentCount?: number | undefined;
 };
 
 export type StdoutMode = "dashboard" | "log";

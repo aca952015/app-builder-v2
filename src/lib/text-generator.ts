@@ -691,6 +691,11 @@ function resolveRuntimeStatusAttempt(
     : undefined;
 }
 
+function resolveRuntimeSubagentCount(phase: RuntimeStatusPhase): number | undefined {
+  const count = buildGenerationSubagents(phase, false).length;
+  return count > 0 ? count : undefined;
+}
+
 function runtimePhaseToWorkflowStage(phase: RuntimeStatusPhase): "计划阶段" | "生成阶段" {
   return phase === "plan" || phase === "planRepair" || phase === "plan_repair" ? "计划阶段" : "生成阶段";
 }
@@ -737,6 +742,7 @@ export function buildRuntimeStatus(options: {
   const modelRole = modelRoleForRuntimePhase(options.phase);
   const roleModelName = modelRole ? options.runtime.modelRoles?.[modelRole]?.modelName : undefined;
   const attempt = resolveRuntimeStatusAttempt(options.runtime, options.phase);
+  const subagentCount = resolveRuntimeSubagentCount(options.phase);
 
   return {
     modelName: options.modelName ?? roleModelName ?? resolveRuntimeModelFallback(options.fallbackModelName),
@@ -744,6 +750,7 @@ export function buildRuntimeStatus(options: {
     sessionId: options.runtime.sessionId,
     phase: options.phase,
     ...(attempt ? { attempt } : {}),
+    ...(subagentCount ? { subagentCount } : {}),
     ...(usage ? { usage } : {}),
   };
 }
@@ -764,6 +771,9 @@ export function mergeRuntimeStatus(current: RuntimeStatus, patch: Partial<Runtim
       : {}),
     ...(patch.sessionId ? { sessionId: patch.sessionId } : {}),
     ...(patch.phase ? { phase: patch.phase } : {}),
+    ...(isFiniteNumber(patch.subagentCount) && patch.subagentCount >= 0
+      ? { subagentCount: patch.subagentCount }
+      : {}),
     ...(usage ? { usage } : current.usage ? { usage: current.usage } : {}),
   };
 }

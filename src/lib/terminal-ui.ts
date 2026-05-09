@@ -506,13 +506,28 @@ function formatContextWindowUsedValue(runtimeStatus?: RuntimeStatus): string {
     : "n/a";
 }
 
+function resolveSubagentCountForStatusBar(state: TodoBoardState): number | undefined {
+  if (isFiniteNumber(state.runtimeStatus?.subagentCount)) {
+    return Math.max(0, Math.round(state.runtimeStatus.subagentCount));
+  }
+
+  const count = normalizeAgentStatuses(state.agentStatuses)
+    .filter((agent) => agent.name !== "leader")
+    .length;
+  return count > 0 ? count : undefined;
+}
+
 function buildStatusFields(state: TodoBoardState): Array<{ label: string; value: string }> {
+  const subagentCount = resolveSubagentCountForStatusBar(state);
   return [
     { label: "model", value: formatRuntimeFieldValue(state.runtimeStatus?.modelName) },
     { label: "effort", value: formatRuntimeFieldValue(state.runtimeStatus?.effort) },
     { label: "token used", value: formatContextUsedValue(state.runtimeStatus) },
     { label: "context used", value: formatContextWindowUsedValue(state.runtimeStatus) },
     { label: "phase", value: formatRuntimeFieldValue(state.runtimeStatus?.phase) },
+    ...(subagentCount !== undefined && subagentCount > 1
+      ? [{ label: "subagents", value: String(subagentCount) }]
+      : []),
   ];
 }
 

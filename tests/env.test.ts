@@ -992,11 +992,38 @@ test("renderTodoBoardToString renders agent statuses below runtime status bar", 
   }, 140));
 
   assert.match(output, /model: gpt-5\.4 .* phase: generate/);
+  assert.match(output, /subagents: 2/);
   assert.match(output, /leader: working \| frontend-implementer: done \| backend-implementer: idle/);
   assert.ok(
     output.indexOf("leader: working") > output.indexOf("phase: generate"),
     "agent status row should render below the runtime status bar",
   );
+});
+
+test("renderTodoBoardToString shows subagent count only when multiple subagents exist", () => {
+  const multipleOutput = stripAnsi(renderTodoBoardToString({
+    stage: "生成阶段",
+    todos: [],
+    artifacts: [],
+    narrative: "模型正在工作中",
+    runtimeStatus: {
+      phase: "generate",
+      subagentCount: 3,
+    },
+  }, 120));
+  const singleOutput = stripAnsi(renderTodoBoardToString({
+    stage: "生成阶段",
+    todos: [],
+    artifacts: [],
+    narrative: "模型正在工作中",
+    runtimeStatus: {
+      phase: "generate",
+      subagentCount: 1,
+    },
+  }, 120));
+
+  assert.match(multipleOutput, /phase: generate \| subagents: 3/);
+  assert.doesNotMatch(singleOutput, /subagents:/);
 });
 
 test("renderTodoBoardToString falls back to n/a for missing runtime status values", () => {
@@ -1367,6 +1394,8 @@ test("buildRuntimeStatus maps effort and attempt to the active phase", () => {
   assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).attempt, 2);
   assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).effort, "medium");
   assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).attempt, 3);
+  assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).subagentCount, 3);
+  assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).subagentCount, undefined);
   assert.equal(buildRuntimeStatus({ runtime, phase: "complete" }).effort, undefined);
   assert.equal(buildRuntimeStatus({ runtime, phase: "complete" }).attempt, undefined);
 });
