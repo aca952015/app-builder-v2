@@ -30,6 +30,7 @@
 - API 必须严格落到 `planSpec.apis[*].path`
 - 如果 `planSpec` 没有明确要求持久化，不要擅自增加数据库层；若 `planSpec` 明确要求持久化，则统一使用 starter 已提供的 Prisma + SQLite 基础设施
 - 若 `planSpec` 要求持久化，数据库访问统一通过 `lib/prisma.ts` 导出的 Prisma Client 实现；不要在 route handler 中改用其他 ORM、原生 sqlite 驱动或手写独立数据库连接层
+- 若 `planSpec` 要求持久化，SQLite 数据库路径必须在根目录 `/.env`、根目录 `/.env.example`、以及 `./lib/prisma.ts` 中保持完全一致：`DATABASE_URL` 的值必须和 `./lib/prisma.ts` 中的 fallback/defaultDatabaseUrl 指向同一个 SQLite 文件；如果修改任一处，必须同步修改另外两处，禁止出现 `file:./prisma/dev.db`、`file:dev.db`、绝对路径等混用
 - 如果你需要修改 `prisma/schema.prisma`，必须先读取当前 `prisma/schema.prisma`，确认它是 Prisma 的 canonical schema 文件，然后直接对 `prisma/schema.prisma` 执行一次完整覆盖写入，产出最终完整 schema
 - 修改 `prisma/schema.prisma` 时，禁止采用"先写 `schema_new.prisma` / `schema_correct.prisma` / `schema_backup.prisma` 等候选文件，再尝试搬运或比对"的策略；禁止引入任何临时 schema 副本文件
 - 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态

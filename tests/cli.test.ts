@@ -365,8 +365,8 @@ async function writeCliMiniAppTemplate(root: string): Promise<void> {
       version: "1.0.0",
       projectRenderer: "mini-app",
       repairRetries: {
-        plan: 2,
-        generate: 2,
+        plan: 10,
+        generate: 10,
       },
       phases: {
         plan: { prompt: "prompts/plan-system-prompt.md", effort: "high" },
@@ -1057,7 +1057,7 @@ test("runCli validate respects template-configured generate repair retry limits"
     persistedConfig.template = {
       ...persistedConfig.template,
       repairRetries: {
-        plan: persistedConfig.template?.repairRetries?.plan ?? 2,
+        plan: persistedConfig.template?.repairRetries?.plan ?? 10,
         generate: 1,
       },
     };

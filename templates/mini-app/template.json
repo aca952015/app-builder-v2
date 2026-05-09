@@ -5,8 +5,8 @@
   "description": "A lightweight Next.js mini-app template with a minimal app shell and REST-style endpoints.",
   "projectRenderer": "mini-app",
   "repairRetries": {
-    "plan": 5,
-    "generate": 5
+    "plan": 10,
+    "generate": 10
   },
   "phases": {
     "plan": {

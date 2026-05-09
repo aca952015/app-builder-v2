@@ -5,8 +5,8 @@
   "description": "A deepagents template pack for generating a Next.js + Prisma + SQLite full-stack application.",
   "projectRenderer": "full-stack",
   "repairRetries": {
-    "plan": 5,
-    "generate": 5
+    "plan": 10,
+    "generate": 10
   },
   "phases": {
     "plan": {

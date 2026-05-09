@@ -26,8 +26,8 @@ const defaultRuntimeValidation: TemplateRuntimeValidation = {
 };
 
 const defaultRepairRetries: TemplateRepairRetries = {
-  plan: 2,
-  generate: 2,
+  plan: 10,
+  generate: 10,
 };
 
 const defaultInteractiveRuntimeValidation: Omit<TemplateInteractiveRuntimeValidation, "devServerStep"> = {

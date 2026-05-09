@@ -398,9 +398,9 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
     deepagentsPlanValidationPath: "/virtual-workspace/.deepagents/plan-validation.json",
     deepagentsGenerationValidationPath: "/virtual-workspace/.deepagents/generation-validation.json",
     planAttempt: 1,
-    maxPlanRetries: 2,
+    maxPlanRetries: 10,
     generateAttempt: 1,
-    maxGenerateRetries: 2,
+    maxGenerateRetries: 10,
     retryReasons: [],
     templatePhases: {
       plan: { effort: "high" },
@@ -616,8 +616,8 @@ async function writeMinimalTemplatePack(options: {
       version: "1.0.0",
       projectRenderer: "interactive-test",
       repairRetries: {
-        plan: options.planRepairRetries ?? 2,
-        generate: options.generateRepairRetries ?? 2,
+        plan: options.planRepairRetries ?? 10,
+        generate: options.generateRepairRetries ?? 10,
       },
       phases: {
         plan: { prompt: "prompts/plan-system-prompt.md", effort: "high" },
@@ -3931,8 +3931,8 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.equal(sidebarMenu.length > 0, true);
     assert.equal(sidebarMenu.some((item) => item.label === "Workspace"), true);
     assert.match(templateLock, /"repairRetries": \{/);
-    assert.match(templateLock, /"plan": 5/);
-    assert.match(templateLock, /"generate": 5/);
+    assert.match(templateLock, /"plan": 10/);
+    assert.match(templateLock, /"generate": 10/);
     assert.match(templateLock, /"phases": \{/);
     assert.match(templateLock, /"plan": \{\s*"prompt": "prompts\/plan-system-prompt\.md"/);
     assert.match(templateLock, /"planRepair": \{[\s\S]*"prompt": "prompts\/plan-repair-system-prompt\.md"/);
@@ -5321,6 +5321,7 @@ test("mini-app template enables interactive runtime validation", async () => {
   const template = await loadTemplatePack("mini-app");
   const planPrompt = await readFile(template.planPromptPath, "utf8");
   const planRepairPrompt = await readFile(template.planRepairPromptPath, "utf8");
+  const generatePrompt = await readFile(template.generatePromptPath, "utf8");
 
   assert.equal(template.phases.plan.effort, "max");
   assert.equal(template.phases.planRepair.effort, "max");
@@ -5333,6 +5334,11 @@ test("mini-app template enables interactive runtime validation", async () => {
   assert.match(planRepairPrompt, /模板技能调用/);
   assert.match(planRepairPrompt, /`protocol-analysis`/);
   assert.match(planRepairPrompt, /`prd-assembly`/);
+  assert.match(generatePrompt, /SQLite 数据库路径必须/);
+  assert.match(generatePrompt, /`\/\.env`/);
+  assert.match(generatePrompt, /`\/\.env\.example`/);
+  assert.match(generatePrompt, /`\.\/lib\/prisma\.ts`/);
+  assert.match(generatePrompt, /defaultDatabaseUrl/);
   await access(path.join(template.skillsDirectory ?? "", "protocol-analysis/SKILL.md"));
   await access(path.join(template.skillsDirectory ?? "", "prd-assembly/SKILL.md"));
   assert.equal(template.interactiveRuntimeValidation.enabled, true);
