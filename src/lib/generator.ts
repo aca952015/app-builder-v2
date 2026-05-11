@@ -77,6 +77,7 @@ import {
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 const DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY = 8;
+const DESIGN_ARTIFACT_RELATIVE_PATH = "DESIGN.md";
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段" | "运行验证修复阶段";
 
 function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
@@ -1074,6 +1075,34 @@ async function pathExists(filePath: string): Promise<boolean> {
 
 function normalizeRelativePath(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+async function resolveDesignDocumentSourcePath(designPath: string): Promise<string> {
+  const resolvedPath = path.resolve(designPath);
+  const extension = path.extname(resolvedPath).toLowerCase();
+  if (extension !== ".md" && extension !== ".markdown") {
+    throw new Error("The --design option must point to a Markdown file.");
+  }
+
+  let stats;
+  try {
+    stats = await fs.stat(resolvedPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Design file was not found at ${resolvedPath}. ${message}`);
+  }
+
+  if (!stats.isFile()) {
+    throw new Error(`Design path must reference a file: ${resolvedPath}`);
+  }
+
+  return resolvedPath;
+}
+
+async function copyDesignDocumentToWorkspace(sourcePath: string, outputDirectory: string): Promise<string> {
+  const destinationPath = path.join(outputDirectory, DESIGN_ARTIFACT_RELATIVE_PATH);
+  await fs.copyFile(sourcePath, destinationPath);
+  return DESIGN_ARTIFACT_RELATIVE_PATH;
 }
 
 function uniqueValues(values: string[]): string[] {
@@ -2353,6 +2382,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
   let templateInteractiveRuntimeValidation = defaultTemplateInteractiveRuntimeValidation();
   let persistedModelName: string | undefined;
   let persistedModelRoles: Partial<SanitizedModelRoleConfigMap> = {};
+  let designArtifactRelativePath: string | undefined;
 
   const configContents = await readIfExists(configPath);
   if (configContents) {
@@ -2360,6 +2390,9 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
       const parsed = JSON.parse(configContents) as {
         model?: unknown;
         models?: unknown;
+        artifacts?: {
+          design?: unknown;
+        };
         template?: {
           id?: unknown;
           name?: unknown;
@@ -2374,6 +2407,9 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
         persistedModelName = parsed.model.trim();
       }
       persistedModelRoles = parseSanitizedModelRoleConfigs(parsed.models);
+      if (typeof parsed.artifacts?.design === "string" && parsed.artifacts.design.trim() !== "") {
+        designArtifactRelativePath = normalizeRelativePath(parsed.artifacts.design);
+      }
       if (typeof parsed.template?.id === "string" && parsed.template.id.trim() !== "") {
         templateId = parsed.template.id;
       }
@@ -2566,6 +2602,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     deepagentsPlanSpecPath: path.join(deepagentsDirectory, "plan-spec.json"),
     deepagentsPlanValidationPath: path.join(deepagentsDirectory, "plan-validation.json"),
     deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
+    ...(designArtifactRelativePath ? { designPath: path.join(outputDirectory, designArtifactRelativePath) } : {}),
     maxPlanRetries: templateRepairRetries.plan,
     maxGenerateRetries: templateRepairRetries.generate,
     templatePhases,
@@ -3608,6 +3645,9 @@ function initialGenerateMetricName(generator: TextGenerator): string {
 export async function generateApplication(options: GenerateAppOptions): Promise<GenerationResult> {
   setWorkflowStdoutMode(options.stdoutMode);
   try {
+    const designSourcePath = options.designPath
+      ? await resolveDesignDocumentSourcePath(options.designPath)
+      : undefined;
     const workspaceOptions: {
       outputDirectory?: string;
       force?: boolean;
@@ -3708,6 +3748,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       options.validator ??
       (options.generator ? new PassthroughGeneratedAppValidator() : new ShellGeneratedAppValidator());
     let localReferences: LocalReference[] = [];
+    let designArtifactRelativePath: string | undefined;
 
     const createRuntime = (overrides: Partial<TextGeneratorRuntime> = {}): TextGeneratorRuntime => ({
       sessionId: workspace.sessionId,
@@ -3741,6 +3782,9 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       deepagentsPlanSpecPath: workspace.deepagentsPlanSpecPath,
       deepagentsPlanValidationPath: workspace.deepagentsPlanValidationPath,
       deepagentsGenerationValidationPath: workspace.deepagentsGenerationValidationPath,
+      ...(designArtifactRelativePath
+        ? { designPath: path.join(workspace.outputDirectory, designArtifactRelativePath) }
+        : {}),
       maxPlanRetries: template.repairRetries.plan,
       maxGenerateRetries: template.repairRetries.generate,
       templatePhases: template.phases,
@@ -3771,6 +3815,22 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         async () => await copyStarterScaffold(template, workspace.outputDirectory),
       );
 
+      if (designSourcePath) {
+        designArtifactRelativePath = await measureWorkflowStep(
+          workspace.deepagentsMetricsLogPath,
+          workspace.sessionId,
+          {
+            name: "workspace.copy_design",
+            phase: "workspace",
+            metadata: {
+              sourcePath: designSourcePath,
+              targetPath: DESIGN_ARTIFACT_RELATIVE_PATH,
+            },
+          },
+          async () => await copyDesignDocumentToWorkspace(designSourcePath, workspace.outputDirectory),
+        );
+      }
+
       await measureWorkflowStep(
         workspace.deepagentsMetricsLogPath,
         workspace.sessionId,
@@ -3787,6 +3847,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           },
           artifacts: {
             sourcePrd: ".deepagents/source-prd.md",
+            ...(designArtifactRelativePath ? { design: designArtifactRelativePath } : {}),
             analysis: ".deepagents/prd-analysis.md",
             generatedSpec: ".deepagents/generated-spec.md",
             planSpec: ".deepagents/plan-spec.json",

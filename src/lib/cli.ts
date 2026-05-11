@@ -113,9 +113,9 @@ function resolveValidationPhaseOption(
 
 function helpText(): string {
   return `Usage:
-  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--force] [--skip-validation] [--stdout <log|dashboard>]
+  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--stdout <log|dashboard>]
   app-builder generate --resume <session-id> [--skip-validation] [--runtimeValidation] [--stdout <log|dashboard>]
-  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--force] [--skip-validation] [--stdout <log|dashboard>]
+  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--stdout <log|dashboard>]
   app-builder -g --resume <session-id> [--skip-validation] [--runtimeValidation] [--stdout <log|dashboard>]
   app-builder validate <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--stdout <log|dashboard>]
   app-builder -v <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--stdout <log|dashboard>]
@@ -213,6 +213,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     options: {
       "app-name": { type: "string" },
       template: { type: "string" },
+      design: { type: "string" },
       force: { type: "boolean" },
       "skip-validation": { type: "boolean" },
       runtimeValidation: { type: "boolean" },
@@ -238,8 +239,8 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       throw new Error("Do not pass a Markdown spec path when using --resume; pass only --resume <session-id>.");
     }
 
-    if (parsed.values["app-name"] || parsed.values.template || parsed.values.force === true) {
-      throw new Error("The --app-name, --template, and --force options cannot be used with --resume.");
+    if (parsed.values["app-name"] || parsed.values.template || parsed.values.design || parsed.values.force === true) {
+      throw new Error("The --app-name, --template, --design, and --force options cannot be used with --resume.");
     }
 
     logCliExecutionParameters(stdoutMode, stdout, {
@@ -306,6 +307,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     parsed.values.template && parsed.values.template.trim() !== ""
       ? parsed.values.template
       : DEFAULT_TEMPLATE_ID;
+  const resolvedDesignPath =
+    parsed.values.design && parsed.values.design.trim() !== ""
+      ? path.resolve(cwd, parsed.values.design)
+      : undefined;
 
   const options: GenerateAppOptions = {
     specPath: resolvedSpecPath,
@@ -314,6 +319,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     skipValidation: parsed.values["skip-validation"] === true,
     stdoutMode,
   };
+
+  if (resolvedDesignPath) {
+    options.designPath = resolvedDesignPath;
+  }
 
   if (appNameOverride) {
     options.appNameOverride = appNameOverride;
@@ -332,6 +341,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     specPath: resolvedSpecPath,
     appName: appNameOverride ?? "auto",
     template: templateId,
+    ...(resolvedDesignPath ? { design: resolvedDesignPath } : {}),
     force: options.force ?? false,
     skipValidation: options.skipValidation ?? false,
     model: resolveCliModelName(),

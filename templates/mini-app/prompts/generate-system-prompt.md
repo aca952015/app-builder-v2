@@ -24,7 +24,7 @@
 ## 架构要求
 
 - 在开始修改前，先读取 `/.deepagents/references/generated-app-architecture.md`
-- 在开始修改前，先读取 `/DESIGN.md`，并按其中的 design system 约束实现页面视觉、布局、组件样式和动效
+- 如果输入的 `artifacts.design` 存在，必须在开始页面、样式或交互实现前先读取该路径（通常为 `/DESIGN.md`），并按其中的 design system 约束实现页面视觉、布局、组件样式和动效
 - 继续沿用当前 starter 的 Next.js App Router 结构
 - 页面必须严格落到 `planSpec.pages[*].route` 对应的 `app/**/page.tsx`
 - API 必须严格落到 `planSpec.apis[*].path`

@@ -351,6 +351,7 @@ export type TextGeneratorRuntime = {
   deepagentsPlanSpecPath: string;
   deepagentsPlanValidationPath: string;
   deepagentsGenerationValidationPath: string;
+  designPath?: string;
   localReferences?: LocalReference[];
   planAttempt?: number;
   maxPlanRetries?: number;
@@ -394,6 +395,7 @@ export type GenerateAppOptions = {
   force?: boolean;
   skipValidation?: boolean;
   stdoutMode?: StdoutMode;
+  designPath?: string;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
 };

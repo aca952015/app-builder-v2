@@ -62,6 +62,7 @@
 - 当前工作目录根目录就是最终生成项目根目录。
 - 应用源码必须直接写入根目录，不要写进 `.deepagents/`。
 - 必须先读取 `.deepagents/references/generated-app-architecture.md`，确认当前 starter 的 route groups、shell、context、sidebar 和鉴权约定后，再读取和修改具体文件。
+- 如果输入的 `artifacts.design` 存在，必须在开始页面、组件、样式或交互实现前先读取该路径（通常为 `/DESIGN.md`），并按其中的 design system 约束实现界面。
 - 读取 starter 文件时，以 `.deepagents/references/generated-app-architecture.md` 记录的结构为准，沿用现有 Next.js App Router + TailAdmin 管理台结构。
 - 默认业务交互模式是 `REST API`，按 `planSpec.apis` 实现。
 - 页面实现必须严格以 `planSpec.pages[*].route` 为准生成对应路由入口；禁止擅自改名、改路径、补别名页、拆分成近似路径，或用其他 route 替代 `planSpec` 中声明的页面路径。

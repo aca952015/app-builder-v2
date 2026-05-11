@@ -416,6 +416,56 @@ test("runCli generate accepts --skip-validation", async () => {
     assert.match(stdoutLines.join("\n"), /- command: generate/);
     assert.match(stdoutLines.join("\n"), /- skipValidation: true/);
     assert.match(stdoutLines.join("\n"), /Generated Field Ops Planner/);
+
+    const sessionId = await getOnlySessionId(tempRoot);
+    const outputDirectory = path.join(tempRoot, ".out", sessionId);
+    const deepagentsConfig = await readFile(path.join(outputDirectory, ".deepagents", "config.json"), "utf8");
+    assert.doesNotMatch(deepagentsConfig, /"design"/);
+    await assert.rejects(
+      () => readFile(path.join(outputDirectory, "DESIGN.md"), "utf8"),
+      /ENOENT/,
+    );
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runCli generate copies an explicit design document into the output root", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-cli-design-"));
+  const previousCwd = process.cwd();
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  process.chdir(tempRoot);
+
+  try {
+    await writeCliMiniAppTemplate(tempRoot);
+    await mkdir(path.join(tempRoot, "designs"), { recursive: true });
+    const designPath = path.join(tempRoot, "designs", "Custom.md");
+    await writeFile(designPath, "# Custom Design\n\nUse a compact green interface.\n", "utf8");
+    const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
+
+    await runCli(
+      ["generate", specPath, "--template", "mini-app", "--design", "designs/Custom.md", "--skip-validation", "--stdout", "log"],
+      {
+        generator: new CliTestGenerator(),
+        validator: new SuccessfulCliValidator(),
+        stdout: { log: (line: string) => stdoutLines.push(line) },
+        stderr: { error: (line: string) => stderrLines.push(line) },
+        cwd: tempRoot,
+      },
+    );
+
+    const sessionId = await getOnlySessionId(tempRoot);
+    const outputDirectory = path.join(tempRoot, ".out", sessionId);
+    const copiedDesign = await readFile(path.join(outputDirectory, "DESIGN.md"), "utf8");
+    const deepagentsConfig = await readFile(path.join(outputDirectory, ".deepagents", "config.json"), "utf8");
+
+    assert.equal(stderrLines.length, 0);
+    assert.ok(stdoutLines.includes(`- design: ${designPath}`));
+    assert.match(copiedDesign, /# Custom Design/);
+    assert.match(deepagentsConfig, /"design": "DESIGN\.md"/);
   } finally {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });

@@ -10,7 +10,10 @@ Each template pack can provide its own phase-specific prompts, references, optio
 pnpm install
 pnpm build
 node dist/src/index.js generate ./spec.md --template full-stack
+node dist/src/index.js generate ./spec.md --template mini-app --design ./designs/Spotify.md
 ```
+
+`--design` is optional. When omitted, no design Markdown is copied into the generated workspace.
 
 Environment variables:
 

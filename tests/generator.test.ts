@@ -5267,15 +5267,19 @@ test("full-stack template starter copies scaffold files into the output root", a
   }
 });
 
-test("mini-app starter includes a design system document for generation agents", async () => {
+test("root designs include Spotify design document and mini-app starter does not bundle it", async () => {
   const designSource = await readFile(
-    path.resolve(process.cwd(), "templates/mini-app/starter/DESIGN.md"),
+    path.resolve(process.cwd(), "designs/Spotify.md"),
     "utf8",
   );
 
   assert.match(designSource, /Design System/);
   assert.match(designSource, /Color|Palette|Theme/i);
   assert.ok(designSource.trim().length > 200);
+  await assert.rejects(
+    () => access(path.resolve(process.cwd(), "templates/mini-app/starter/DESIGN.md")),
+    /ENOENT/,
+  );
 });
 
 test("template prompts delegate shell validation to the host", async () => {
@@ -5694,11 +5698,13 @@ test("mini-app prompts require interaction contract traceability", async () => {
   assert.match(planPromptSource, /triggerControl/);
   assert.match(planPromptSource, /endpointPath/);
   assert.match(generatePromptSource, /必须读取 `artifacts\.interactionContract`/);
-  assert.match(generatePromptSource, /先读取 `\/DESIGN\.md`/);
+  assert.match(generatePromptSource, /artifacts\.design/);
+  assert.match(generatePromptSource, /通常为 `\/DESIGN\.md`/);
   assert.match(generatePromptSource, /fallbackTrigger/);
   assert.match(generatePromptSource, /Interaction contract trace/);
   assert.match(generateRepairPromptSource, /必须读取 `artifacts\.interactionContract`/);
-  assert.match(generateRepairPromptSource, /必须先读取 `\/DESIGN\.md`/);
+  assert.match(generateRepairPromptSource, /artifacts\.design/);
+  assert.match(generateRepairPromptSource, /通常为 `\/DESIGN\.md`/);
   assert.match(generateRepairPromptSource, /endpointPath/);
   assert.match(generateRepairPromptSource, /Interaction contract trace/);
 });

@@ -349,6 +349,12 @@ export function buildPlanSpecHardConstraints(
   };
 }
 
+function buildOptionalDesignArtifact(runtime: TextGeneratorRuntime): { design?: string } {
+  return runtime.designPath
+    ? { design: toVirtualWorkspacePath(runtime.outputDirectory, runtime.designPath) }
+    : {};
+}
+
 export function buildPlanProjectPayload(
   spec: NormalizedSpec,
   runtime: TextGeneratorRuntime,
@@ -382,6 +388,7 @@ export function buildPlanProjectPayload(
     },
     artifacts: {
       sourcePrd: toVirtualWorkspacePath(runtime.outputDirectory, runtime.sourcePrdSnapshotPath),
+      ...buildOptionalDesignArtifact(runtime),
       analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
       generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
       planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
@@ -418,6 +425,7 @@ export function buildPlanRepairPayload(runtime: TextGeneratorRuntime): Record<st
     },
     artifacts: {
       sourcePrd: toVirtualWorkspacePath(runtime.outputDirectory, runtime.sourcePrdSnapshotPath),
+      ...buildOptionalDesignArtifact(runtime),
       analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
       generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
       planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
@@ -2532,6 +2540,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
           },
           artifacts: {
             analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+            ...buildOptionalDesignArtifact(runtime),
             generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
             planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
             interactionContract: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsInteractionContractPath),
@@ -2582,6 +2591,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
           },
           artifacts: {
             analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+            ...buildOptionalDesignArtifact(runtime),
             generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
             planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
             interactionContract: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsInteractionContractPath),
