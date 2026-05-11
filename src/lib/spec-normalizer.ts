@@ -11,6 +11,20 @@ import {
 } from "./types.js";
 
 const URL_PATTERN = /https?:\/\/[^\s<>)\]"']+/gi;
+const IMAGE_RESOURCE_EXTENSIONS = new Set([
+  ".apng",
+  ".avif",
+  ".bmp",
+  ".gif",
+  ".ico",
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".svg",
+  ".tif",
+  ".tiff",
+  ".webp",
+]);
 
 function compactCjkSpacing(input: string): string {
   return input
@@ -259,6 +273,27 @@ function cleanReferenceUrl(url: string): string {
   return url.replace(/[.,;:!?，。；：！？）\])]+$/u, "");
 }
 
+function isImageResourceUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const extension = parsed.pathname.match(/\.[a-z0-9]+$/i)?.[0]?.toLowerCase();
+    return extension ? IMAGE_RESOURCE_EXTENSIONS.has(extension) : false;
+  } catch {
+    return false;
+  }
+}
+
+function isMarkdownImageUrl(markdown: string, urlIndex: number): boolean {
+  const linkOpenIndex = markdown.lastIndexOf("](", urlIndex);
+  if (linkOpenIndex < 0 || linkOpenIndex + 2 !== urlIndex) {
+    return false;
+  }
+
+  const imageOpenIndex = markdown.lastIndexOf("![", linkOpenIndex);
+  const previousLinkCloseIndex = markdown.lastIndexOf(")", linkOpenIndex);
+  return imageOpenIndex > previousLinkCloseIndex;
+}
+
 function classifyReferenceCandidate(context: string): Pick<ExternalReferenceDraft, "type" | "required"> {
   const lower = context.toLowerCase();
   if (/api|endpoint|接口|参数|鉴权|认证|sdk/.test(lower)) {
@@ -282,6 +317,10 @@ function extractExternalReferences(sections: ParsedSection[]): ExternalReference
       const rawUrl = match[0];
       const url = cleanReferenceUrl(rawUrl);
       const index = match.index ?? 0;
+      if (isMarkdownImageUrl(sectionText, index) || isImageResourceUrl(url)) {
+        continue;
+      }
+
       const context = sectionText.slice(
         Math.max(0, index - 160),
         Math.min(sectionText.length, index + rawUrl.length + 160),

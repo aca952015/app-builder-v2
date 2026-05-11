@@ -47,6 +47,26 @@ test("normalizeSpec assembles external references from parsed PRD sections", () 
   assert.equal(normalized.externalReferences[0]?.required, true);
 });
 
+test("normalizeSpec skips image resources when extracting external references", () => {
+  const markdown = [
+    "# Visual Weather Console",
+    "",
+    "## References",
+    "- API docs: https://docs.example.com/weather/current for endpoint parameters.",
+    "- Screenshot: https://cdn.example.com/weather-dashboard.png",
+    "- Architecture diagram: ![Architecture](https://assets.example.com/render?id=weather-dashboard)",
+    "- Inline asset: [chart image](https://cdn.example.com/chart.webp).",
+    "",
+  ].join("\n");
+  const parsed = parsePrd(markdown);
+  const normalized = normalizeSpec(parsed, markdown);
+
+  assert.deepEqual(
+    normalized.externalReferences.map((reference) => reference.url),
+    ["https://docs.example.com/weather/current"],
+  );
+});
+
 test("parsePrd recognizes OCR-style Chinese energy PRDs", async () => {
   const markdown = await readFile(ENERGY_FIXTURE_PATH, "utf8");
   const parsed = parsePrd(markdown);
