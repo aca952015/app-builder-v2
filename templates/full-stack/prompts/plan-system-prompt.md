@@ -106,6 +106,8 @@
 - 如果 PRD 信息不足，可以做保守默认，但这些默认必须写入 `assumptions`，并体现在 JSON 定义中。
 - 不允许输出“数据模型：无”“后续补充”这类不可执行描述。
 - 如果 PRD 中包含外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须写入 `planSpec.references`，并在 `artifacts.generatedSpec` 中增加 `References` 章节说明。
+- 如果 PRD 中出现“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须写入 `planSpec.environmentVariables`；但不要写入 `template.environmentPolicy.lockedKeys` 中的 key，这些 starter 预置值由 host 锁定，PRD 不允许覆盖。
+- `planSpec.environmentVariables[*].targetFile` 写 `.env.example`；新增环境变量最终由 host 合并进 `.env.example`。
 - 如果输入包含 `externalReferences`、`localReferences` 或 `artifacts.referenceManifest` 中已有下载成功的本地资料，外部 API endpoint、认证方式、参数格式/顺序和响应字段必须先读取并优先来自这些本地文件；不要凭记忆猜测。
 - `planSpec.references[*]` 对应已下载资料时必须填写 `localPath`、`retrievedAt`、`contentType`、`retrievalStatus`；`artifacts.generatedSpec` 的 References 章节必须在远程 URL 旁写出同一个本地路径。
 - `planSpec.references` 只描述参考资料本身，不要求也不提供 `relatedApis`、`apiPaths` 之类的绑定字段。

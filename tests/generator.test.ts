@@ -418,6 +418,9 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
       idleTimeoutMs: 10_000,
       readyTimeoutMs: 90_000,
     },
+    templateEnvironmentPolicy: {
+      lockedKeys: [],
+    },
     modelRoles: resolveModelRoleConfigs({
       APP_BUILDER_API_KEY: "test-key",
     }),
@@ -2651,6 +2654,108 @@ class EnvRepairTextGenerator implements TextGenerator {
   }
 }
 
+class LockedEnvMutationTextGenerator implements TextGenerator {
+  generateAttempts = 0;
+
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildWeatherEnvPlanSpec();
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# 天气分析\n\n需要和风天气环境变量。\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# 天气规格\n\n`.env.example` 由 host 合并。\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "Weather planner wrote env-aware artifacts.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    this.generateAttempts += 1;
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Weather Report\n\nGenerated app tried to edit locked env keys.\n",
+      extraFiles: [
+        {
+          path: ".env.example",
+          contents: [
+            "DATABASE_URL=\"file:./wrong.db\"",
+            "NEXT_PUBLIC_APP_NAME=Wrong App",
+            "QWEATHER_API_KEY=wrong",
+            "",
+          ].join("\n"),
+        },
+        {
+          path: ".env",
+          contents: [
+            "DATABASE_URL=\"file:./wrong.db\"",
+            "NEXT_PUBLIC_APP_NAME=Wrong App",
+            "",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    return {
+      summary: "Generated app wrote environment files.",
+      filesWritten: ["app-builder-report.md", ".env.example", ".env"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in LockedEnvMutationTextGenerator");
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("generateRepairProject should not be called in LockedEnvMutationTextGenerator");
+  }
+}
+
+class LockedEnvConflictTextGenerator extends LockedEnvMutationTextGenerator {
+  override async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildWeatherEnvPlanSpec();
+    planSpec.environmentVariables = [
+      {
+        name: "DATABASE_URL",
+        value: "file:./tenant.db",
+        description: "PRD attempted to change the starter database path.",
+        targetFile: ".env.example",
+      },
+      ...(planSpec.environmentVariables ?? []),
+    ];
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# 天气分析\n\n错误地要求修改锁定变量。\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# 天气规格\n\n包含锁定变量冲突。\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "Planner wrote a locked env conflict.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+}
+
 class IndirectResourceTextGenerator implements TextGenerator {
   async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
     const planSpec = buildIndirectSupportPlanSpec();
@@ -3940,7 +4045,10 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(templateLock, /"generateRepair": \{[\s\S]*"prompt": "prompts\/generate-repair-system-prompt\.md"/);
     assert.match(templateLock, /"planRepair": \{[\s\S]*"effort": "high"/);
     assert.match(templateLock, /"generate": \{[\s\S]*"effort": "medium"/);
+    assert.match(templateLock, /"environmentPolicy": \{[\s\S]*"lockedKeys": \[/);
+    assert.match(templateLock, /"DATABASE_URL"/);
     assert.match(stagedTemplateManifest, /"repairRetries": \{/);
+    assert.match(stagedTemplateManifest, /"environmentPolicy": \{/);
     assert.match(stagedTemplateManifest, /"phases": \{/);
     assert.match(stagedTemplateManifest, /"plan": \{\s*"prompt": "prompts\/plan-system-prompt\.md"/);
     assert.match(stagedTemplateManifest, /"planRepair": \{[\s\S]*"prompt": "prompts\/plan-repair-system-prompt\.md"/);
@@ -4003,6 +4111,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
       record.durationMs >= 0
     )));
     assert.match(deepagentsConfig, /"repairRetries": \{/);
+    assert.match(deepagentsConfig, /"environmentPolicy": \{/);
     assert.match(deepagentsConfig, /"phases": \{/);
     assert.match(deepagentsConfig, /"plan": \{[\s\S]*"prompt": "prompts\/plan-system-prompt\.md"[\s\S]*"effort": "high"/);
     assert.doesNotMatch(deepagentsConfig, /\/Users\/aca\/dev\/app-builder-v2/);
@@ -4577,16 +4686,130 @@ test("generateApplication repairs mini-app .env.example when planSpec declares e
       path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
       "utf8",
     );
-    const errorLog = await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8");
 
     assert.equal(generator.generateAttempts, 1);
-    assert.equal(generator.repairAttempts, 1);
+    assert.equal(generator.repairAttempts, 0);
     assert.match(envExample, /^NEXT_PUBLIC_APP_NAME=Mini App$/m);
     assert.match(envExample, /^QWEATHER_API_KEY=e1499e17f3934df58273c9d4ea56bc54$/m);
     assert.match(envExample, /^QWEATHER_API_HOST=my6yw2bmj5.re.qweatherapi.com$/m);
     assert.match(planSpecSnapshot, /"environmentVariables": \[/);
     assert.match(generationValidation, /"valid": true/);
-    assert.match(errorLog, /\.env\.example 缺少 planSpec\.environmentVariables 声明的变量：QWEATHER_API_KEY, QWEATHER_API_HOST/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication restores locked .env.example keys from the starter snapshot", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-env-lock-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new LockedEnvMutationTextGenerator();
+  const previousCwd = process.cwd();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "mini-app",
+      interactiveEnabled: false,
+    });
+    const templateDirectory = path.join(tempRoot, "templates", "mini-app");
+    const manifestPath = path.join(templateDirectory, "template.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.starterDir = "starter";
+    manifest.environmentPolicy = {
+      lockedKeys: ["DATABASE_URL", "NEXT_PUBLIC_APP_NAME"],
+    };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await mkdir(path.join(templateDirectory, "starter"), { recursive: true });
+    await writeFile(
+      path.join(templateDirectory, "starter", ".env.example"),
+      [
+        "DATABASE_URL=\"file:./prisma/dev.db\"",
+        "NEXT_PUBLIC_APP_NAME=Mini App",
+        "QWEATHER_API_KEY=starter-value",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    process.chdir(tempRoot);
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "mini-app",
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const envExample = await readFile(path.join(result.outputDirectory, ".env.example"), "utf8");
+    const env = await readFile(path.join(result.outputDirectory, ".env"), "utf8");
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.equal(generator.generateAttempts, 1);
+    assert.match(envExample, /^DATABASE_URL="file:\.\/prisma\/dev\.db"$/m);
+    assert.match(envExample, /^NEXT_PUBLIC_APP_NAME=Mini App$/m);
+    assert.match(envExample, /^QWEATHER_API_KEY=e1499e17f3934df58273c9d4ea56bc54$/m);
+    assert.match(envExample, /^QWEATHER_API_HOST=my6yw2bmj5\.re\.qweatherapi\.com$/m);
+    assert.ok(envExample.indexOf("QWEATHER_API_KEY=") < envExample.indexOf("QWEATHER_API_HOST="));
+    assert.doesNotMatch(envExample, /wrong\.db|Wrong App|QWEATHER_API_KEY=wrong/);
+    assert.equal(env, envExample);
+    assert.match(generationValidation, /"valid": true/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication fails generation validation when planSpec changes a locked env key", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-env-lock-conflict-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const previousCwd = process.cwd();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "mini-app",
+      interactiveEnabled: false,
+      generateRepairRetries: 0,
+    });
+    const templateDirectory = path.join(tempRoot, "templates", "mini-app");
+    const manifestPath = path.join(templateDirectory, "template.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.starterDir = "starter";
+    manifest.environmentPolicy = {
+      lockedKeys: ["DATABASE_URL"],
+    };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await mkdir(path.join(templateDirectory, "starter"), { recursive: true });
+    await writeFile(
+      path.join(templateDirectory, "starter", ".env.example"),
+      "DATABASE_URL=\"file:./prisma/dev.db\"\n",
+      "utf8",
+    );
+    process.chdir(tempRoot);
+
+    await assert.rejects(
+      () => generateApplication({
+        specPath,
+        outputDirectory: path.join(tempRoot, "output"),
+        templateId: "mini-app",
+        generator: new LockedEnvConflictTextGenerator(),
+        validator: new SuccessfulRuntimeValidator(),
+      }),
+      /planSpec\.environmentVariables 试图修改模板锁定的 \.env\.example 变量：DATABASE_URL/,
+    );
+
+    const envExample = await readFile(path.join(tempRoot, "output", ".env.example"), "utf8");
+    const generationValidation = await readFile(
+      path.join(tempRoot, "output", ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.match(envExample, /^DATABASE_URL="file:\.\/prisma\/dev\.db"$/m);
+    assert.match(generationValidation, /DATABASE_URL/);
   } finally {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });
@@ -5226,6 +5449,7 @@ test("full-stack template starter copies scaffold files into the output root", a
     assert.equal(template.phases.plan.effort, "high");
     assert.equal(template.phases.generate.effort, "medium");
     assert.equal(template.phases.generateRepair.effort, "high");
+    assert.deepEqual(template.environmentPolicy.lockedKeys, ["DATABASE_URL", "APP_URL", "SESSION_SECRET"]);
     assert.ok(copied.includes("package.json"));
     assert.ok(copied.includes("prisma.config.ts"));
     assert.ok(copied.includes("app/layout.tsx"));
@@ -5352,6 +5576,12 @@ test("mini-app template enables interactive runtime validation", async () => {
   assert.equal(template.interactiveRuntimeValidation.devServerStep?.name, "pnpm dev");
   assert.equal(template.interactiveRuntimeValidation.devServerStep?.command, "pnpm");
   assert.deepEqual(template.interactiveRuntimeValidation.devServerStep?.args, ["dev"]);
+  assert.deepEqual(template.environmentPolicy.lockedKeys, [
+    "DATABASE_URL",
+    "NEXT_PUBLIC_APP_NAME",
+    "SYSTEM_USER_EMAIL",
+    "SYSTEM_USER_PASSWORD",
+  ]);
 
   const nextConfig = await readFile(path.join(template.starterDirectory ?? "", "next.config.ts"), "utf8");
   assert.match(nextConfig, /allowedDevOrigins:\s*\["127\.0\.0\.1", "localhost"\]/);
@@ -5378,6 +5608,47 @@ test("loadTemplatePack parses enabled interactive runtime validation defaults", 
     assert.equal(template.interactiveRuntimeValidation.idleTimeoutMs, 10_000);
     assert.equal(template.interactiveRuntimeValidation.readyTimeoutMs, 90_000);
     assert.equal(template.interactiveRuntimeValidation.devServerStep?.name, "node dev server");
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadTemplatePack parses and validates template environment policy", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-template-env-policy-"));
+  const previousCwd = process.cwd();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "env-policy-template",
+      interactiveEnabled: false,
+    });
+    const manifestPath = path.join(tempRoot, "templates", "env-policy-template", "template.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.environmentPolicy = {
+      lockedKeys: ["DATABASE_URL", "NEXT_PUBLIC_APP_NAME"],
+    };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    process.chdir(tempRoot);
+
+    const template = await loadTemplatePack("env-policy-template");
+
+    assert.deepEqual(template.environmentPolicy.lockedKeys, ["DATABASE_URL", "NEXT_PUBLIC_APP_NAME"]);
+
+    manifest.environmentPolicy = { lockedKeys: "DATABASE_URL" };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await assert.rejects(
+      () => loadTemplatePack("env-policy-template"),
+      /environmentPolicy\.lockedKeys.*array of strings/,
+    );
+
+    manifest.environmentPolicy = { lockedKeys: ["DATABASE_URL", ""] };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await assert.rejects(
+      () => loadTemplatePack("env-policy-template"),
+      /environmentPolicy\.lockedKeys\[1\].*non-empty string/,
+    );
   } finally {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });
@@ -5826,17 +6097,19 @@ test("mini-app prompts preserve PRD environment configuration through planSpec",
   assert.match(planPromptSource, /planSpec\.references/);
   assert.match(planPromptSource, /不要求也不提供 `relatedApis`/);
   assert.match(planPromptSource, /targetFile` 写 `\.env\.example`/);
+  assert.match(planPromptSource, /template\.environmentPolicy\.lockedKeys/);
   assert.match(planRepairPromptSource, /计划修复阶段代理/);
   assert.match(planRepairPromptSource, /planSpec\.environmentVariables/);
   assert.match(planRepairPromptSource, /planSpec\.references/);
+  assert.match(planRepairPromptSource, /lockedKeys/);
   assert.match(generatePromptSource, /planSpec\.environmentVariables/);
   assert.match(generatePromptSource, /planSpec\.references/);
   assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
   assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
-  assert.match(generatePromptSource, /保留 starter 已有变量/);
-  assert.match(generatePromptSource, /filesWritten` 必须包含 `\.env\.example`/);
+  assert.match(generatePromptSource, /最终合并和落盘由 host 负责/);
+  assert.match(generatePromptSource, /不应仅因为环境变量合并而包含 `\.env\.example`/);
   assert.match(generateRepairPromptSource, /planSpec\.environmentVariables/);
   assert.match(generateRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);
-  assert.match(generateRepairPromptSource, /精确的 `name=value`/);
+  assert.match(generateRepairPromptSource, /不要直接修补根目录 `\/\.env\.example`/);
 });

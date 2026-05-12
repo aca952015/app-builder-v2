@@ -31,8 +31,8 @@
 - 对每个失败相关的 `interactionContract.flows[*]`，必须补齐直接触发或 fallback 触发、loading/empty/error 可见状态；不要只把错误写到 `console.error`
 - 对每个失败相关的 `interactionContract.internalOperations[*]`，必须确保页面控件真实触发对应 `planSpec.apis[*].path`
 - 对每个失败相关的 `interactionContract.externalOperations[*]`，必须按 endpointPath、authSource、parameterFormat、responseFields 和 reference provenance 修复 API route；不要凭记忆猜 endpoint 或参数顺序
-- 如果失败项提到 `.env.example`、`planSpec.environmentVariables` 或环境变量缺失/不一致，必须按 `planSpec.environmentVariables` 修补根目录 `/.env.example`
-- 修补 `.env.example` 时必须保留 starter 已有变量，并对每个目标为 `.env.example` 的条目写入精确的 `name=value`
+- 如果失败项提到 `.env.example`、`planSpec.environmentVariables` 或环境变量缺失/不一致，不要直接修补根目录 `/.env.example`；host 会从 starter `.env.example` 和 `planSpec.environmentVariables` 合并最终文件
+- 不要写入或修改根目录 `/.env`、`/.env.example`，也不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；如失败项来自锁定变量冲突，应保持代码兼容 starter 默认值并等待计划阶段修正冲突
 - 如果失败项来自运行验证，必须结合 `artifacts.runtimeValidationLog` 的真实输出修复，并确保输入里的 `template.runtimeValidation` 步骤可以通过
 - 如果失败项来自交互式运行验证，必须结合 `artifacts.runtimeInteractionValidation` 与 `artifacts.runtimeValidationLog` 中记录的代理 HTTP 请求/响应、5xx 响应体摘要、failureChain、dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线，确保用户访问运行验证代理 URL 时不再产生编译或运行时错误
 - 如果 `validationFailures` 包含“用户在运行验证页提交实现要求”，必须把该要求视为本轮修复目标：在不改写 `planSpec` 的前提下，按现有页面、资源和 API 边界做最小可行实现，并同步更新 `app-builder-report.md`

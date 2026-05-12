@@ -275,7 +275,12 @@ export type TemplatePack = {
   phases: TemplatePhaseMap;
   runtimeValidation: TemplateRuntimeValidation;
   interactiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
+  environmentPolicy: TemplateEnvironmentPolicy;
   hash: string;
+};
+
+export type TemplateEnvironmentPolicy = {
+  lockedKeys: string[];
 };
 
 export type TemplateLock = {
@@ -288,6 +293,7 @@ export type TemplateLock = {
   phases: TemplatePhaseMap;
   runtimeValidation: TemplateRuntimeValidation;
   interactiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
+  environmentPolicy: TemplateEnvironmentPolicy;
   hash: string;
   stagedAt: string;
   workspaceTemplateDirectory: string;
@@ -361,6 +367,7 @@ export type TextGeneratorRuntime = {
   templatePhases: TemplatePhaseMap;
   templateRuntimeValidation: TemplateRuntimeValidation;
   templateInteractiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
+  templateEnvironmentPolicy: TemplateEnvironmentPolicy;
   modelRoles: ModelRoleConfigMap;
 };
 

@@ -75,6 +75,8 @@
 - 修改 `prisma/schema.prisma` 时，禁止采用“先写 `schema_new.prisma` / `schema_correct.prisma` / `schema_backup.prisma` 等候选文件，再尝试搬运或比对”的策略；禁止引入任何临时 schema 副本文件。
 - 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态。
 - 如果 `planSpec` 没有明确要求改变某个 starter 基础契约，优先保持兼容并在既有契约上扩展，而不是重写或漂移它的依赖链。
+- 不要直接写入或修改根目录 `/.env`、`/.env.example`；对 `.env.example` 的新增环境变量只能通过已验证的 `planSpec.environmentVariables` 表达，最终合并和落盘由 host 负责。
+- 不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；这些 key 的最终值必须保持 starter 默认值。
 - 宿主会在生成阶段结束后按输入里的 `template.runtimeValidation` 执行运行验证；若 `copyEnvExample` 未禁用，还会先准备 `.env`。你生成的代码、脚本、Prisma 配置和环境文件必须让这些步骤连续通过。
 - 如果输入里的 `template.interactiveRuntimeValidation.enabled` 为 true，宿主还会在生成门禁通过后启动 dev server，并用本机默认浏览器打开真实 dev server URL；宿主会收集 dev server stdout/stderr 判断是否需要修复。页面和 API 必须能支撑真实用户点击、表单提交、列表/详情跳转和 API 调用，不能只做静态展示来绕过交互。
 - 不要生成依赖外部 CDN 的实现，不要使用 `eval()`、`new Function()`、`document.write()`。
@@ -103,6 +105,7 @@
 - `implementedApis` 必须列出已实现的 API 文件路径
 - 这些列表必须与 `planSpec` 中实际覆盖的内容一致
 - `filesWritten` 必须按实际落盘顺序列出你创建或更新过的项目文件相对路径
+- `filesWritten` 不需要、也不应仅因为环境变量合并而包含 `.env.example`
 
 ## 重试要求
 

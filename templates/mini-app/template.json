@@ -8,6 +8,14 @@
     "plan": 10,
     "generate": 10
   },
+  "environmentPolicy": {
+    "lockedKeys": [
+      "DATABASE_URL",
+      "NEXT_PUBLIC_APP_NAME",
+      "SYSTEM_USER_EMAIL",
+      "SYSTEM_USER_PASSWORD"
+    ]
+  },
   "phases": {
     "plan": {
       "prompt": "prompts/plan-system-prompt.md",

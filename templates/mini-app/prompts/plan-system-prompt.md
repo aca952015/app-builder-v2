@@ -55,6 +55,7 @@
 - 对 mini-app 来说，优先规划轻量页面与最少 API，不要默认引入重型后台、数据库或复杂权限体系
 - 如果 PRD 中出现“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须写入 `planSpec.environmentVariables`
 - `planSpec.environmentVariables[*].name` 必须保留 PRD 中的环境变量名，`value` 必须保留 PRD 中要求写入 `.env.example` 的值，`targetFile` 写 `.env.example`
+- 不要把 `template.environmentPolicy.lockedKeys` 中的 key 写入 `planSpec.environmentVariables`；这些 starter 预置值由 host 锁定，PRD 不允许覆盖
 - 如果 PRD 没有明确要求环境变量，不要编造 `environmentVariables`
 - 如果 PRD 中包含外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须写入 `planSpec.references`，并在 `artifacts.generatedSpec` 中增加 `References` 章节说明
 - 如果输入包含 `localReferences` 或 `artifacts.referenceManifest` 中已有下载成功的本地资料，外部 API endpoint、认证方式、参数格式/顺序和响应字段必须优先来自这些本地文件；不要凭记忆猜测

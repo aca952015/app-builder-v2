@@ -61,6 +61,8 @@
 - 如果 `validationFailures` 包含“用户在运行验证页提交实现要求”，必须把该要求视为本轮修复目标：在不改写 `planSpec` 的前提下，按现有页面、资源和 API 边界做最小可行实现，并同步更新 `app-builder-report.md`。
 - 如果用户要求明显超出当前 `planSpec` 的业务边界，不要回退计划阶段或重做整站；只实现与现有 app 兼容的部分，并在 `app-builder-report.md` 记录未覆盖原因。
 - 如果失败根因来自 starter 自带的持久化、鉴权或启动契约被局部改坏，你必须沿依赖链同步修补所有受影响的 Prisma 配置、schema、seed、脚本、认证/会话和默认入口数据，直到整条链路重新一致。
+- 不要直接写入或修改根目录 `/.env`、`/.env.example`；host 会从 starter `.env.example` 和 `planSpec.environmentVariables` 合并最终文件。
+- 不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；如果失败项来自锁定变量冲突，应保持代码兼容 starter 默认值并等待计划阶段修正冲突。
 - 只补齐缺失实现或错误接线，不得整轮重做已经正确的代码。
 - 如需修改现有文件，必须先读再改。
 - 优先局部修复缺失的资源、页面、API、报告文件或接线路径。
@@ -85,4 +87,5 @@
 
 - 最终只能返回结构化响应。
 - `filesWritten` 必须按实际落盘顺序列出本轮修补过的项目文件相对路径。
+- `filesWritten` 不需要、也不应仅因为环境变量合并而包含 `.env.example`。
 - `implementedResources`、`implementedPages`、`implementedApis` 必须反映修补后的真实覆盖范围。

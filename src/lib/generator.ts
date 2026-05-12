@@ -61,6 +61,7 @@ import {
   type TemplatePhaseMap,
   type TemplateRepairRetries,
   type TemplateInteractiveRuntimeValidation,
+  type TemplateEnvironmentPolicy,
   type TemplatePhaseEffort,
   type TemplateRuntimeValidation,
   type TemplateRuntimeValidationStep,
@@ -78,6 +79,7 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 const DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY = 8;
 const DESIGN_ARTIFACT_RELATIVE_PATH = "DESIGN.md";
+const STARTER_ENV_EXAMPLE_SNAPSHOT_FILE = "starter.env.example";
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段" | "运行验证修复阶段";
 
 function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
@@ -89,6 +91,10 @@ function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
       { name: "pnpm dev", command: "pnpm", args: ["dev"], kind: "dev-server" },
     ],
   };
+}
+
+function defaultTemplateEnvironmentPolicy(): TemplateEnvironmentPolicy {
+  return { lockedKeys: [] };
 }
 
 function slugifyReferenceUrl(url: string): string {
@@ -595,19 +601,6 @@ async function ensureEnvFile(outputDirectory: string, logPath: string): Promise<
   const envExamplePath = path.join(outputDirectory, ".env.example");
   const envPath = path.join(outputDirectory, ".env");
 
-  if (await readIfExists(envPath)) {
-    await appendRuntimeValidationLog(logPath, [
-      "=== mv .env.example .env ===",
-      "[skip] .env 已存在，保留当前文件。",
-      "",
-    ]);
-    return {
-      name: "mv .env.example .env",
-      ok: true,
-      detail: ".env 已存在，跳过覆盖。",
-    };
-  }
-
   const envExampleContents = await readIfExists(envExamplePath);
   if (!envExampleContents) {
     await appendRuntimeValidationLog(logPath, [
@@ -622,16 +615,21 @@ async function ensureEnvFile(outputDirectory: string, logPath: string): Promise<
     };
   }
 
+  const hadExistingEnv = await readIfExists(envPath) !== null;
   await fs.copyFile(envExamplePath, envPath);
   await appendRuntimeValidationLog(logPath, [
     "=== mv .env.example .env ===",
-    "[ok] 已按校验要求从 .env.example 生成 .env（保留 example 以支持重复验证）。",
+    hadExistingEnv
+      ? "[ok] 已按宿主托管的 .env.example 重新生成 .env（覆盖旧文件以保持一致）。"
+      : "[ok] 已按校验要求从 .env.example 生成 .env（保留 example 以支持重复验证）。",
     "",
   ]);
   return {
     name: "mv .env.example .env",
     ok: true,
-    detail: "已从 .env.example 生成 .env。",
+    detail: hadExistingEnv
+      ? "已从 .env.example 重新生成 .env。"
+      : "已从 .env.example 生成 .env。",
   };
 }
 
@@ -1073,6 +1071,127 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
+type EnvExampleVariable = NonNullable<PlanSpec["environmentVariables"]>[number];
+
+function starterEnvExampleSnapshotPath(runtime: Pick<TextGeneratorRuntime, "deepagentsDirectory">): string {
+  return path.join(runtime.deepagentsDirectory, STARTER_ENV_EXAMPLE_SNAPSHOT_FILE);
+}
+
+async function snapshotStarterEnvExample(outputDirectory: string, deepagentsDirectory: string): Promise<void> {
+  const envExampleContents = await readIfExists(path.join(outputDirectory, ".env.example"));
+  if (envExampleContents === null) {
+    return;
+  }
+
+  await fs.writeFile(
+    path.join(deepagentsDirectory, STARTER_ENV_EXAMPLE_SNAPSHOT_FILE),
+    envExampleContents,
+    "utf8",
+  );
+}
+
+function collectEnvExampleVariables(planSpec: PlanSpec): EnvExampleVariable[] {
+  return (planSpec.environmentVariables ?? [])
+    .filter((variable) => (variable.targetFile ?? ".env.example") === ".env.example");
+}
+
+function parseEnvAssignmentLine(rawLine: string): { key: string } | null {
+  const line = rawLine.trim();
+  if (!line || line.startsWith("#")) {
+    return null;
+  }
+
+  const separatorIndex = line.indexOf("=");
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  const key = line.slice(0, separatorIndex).trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    return null;
+  }
+
+  return { key };
+}
+
+function formatEnvAssignment(variable: EnvExampleVariable): string {
+  return `${variable.name}=${variable.value}`;
+}
+
+function mergeEnvExampleContents(
+  starterContents: string,
+  variables: EnvExampleVariable[],
+  lockedKeys: Set<string>,
+): string {
+  const lines = starterContents.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+
+  const keyToLineIndex = new Map<string, number>();
+  for (const [index, line] of lines.entries()) {
+    const assignment = parseEnvAssignmentLine(line);
+    if (assignment) {
+      keyToLineIndex.set(assignment.key, index);
+    }
+  }
+
+  for (const variable of variables) {
+    if (lockedKeys.has(variable.name)) {
+      continue;
+    }
+
+    const nextLine = formatEnvAssignment(variable);
+    const existingIndex = keyToLineIndex.get(variable.name);
+    if (existingIndex === undefined) {
+      keyToLineIndex.set(variable.name, lines.length);
+      lines.push(nextLine);
+      continue;
+    }
+
+    lines[existingIndex] = nextLine;
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+async function reconcileHostManagedEnvironment(
+  runtime: TextGeneratorRuntime,
+  planSpec: PlanSpec,
+): Promise<string[]> {
+  const lockedKeys = new Set((runtime.templateEnvironmentPolicy ?? defaultTemplateEnvironmentPolicy()).lockedKeys);
+  const declaredVariables = collectEnvExampleVariables(planSpec);
+  const envExamplePath = path.join(runtime.outputDirectory, ".env.example");
+  const starterContents =
+    await readIfExists(starterEnvExampleSnapshotPath(runtime)) ??
+    await readIfExists(envExamplePath);
+
+  if (starterContents === null && declaredVariables.length === 0) {
+    return [];
+  }
+
+  const starterBaseContents = starterContents ?? "";
+  const starterValues = parseDotEnv(starterBaseContents);
+  const lockedConflicts = declaredVariables
+    .filter((variable) => lockedKeys.has(variable.name) && starterValues[variable.name] !== variable.value)
+    .map((variable) => variable.name);
+
+  const mergedContents = mergeEnvExampleContents(starterBaseContents, declaredVariables, lockedKeys);
+  await fs.writeFile(envExamplePath, mergedContents, "utf8");
+  const envPath = path.join(runtime.outputDirectory, ".env");
+  if (await readIfExists(envPath) !== null) {
+    await fs.writeFile(envPath, mergedContents, "utf8");
+  }
+
+  if (lockedConflicts.length === 0) {
+    return [];
+  }
+
+  return [
+    `生成阶段未完成：planSpec.environmentVariables 试图修改模板锁定的 .env.example 变量：${Array.from(new Set(lockedConflicts)).join(", ")}。`,
+  ];
+}
+
 function normalizeRelativePath(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/^\/+/, "");
 }
@@ -1205,10 +1324,12 @@ function collectMissingDeliveryAcceptanceChecks(
 
 async function collectEnvironmentVariableIssues(
   outputDirectory: string,
+  runtime: TextGeneratorRuntime,
   planSpec: PlanSpec,
 ): Promise<string[]> {
-  const declaredVariables = (planSpec.environmentVariables ?? [])
-    .filter((variable) => (variable.targetFile ?? ".env.example") === ".env.example");
+  const lockedKeys = new Set((runtime.templateEnvironmentPolicy ?? defaultTemplateEnvironmentPolicy()).lockedKeys);
+  const declaredVariables = collectEnvExampleVariables(planSpec)
+    .filter((variable) => !lockedKeys.has(variable.name));
   if (declaredVariables.length === 0) {
     return [];
   }
@@ -2090,7 +2211,8 @@ async function collectPersistedGeneratedValidation(
   const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
   await appendIndirectResourceCoverageNotice(coverage.indirectResources);
   const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
-  const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, planSpec);
+  const environmentPolicyIssues = await reconcileHostManagedEnvironment(runtime, planSpec);
+  const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, runtime, planSpec);
 
   if (coverage.missingApiPaths.length > 0) {
     reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
@@ -2103,7 +2225,7 @@ async function collectPersistedGeneratedValidation(
   if (missingAcceptanceChecks.length > 0) {
     reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
   }
-  reasons.push(...environmentIssues);
+  reasons.push(...environmentPolicyIssues, ...environmentIssues);
 
   let steps: GenerationValidationStep[] = [];
   if (reasons.length === 0) {
@@ -2175,7 +2297,8 @@ async function validateGeneratedArtifacts(
       const coverage = await collectGeneratedCoverage(outputDirectory, planSpec);
       await appendIndirectResourceCoverageNotice(coverage.indirectResources);
       const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
-      const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, planSpec);
+      const environmentPolicyIssues = await reconcileHostManagedEnvironment(runtime, planSpec);
+      const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, runtime, planSpec);
       if (coverage.missingPageRoutes.length > 0) {
         reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
       }
@@ -2185,7 +2308,7 @@ async function validateGeneratedArtifacts(
       if (missingAcceptanceChecks.length > 0) {
         reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
       }
-      reasons.push(...environmentIssues);
+      reasons.push(...environmentPolicyIssues, ...environmentIssues);
 
       let steps: GenerationValidationStep[] = [];
       if (reasons.length === 0) {
@@ -2380,6 +2503,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
   };
   let templateRuntimeValidation = defaultTemplateRuntimeValidation();
   let templateInteractiveRuntimeValidation = defaultTemplateInteractiveRuntimeValidation();
+  let templateEnvironmentPolicy = defaultTemplateEnvironmentPolicy();
   let persistedModelName: string | undefined;
   let persistedModelRoles: Partial<SanitizedModelRoleConfigMap> = {};
   let designArtifactRelativePath: string | undefined;
@@ -2401,6 +2525,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
           phases?: unknown;
           runtimeValidation?: unknown;
           interactiveRuntimeValidation?: unknown;
+          environmentPolicy?: unknown;
         };
       };
       if (typeof parsed.model === "string" && parsed.model.trim() !== "") {
@@ -2560,6 +2685,21 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
           ...(devServerStep ? { devServerStep } : {}),
         };
       }
+      if (
+        parsed.template?.environmentPolicy &&
+        typeof parsed.template.environmentPolicy === "object" &&
+        !Array.isArray(parsed.template.environmentPolicy)
+      ) {
+        const candidate = parsed.template.environmentPolicy as Partial<TemplateEnvironmentPolicy>;
+        if (
+          Array.isArray(candidate.lockedKeys) &&
+          candidate.lockedKeys.every((key) => typeof key === "string" && key.trim() !== "")
+        ) {
+          templateEnvironmentPolicy = {
+            lockedKeys: Array.from(new Set(candidate.lockedKeys.map((key) => key.trim()))),
+          };
+        }
+      }
     } catch {
       // Ignore malformed config here; phase validation will report durable artifact failures separately.
     }
@@ -2608,6 +2748,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     templatePhases,
     templateRuntimeValidation,
     templateInteractiveRuntimeValidation,
+    templateEnvironmentPolicy,
     modelRoles,
   };
 }
@@ -3790,6 +3931,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       templatePhases: template.phases,
       templateRuntimeValidation: template.runtimeValidation,
       templateInteractiveRuntimeValidation: template.interactiveRuntimeValidation,
+      templateEnvironmentPolicy: template.environmentPolicy,
       modelRoles,
       ...overrides,
     });
@@ -3813,6 +3955,16 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           metadata: { templateId: template.id },
         },
         async () => await copyStarterScaffold(template, workspace.outputDirectory),
+      );
+      await measureWorkflowStep(
+        workspace.deepagentsMetricsLogPath,
+        workspace.sessionId,
+        {
+          name: "workspace.snapshot_starter_env",
+          phase: "workspace",
+          metadata: { templateId: template.id },
+        },
+        async () => await snapshotStarterEnvExample(workspace.outputDirectory, workspace.deepagentsDirectory),
       );
 
       if (designSourcePath) {

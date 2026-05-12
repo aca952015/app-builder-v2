@@ -30,7 +30,7 @@
 - API 必须严格落到 `planSpec.apis[*].path`
 - 如果 `planSpec` 没有明确要求持久化，不要擅自增加数据库层；若 `planSpec` 明确要求持久化，则统一使用 starter 已提供的 Prisma + SQLite 基础设施
 - 若 `planSpec` 要求持久化，数据库访问统一通过 `lib/prisma.ts` 导出的 Prisma Client 实现；不要在 route handler 中改用其他 ORM、原生 sqlite 驱动或手写独立数据库连接层
-- 若 `planSpec` 要求持久化，SQLite 数据库路径必须在根目录 `/.env`、根目录 `/.env.example`、以及 `./lib/prisma.ts` 中保持完全一致：`DATABASE_URL` 的值必须和 `./lib/prisma.ts` 中的 fallback/defaultDatabaseUrl 指向同一个 SQLite 文件；如果修改任一处，必须同步修改另外两处，禁止出现 `file:./prisma/dev.db`、`file:dev.db`、绝对路径等混用
+- 若 `planSpec` 要求持久化，SQLite 数据库路径必须保持 starter 基础契约一致：`DATABASE_URL` 属于 `template.environmentPolicy.lockedKeys`，不要修改根目录 `/.env` 或 `/.env.example`；如需触及 Prisma 接线，只能让 `./lib/prisma.ts` 中的 fallback/defaultDatabaseUrl 继续指向 starter 默认的同一个 SQLite 文件
 - 如果你需要修改 `prisma/schema.prisma`，必须先读取当前 `prisma/schema.prisma`，确认它是 Prisma 的 canonical schema 文件，然后直接对 `prisma/schema.prisma` 执行一次完整覆盖写入，产出最终完整 schema
 - 修改 `prisma/schema.prisma` 时，禁止采用"先写 `schema_new.prisma` / `schema_correct.prisma` / `schema_backup.prisma` 等候选文件，再尝试搬运或比对"的策略；禁止引入任何临时 schema 副本文件
 - 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态
@@ -38,7 +38,7 @@
 - 如果你改动了 starter 自带的数据库契约，必须把所有受该契约影响的 Prisma 配置、schema、seed、脚本视为同一变更面，逐一读取并同步修改；禁止只改其中一部分就结束
 - 如果 `planSpec` 要求登录功能，必须提供一组默认用户名和密码，让用户可以立即登录：
   - 若使用数据库持久化，必须通过 `prisma/seed.ts` 将默认用户写入 `User` 模型（`email: "demo@example.com"`，`passwordHash: "demo12345"`）
-  - 若不使用数据库持久化，必须在 `.env` 和 `.env.example` 中保留默认凭证（`SYSTEM_USER_EMAIL="demo@example.com"`，`SYSTEM_USER_PASSWORD="demo12345"`），并在登录 API 中读取这些环境变量进行校验
+  - 若不使用数据库持久化，必须在登录 API 中读取 starter/host 提供的默认凭证环境变量（`SYSTEM_USER_EMAIL="demo@example.com"`，`SYSTEM_USER_PASSWORD="demo12345"`）进行校验；不要修改 `.env` 或 `.env.example`
   - 登录页面或登录响应中必须向用户展示这组默认凭证（例如登录表单下方的提示文字）
 - `planSpec.references` 是生成阶段的参考资料集合，用于理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构
 - 当 `planSpec.references[*].localPath` 存在时，必须先读取该本地文件，再实现外部 API route；endpoint、认证、参数顺序和响应字段以本地资料为准，不要凭记忆猜测
@@ -57,11 +57,10 @@
 - 必须实现 `planSpec.resources`
 - 必须实现 `planSpec.pages`
 - 必须实现 `planSpec.apis`
-- 如果 `planSpec.environmentVariables` 存在且非空，必须更新根目录 `/.env.example`：
-  - 保留 starter 已有变量
-  - 对每个 `targetFile` 为空或为 `.env.example` 的条目，按 `name=value` 精确写入
-  - 如果同名变量已存在但值不同，按 `planSpec.environmentVariables[*].value` 更新
-  - 本轮写过 `.env.example` 时，`filesWritten` 必须包含 `.env.example`
+- 不要直接写入或修改根目录 `/.env`、`/.env.example`
+- 对 `.env.example` 的新增环境变量只能通过已验证的 `planSpec.environmentVariables` 表达；最终合并和落盘由 host 负责
+- 不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；这些 key 的最终值必须保持 starter 默认值
+- `filesWritten` 不需要、也不应仅因为环境变量合并而包含 `.env.example`
 - 必须写出 `/app-builder-report.md`
 - `/app-builder-report.md` 必须包含 “Interaction contract trace” 章节，逐项列出 contract 中的关键 flow/internal operation/external operation 对应的文件、函数或 API route；未实现项必须写明原因
 

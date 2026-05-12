@@ -29,6 +29,7 @@
 - 可选字符串字段无值时直接省略，不能写成空字符串 `""`
 - 如果失败项或现有 PRD 镜像涉及“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须把对应条目补入 `planSpec.environmentVariables`
 - 环境变量条目必须保留 PRD 中的变量名和值，并把 `targetFile` 写成 `.env.example`
+- 不要把 `template.environmentPolicy.lockedKeys` 中的 key 写入 `planSpec.environmentVariables`；如果失败项来自锁定变量冲突，应移除该条目而不是改 starter 默认值
 - 如果失败项或现有 PRD 镜像涉及外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须补入 `planSpec.references`，并同步 `artifacts.generatedSpec` 的 `References` 章节
 - 如果输入包含 `localReferences` 或 `artifacts.referenceManifest` 中已有下载成功的本地资料，外部 API endpoint、认证方式、参数格式/顺序和响应字段必须优先来自这些本地文件；不要凭记忆猜测
 - `planSpec.references[*]` 对应已下载资料时必须填写 `localPath`、`retrievedAt`、`contentType`、`retrievalStatus`；`artifacts.generatedSpec` 的 References 章节必须在远程 URL 旁写出同一个本地路径

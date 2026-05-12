@@ -377,6 +377,7 @@ export function buildPlanProjectPayload(
       directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
       runtimeValidation: runtime.templateRuntimeValidation,
       interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
+      environmentPolicy: runtime.templateEnvironmentPolicy,
     },
     planPolicy: {
       planSpecVersion: 1,
@@ -415,6 +416,7 @@ export function buildPlanRepairPayload(runtime: TextGeneratorRuntime): Record<st
       directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
       runtimeValidation: runtime.templateRuntimeValidation,
       interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
+      environmentPolicy: runtime.templateEnvironmentPolicy,
     },
     planRepairPolicy: {
       planSpecVersion: 1,
@@ -2529,6 +2531,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
             runtimeValidation: runtime.templateRuntimeValidation,
             interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
+            environmentPolicy: runtime.templateEnvironmentPolicy,
           },
           generationPolicy: {
             dataMode: "rest_api",
@@ -2582,6 +2585,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
             runtimeValidation: runtime.templateRuntimeValidation,
             interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
+            environmentPolicy: runtime.templateEnvironmentPolicy,
           },
           generationRepairPolicy: {
             dataMode: "rest_api",

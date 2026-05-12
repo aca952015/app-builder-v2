@@ -8,6 +8,13 @@
     "plan": 10,
     "generate": 10
   },
+  "environmentPolicy": {
+    "lockedKeys": [
+      "DATABASE_URL",
+      "APP_URL",
+      "SESSION_SECRET"
+    ]
+  },
   "phases": {
     "plan": {
       "prompt": "prompts/plan-system-prompt.md",

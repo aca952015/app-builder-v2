@@ -9,6 +9,7 @@ import {
   TemplatePhaseMap,
   OutputWorkspace,
   TemplateInteractiveRuntimeValidation,
+  TemplateEnvironmentPolicy,
   TemplateLock,
   TemplatePack,
   TemplateRepairRetries,
@@ -35,6 +36,10 @@ const defaultInteractiveRuntimeValidation: Omit<TemplateInteractiveRuntimeValida
   coverageThreshold: 0.8,
   idleTimeoutMs: 10_000,
   readyTimeoutMs: 90_000,
+};
+
+const defaultEnvironmentPolicy: TemplateEnvironmentPolicy = {
+  lockedKeys: [],
 };
 
 export const DEFAULT_TEMPLATE_ID = "full-stack";
@@ -107,6 +112,7 @@ type TemplateManifest = {
   repairRetries?: TemplateRepairRetries;
   runtimeValidation?: TemplateRuntimeValidation;
   interactiveRuntimeValidation?: TemplateInteractiveRuntimeValidation;
+  environmentPolicy: TemplateEnvironmentPolicy;
 };
 
 function assertNonEmptyString(value: unknown, fieldName: string): asserts value is string {
@@ -280,6 +286,37 @@ function parseRepairRetries(raw: unknown): TemplateRepairRetries {
   };
 }
 
+function parseEnvironmentPolicy(raw: unknown): TemplateEnvironmentPolicy {
+  if (raw === undefined) {
+    return { ...defaultEnvironmentPolicy };
+  }
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error('Template manifest field "environmentPolicy" must be an object.');
+  }
+
+  const policy = raw as Record<string, unknown>;
+  if (!Array.isArray(policy.lockedKeys)) {
+    throw new Error('Template manifest field "environmentPolicy.lockedKeys" must be an array of strings.');
+  }
+
+  const lockedKeys: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, value] of policy.lockedKeys.entries()) {
+    if (typeof value !== "string" || value.trim() === "") {
+      throw new Error(`Template manifest field "environmentPolicy.lockedKeys[${index}]" must be a non-empty string.`);
+    }
+
+    const key = value.trim();
+    if (!seen.has(key)) {
+      lockedKeys.push(key);
+      seen.add(key);
+    }
+  }
+
+  return { lockedKeys };
+}
+
 function parseTemplatePhaseConfig(raw: unknown, fieldName: string): TemplatePhaseConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`Template manifest field "${fieldName}" must be an object.`);
@@ -342,6 +379,7 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
       manifest.interactiveRuntimeValidation,
       runtimeValidation,
     ),
+    environmentPolicy: parseEnvironmentPolicy(manifest.environmentPolicy),
   };
 
   if (typeof manifest.description === "string" && manifest.description.trim() !== "") {
@@ -446,6 +484,7 @@ export async function loadTemplatePack(templateId = DEFAULT_TEMPLATE_ID): Promis
     phases: manifest.phases,
     runtimeValidation: manifest.runtimeValidation ?? defaultRuntimeValidation,
     interactiveRuntimeValidation: manifest.interactiveRuntimeValidation ?? { ...defaultInteractiveRuntimeValidation },
+    environmentPolicy: manifest.environmentPolicy,
     hash: await hashDirectory(directory),
   };
 }
@@ -509,6 +548,7 @@ export async function stageTemplatePack(
     phases: template.phases,
     runtimeValidation: template.runtimeValidation,
     interactiveRuntimeValidation: template.interactiveRuntimeValidation,
+    environmentPolicy: template.environmentPolicy,
     hash: template.hash,
     stagedAt: new Date().toISOString(),
     workspaceTemplateDirectory: path.relative(workspace.outputDirectory, workspace.deepagentsDirectory).split(path.sep).join("/"),
