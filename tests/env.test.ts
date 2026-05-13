@@ -7,11 +7,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
-  convertMessagesToDeepSeekCompletionsMessageParams,
+  createOpenAICompatibleModel,
+  convertMessagesToOpenAICompatibleCompletionsMessageParams,
   normalizeOpenAICompatibleModelName,
   resolveModelReasoningEffort,
-  sanitizeDeepSeekCompletionsParams,
-  shouldUseDeepSeekReasoningContentCompat,
+  sanitizeOpenAICompatibleCompletionsParams,
 } from "../src/lib/deepseek-openai.js";
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
@@ -251,10 +251,20 @@ test("normalizeOpenAICompatibleModelName strips only the OpenAI provider prefix"
   assert.equal(normalizeOpenAICompatibleModelName("anthropic:claude-sonnet-4-5"), "anthropic:claude-sonnet-4-5");
 });
 
-test("shouldUseDeepSeekReasoningContentCompat detects DeepSeek model or endpoint", () => {
-  assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:deepseek-v4-pro"), true);
-  assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:gpt-4.1-mini", "https://api.deepseek.com"), true);
-  assert.equal(shouldUseDeepSeekReasoningContentCompat("openai:gpt-4.1-mini", "https://api.openai.com/v1"), false);
+test("createOpenAICompatibleModel enables reasoning_content compat for every provider", () => {
+  const openaiModel = createOpenAICompatibleModel({
+    modelName: "openai:gpt-4.1-mini",
+    baseURL: "https://api.openai.com/v1",
+    apiKey: "test-key",
+  }) as unknown as { completions?: { constructor?: { name?: string } } };
+  const compatibleProviderModel = createOpenAICompatibleModel({
+    modelName: "openai:qwen-plus",
+    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    apiKey: "test-key",
+  }) as unknown as { completions?: { constructor?: { name?: string } } };
+
+  assert.match(openaiModel.completions?.constructor?.name ?? "", /ReasoningContent/);
+  assert.match(compatibleProviderModel.completions?.constructor?.name ?? "", /ReasoningContent/);
 });
 
 test("resolveModelReasoningEffort maps template max to model xhigh", () => {
@@ -263,21 +273,21 @@ test("resolveModelReasoningEffort maps template max to model xhigh", () => {
   assert.equal(resolveModelReasoningEffort("max"), "xhigh");
 });
 
-test("sanitizeDeepSeekCompletionsParams removes forced tool choice", () => {
-  const sanitized = sanitizeDeepSeekCompletionsParams({
-    model: "deepseek-v4-pro",
+test("sanitizeOpenAICompatibleCompletionsParams removes forced tool choice", () => {
+  const sanitized = sanitizeOpenAICompatibleCompletionsParams({
+    model: "qwen-plus",
     tool_choice: "required",
     tools: [{ type: "function", function: { name: "extract", parameters: { type: "object" } } }],
   });
 
   assert.equal("tool_choice" in sanitized, false);
   assert.deepEqual(
-    sanitizeDeepSeekCompletionsParams({ model: "deepseek-v4-pro", tool_choice: "auto" }),
-    { model: "deepseek-v4-pro", tool_choice: "auto" },
+    sanitizeOpenAICompatibleCompletionsParams({ model: "qwen-plus", tool_choice: "auto" }),
+    { model: "qwen-plus", tool_choice: "auto" },
   );
 });
 
-test("convertMessagesToDeepSeekCompletionsMessageParams keeps reasoning_content for tool turns", async () => {
+test("convertMessagesToOpenAICompatibleCompletionsMessageParams keeps reasoning_content for tool turns", async () => {
   const { AIMessage, HumanMessage, ToolMessage } = await loadLangChainCoreMessages();
   const messages = [
     new HumanMessage("How is the weather tomorrow?"),
@@ -308,9 +318,9 @@ test("convertMessagesToDeepSeekCompletionsMessageParams keeps reasoning_content 
     new HumanMessage("What about Guangzhou?"),
   ];
 
-  const converted = convertMessagesToDeepSeekCompletionsMessageParams({
+  const converted = convertMessagesToOpenAICompatibleCompletionsMessageParams({
     messages: messages as any,
-    model: "deepseek-v4-pro",
+    model: "qwen-plus",
   });
   const resolved = await converted;
   const assistantMessages = resolved.filter((message) => message.role === "assistant") as Array<{
@@ -321,9 +331,9 @@ test("convertMessagesToDeepSeekCompletionsMessageParams keeps reasoning_content 
   assert.equal(assistantMessages[1]?.reasoning_content, "The tool returned today's date, so tomorrow is one day later.");
 });
 
-test("convertMessagesToDeepSeekCompletionsMessageParams preserves empty reasoning_content for tool turns", async () => {
+test("convertMessagesToOpenAICompatibleCompletionsMessageParams preserves empty reasoning_content for tool turns", async () => {
   const { AIMessage, HumanMessage, ToolMessage } = await loadLangChainCoreMessages();
-  const converted = await convertMessagesToDeepSeekCompletionsMessageParams({
+  const converted = await convertMessagesToOpenAICompatibleCompletionsMessageParams({
     messages: [
       new HumanMessage("Read the project file."),
       new AIMessage({
@@ -345,7 +355,7 @@ test("convertMessagesToDeepSeekCompletionsMessageParams preserves empty reasonin
         tool_call_id: "call_1",
       }),
     ] as any,
-    model: "deepseek-v4-flash",
+    model: "qwen-plus",
   });
   const assistantMessage = converted.find((message) => message.role === "assistant") as {
     reasoning_content?: string;
@@ -356,9 +366,9 @@ test("convertMessagesToDeepSeekCompletionsMessageParams preserves empty reasonin
   assert.equal(assistantMessage?.reasoning_content, "");
 });
 
-test("convertMessagesToDeepSeekCompletionsMessageParams drops reasoning_content for non-tool turns", async () => {
+test("convertMessagesToOpenAICompatibleCompletionsMessageParams drops reasoning_content for non-tool turns", async () => {
   const { AIMessage, HumanMessage } = await loadLangChainCoreMessages();
-  const converted = await convertMessagesToDeepSeekCompletionsMessageParams({
+  const converted = await convertMessagesToOpenAICompatibleCompletionsMessageParams({
     messages: [
       new HumanMessage("Which is bigger, 9.11 or 9.8?"),
       new AIMessage({
@@ -369,7 +379,7 @@ test("convertMessagesToDeepSeekCompletionsMessageParams drops reasoning_content 
       }),
       new HumanMessage("How many Rs are in strawberry?"),
     ] as any,
-    model: "deepseek-v4-pro",
+    model: "qwen-plus",
   });
   const assistantMessage = converted.find((message) => message.role === "assistant") as {
     reasoning_content?: string;

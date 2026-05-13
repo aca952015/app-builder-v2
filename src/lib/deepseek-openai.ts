@@ -180,7 +180,7 @@ function computeReasoningContentPassthrough(
   return passthrough;
 }
 
-export async function convertMessagesToDeepSeekCompletionsMessageParams(
+export async function convertMessagesToOpenAICompatibleCompletionsMessageParams(
   params: {
     messages: BaseMessage[];
     model?: string;
@@ -210,7 +210,10 @@ export async function convertMessagesToDeepSeekCompletionsMessageParams(
   });
 }
 
-export function sanitizeDeepSeekCompletionsParams<T extends ToolChoiceParams>(params: T): T {
+export const convertMessagesToDeepSeekCompletionsMessageParams =
+  convertMessagesToOpenAICompatibleCompletionsMessageParams;
+
+export function sanitizeOpenAICompatibleCompletionsParams<T extends ToolChoiceParams>(params: T): T {
   if (params.tool_choice !== "required" && params.tool_choice !== "any") {
     return params;
   }
@@ -220,7 +223,9 @@ export function sanitizeDeepSeekCompletionsParams<T extends ToolChoiceParams>(pa
   return sanitized;
 }
 
-class DeepSeekReasoningContentChatOpenAICompletions<
+export const sanitizeDeepSeekCompletionsParams = sanitizeOpenAICompatibleCompletionsParams;
+
+class OpenAICompatibleReasoningContentChatOpenAICompletions<
   CallOptions extends ChatOpenAICompletionsCallOptions = ChatOpenAICompletionsCallOptions,
 > extends ChatOpenAICompletions<CallOptions> {
   override async _generate(
@@ -240,8 +245,8 @@ class DeepSeekReasoningContentChatOpenAICompletions<
       input_token_details?: Record<string, number>;
       output_token_details?: Record<string, number>;
     } = {};
-    const params = sanitizeDeepSeekCompletionsParams(this.invocationParams(options));
-    const messagesMapped = await convertMessagesToDeepSeekCompletionsMessageParams({
+    const params = sanitizeOpenAICompatibleCompletionsParams(this.invocationParams(options));
+    const messagesMapped = await convertMessagesToOpenAICompatibleCompletionsMessageParams({
       messages,
       model: this.model,
     });
@@ -388,12 +393,12 @@ class DeepSeekReasoningContentChatOpenAICompletions<
       loadLangChainCoreMessages(),
       loadLangChainCoreOutputs(),
     ]);
-    const messagesMapped = await convertMessagesToDeepSeekCompletionsMessageParams({
+    const messagesMapped = await convertMessagesToOpenAICompatibleCompletionsMessageParams({
       messages,
       model: this.model,
     });
 
-    const params = sanitizeDeepSeekCompletionsParams({
+    const params = sanitizeOpenAICompatibleCompletionsParams({
       ...this.invocationParams(options, {
         streaming: true,
       }),
@@ -525,12 +530,15 @@ export function normalizeOpenAICompatibleModelName(modelName: string): string {
   return trimmed;
 }
 
-export function shouldUseDeepSeekReasoningContentCompat(modelName: string, baseURL?: string): boolean {
-  return (
-    /deepseek/i.test(normalizeOpenAICompatibleModelName(modelName)) ||
-    (typeof baseURL === "string" && /deepseek/i.test(baseURL))
-  );
+export function shouldUseOpenAICompatibleReasoningContentCompat(
+  _modelName: string,
+  _baseURL?: string,
+): boolean {
+  return true;
 }
+
+export const shouldUseDeepSeekReasoningContentCompat =
+  shouldUseOpenAICompatibleReasoningContentCompat;
 
 export function resolveModelReasoningEffort(effort: TemplatePhaseEffort): ModelReasoningEffort {
   return effort === "max" ? "xhigh" : effort;
@@ -551,13 +559,9 @@ export function createOpenAICompatibleModel(options: {
     ...(options.apiKey ? { apiKey: options.apiKey } : {}),
   };
 
-  if (!shouldUseDeepSeekReasoningContentCompat(options.modelName, options.baseURL)) {
-    return new ChatOpenAI(fields);
-  }
-
   return new ChatOpenAI({
     ...fields,
-    completions: new DeepSeekReasoningContentChatOpenAICompletions(fields),
+    completions: new OpenAICompatibleReasoningContentChatOpenAICompletions(fields),
     useResponsesApi: false,
   });
 }
