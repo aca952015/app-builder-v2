@@ -2726,7 +2726,7 @@ class LockedEnvMutationTextGenerator implements TextGenerator {
     };
   }
 
-  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<PlanResult> {
     throw new Error("planRepairProject should not be called in LockedEnvMutationTextGenerator");
   }
 
@@ -2755,6 +2755,50 @@ class LockedEnvConflictTextGenerator extends LockedEnvMutationTextGenerator {
 
     return {
       summary: "Planner wrote a locked env conflict.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  override async planRepairProject(_runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    throw new Error("planRepairProject should not be called in LockedEnvConflictTextGenerator");
+  }
+}
+
+class LockedEnvPlanRepairTextGenerator extends LockedEnvConflictTextGenerator {
+  planRepairAttempts = 0;
+  observedPlanRepairReasons: string[] = [];
+
+  override async planRepairProject(runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    this.planRepairAttempts += 1;
+    this.observedPlanRepairReasons = runtime.retryReasons ?? [];
+    const planSpec = buildWeatherEnvPlanSpec();
+    planSpec.assumptions = [
+      ...planSpec.assumptions,
+      "DATABASE_URL 使用 starter 默认值，代码必须兼容模板锁定的 SQLite 配置。",
+    ];
+
+    await writeFile(
+      runtime.deepagentsAnalysisPath,
+      "# 天气分析\n\nPRD 中的 DATABASE_URL 覆盖请求被模板锁定策略拒绝，使用 starter 默认值。\n",
+      "utf8",
+    );
+    await writeFile(
+      runtime.deepagentsDetailedSpecPath,
+      "# 天气规格\n\nDATABASE_URL 使用 starter 默认值；QWeather 变量由 host 合并。\n",
+      "utf8",
+    );
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "Plan repair removed locked env declarations.",
       artifactsWritten: [
         ".deepagents/prd-analysis.md",
         ".deepagents/generated-spec.md",
@@ -4846,17 +4890,18 @@ test("generateApplication restores locked .env.example keys from the starter sna
   }
 });
 
-test("generateApplication fails generation validation when planSpec changes a locked env key", async () => {
+test("generateApplication fails plan validation when planSpec declares a locked env key", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-env-lock-conflict-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
   const previousCwd = process.cwd();
+  const generator = new LockedEnvConflictTextGenerator();
 
   try {
     await writeMinimalTemplatePack({
       root: tempRoot,
       id: "mini-app",
       interactiveEnabled: false,
-      generateRepairRetries: 0,
+      planRepairRetries: 0,
     });
     const templateDirectory = path.join(tempRoot, "templates", "mini-app");
     const manifestPath = path.join(templateDirectory, "template.json");
@@ -4879,20 +4924,89 @@ test("generateApplication fails generation validation when planSpec changes a lo
         specPath,
         outputDirectory: path.join(tempRoot, "output"),
         templateId: "mini-app",
-        generator: new LockedEnvConflictTextGenerator(),
+        generator,
         validator: new SuccessfulRuntimeValidator(),
       }),
-      /planSpec\.environmentVariables 试图修改模板锁定的 \.env\.example 变量：DATABASE_URL/,
+      /Plan validation failed:.*planSpec\.environmentVariables 不允许声明模板锁定的 \.env\.example 变量：DATABASE_URL/s,
     );
 
+    const validation = JSON.parse(
+      await readFile(path.join(tempRoot, "output", ".deepagents/plan-validation.json"), "utf8"),
+    ) as { valid: boolean; reasons: string[] };
     const envExample = await readFile(path.join(tempRoot, "output", ".env.example"), "utf8");
+
+    assert.equal(generator.generateAttempts, 0);
+    assert.equal(validation.valid, false);
+    assert.match(
+      validation.reasons.join("\n"),
+      /计划阶段未完成：planSpec\.environmentVariables 不允许声明模板锁定的 \.env\.example 变量：DATABASE_URL/,
+    );
+    assert.match(envExample, /^DATABASE_URL="file:\.\/prisma\/dev\.db"$/m);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication removes locked env declarations during plan repair before generation", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-env-lock-plan-repair-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const previousCwd = process.cwd();
+  const generator = new LockedEnvPlanRepairTextGenerator();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "mini-app",
+      interactiveEnabled: false,
+    });
+    const templateDirectory = path.join(tempRoot, "templates", "mini-app");
+    const manifestPath = path.join(templateDirectory, "template.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.starterDir = "starter";
+    manifest.environmentPolicy = {
+      lockedKeys: ["DATABASE_URL"],
+    };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await mkdir(path.join(templateDirectory, "starter"), { recursive: true });
+    await writeFile(
+      path.join(templateDirectory, "starter", ".env.example"),
+      "DATABASE_URL=\"file:./prisma/dev.db\"\n",
+      "utf8",
+    );
+    process.chdir(tempRoot);
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "mini-app",
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const planSpecSnapshot = await readFile(
+      path.join(result.outputDirectory, ".deepagents/plan-spec.json"),
+      "utf8",
+    );
+    const envExample = await readFile(path.join(result.outputDirectory, ".env.example"), "utf8");
+    const planValidation = JSON.parse(
+      await readFile(path.join(result.outputDirectory, ".deepagents/plan-validation.json"), "utf8"),
+    ) as { valid: boolean; reasons: string[] };
     const generationValidation = await readFile(
-      path.join(tempRoot, "output", ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
       "utf8",
     );
 
+    assert.equal(generator.planRepairAttempts, 1);
+    assert.equal(generator.generateAttempts, 1);
+    assert.match(generator.observedPlanRepairReasons.join("\n"), /DATABASE_URL/);
+    assert.equal(planValidation.valid, true);
+    assert.doesNotMatch(planSpecSnapshot, /"name": "DATABASE_URL"/);
+    assert.match(planSpecSnapshot, /DATABASE_URL 使用 starter 默认值/);
     assert.match(envExample, /^DATABASE_URL="file:\.\/prisma\/dev\.db"$/m);
-    assert.match(generationValidation, /DATABASE_URL/);
+    assert.match(envExample, /^QWEATHER_API_KEY=e1499e17f3934df58273c9d4ea56bc54$/m);
+    assert.doesNotMatch(envExample, /tenant\.db|wrong\.db/);
+    assert.match(generationValidation, /"valid": true/);
   } finally {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });
@@ -5810,7 +5924,7 @@ test("mini-app template enables interactive runtime validation", async () => {
   const nextConfig = await readFile(path.join(template.starterDirectory ?? "", "next.config.ts"), "utf8");
   assert.match(nextConfig, /allowedDevOrigins:\s*\["127\.0\.0\.1", "localhost"\]/);
   assert.match(nextConfig, /turbopack:\s*\{/);
-  assert.match(nextConfig, /root:\s*path\.resolve\(__dirname\)/);
+  assert.match(nextConfig, /root:\s*path\.resolve\(process\.cwd\(\)\)/);
 });
 
 test("loadTemplatePack parses enabled interactive runtime validation defaults", async () => {
@@ -6082,8 +6196,12 @@ test("generated app architecture reference matches the TailAdmin starter skeleto
   assert.match(architectureSource, /next\.config\.ts.*protected project configuration file/s);
 });
 
-test("planning payload passes plan-spec schema validation as a blocking hard constraint to the agent", () => {
-  const runtime = buildTestRuntime();
+test("planning payload passes plan-spec and locked env validation as blocking hard constraints to the agent", () => {
+  const runtime = buildTestRuntime({
+    templateEnvironmentPolicy: {
+      lockedKeys: ["DATABASE_URL", "NEXT_PUBLIC_APP_NAME"],
+    },
+  });
   const spec: NormalizedSpec = {
     appName: "Field Ops Planner",
     slug: "field-ops-planner",
@@ -6117,6 +6235,16 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
         mustValidateBeforeResponse: boolean;
         rules: string[];
       };
+      environmentVariablePolicyValidation: {
+        artifactKey: string;
+        artifactPath: string;
+        blockedPlanSpecPath: string;
+        blocking: boolean;
+        required: boolean;
+        mustValidateBeforeResponse: boolean;
+        lockedKeys: string[];
+        rules: string[];
+      };
       referenceUsageValidation: {
         artifactKey: string;
         artifactPath: string;
@@ -6140,6 +6268,18 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /空字符串/);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /项目配置变更/);
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactKey, "artifacts.planSpec");
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactPath, "/.deepagents/plan-spec.json");
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.blockedPlanSpecPath, "environmentVariables[*].name");
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.blocking, true);
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.required, true);
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.mustValidateBeforeResponse, true);
+  assert.deepEqual(payload.hardConstraints.environmentVariablePolicyValidation.lockedKeys, [
+    "DATABASE_URL",
+    "NEXT_PUBLIC_APP_NAME",
+  ]);
+  assert.match(payload.hardConstraints.environmentVariablePolicyValidation.rules.join("\n"), /DATABASE_URL, NEXT_PUBLIC_APP_NAME/);
+  assert.match(payload.hardConstraints.environmentVariablePolicyValidation.rules.join("\n"), /优先级高于 PRD/);
   assert.ok(payload.planSpecSchema);
   assert.equal(payload.artifacts.interactionContract, "/.deepagents/interaction-contract.json");
   assert.equal(
@@ -6173,6 +6313,9 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
   const payload = buildPlanRepairPayload(buildTestRuntime({
     planAttempt: 2,
     retryReasons: ["artifacts.planSpec 鏍￠獙澶辫触锛歱ages.0.resourceName"],
+    templateEnvironmentPolicy: {
+      lockedKeys: ["DATABASE_URL"],
+    },
   })) as {
     hardConstraints: {
       planSpecSchemaValidation: {
@@ -6189,6 +6332,16 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
         blocking: boolean;
         required: boolean;
         mustValidateBeforeResponse: boolean;
+        rules: string[];
+      };
+      environmentVariablePolicyValidation: {
+        artifactKey: string;
+        artifactPath: string;
+        blockedPlanSpecPath: string;
+        blocking: boolean;
+        required: boolean;
+        mustValidateBeforeResponse: boolean;
+        lockedKeys: string[];
         rules: string[];
       };
       referenceUsageValidation: {
@@ -6213,6 +6366,12 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.required, true);
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /非空字符串/);
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactKey, "artifacts.planSpec");
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactPath, "/.deepagents/plan-spec.json");
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.blockedPlanSpecPath, "environmentVariables[*].name");
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.blocking, true);
+  assert.deepEqual(payload.hardConstraints.environmentVariablePolicyValidation.lockedKeys, ["DATABASE_URL"]);
+  assert.match(payload.hardConstraints.environmentVariablePolicyValidation.rules.join("\n"), /DATABASE_URL/);
   assert.ok(payload.planSpecSchema);
   assert.equal(payload.artifacts.interactionContract, "/.deepagents/interaction-contract.json");
   assert.equal(
@@ -6285,9 +6444,12 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planPromptSource, /对当前尚不存在的 `artifacts\.analysis`、`artifacts\.generatedSpec`、`artifacts\.planSpec`，应直接创建/);
   assert.match(planPromptSource, /`\/\.deepagents\/prd-analysis\.md`/);
   assert.match(planPromptSource, /`hardConstraints\.planSpecSchemaValidation`/);
+  assert.match(planPromptSource, /`hardConstraints\.environmentVariablePolicyValidation`/);
   assert.match(planPromptSource, /空字符串/);
   assert.match(planPromptSource, /把 `\/\.deepagents\/\.\.\.` 改成 `\/deepagents\/\.\.\.`/);
   assert.match(planPromptSource, /planSpec\.references/);
+  assert.match(planPromptSource, /优先级高于 PRD 环境变量覆盖请求/);
+  assert.match(planPromptSource, /计划阶段必须省略该变量/);
   assert.match(planPromptSource, /不要求也不提供 `relatedApis`/);
   assert.match(generatePromptSource, /`planSpec` 是唯一事实来源/);
   assert.match(generatePromptSource, /不能重新分析原始 PRD/);
@@ -6320,11 +6482,13 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /若现有 API 不足以支撑页面展示，先按 `planSpec` 补齐 API，再完成页面接线/);
   assert.match(planRepairPromptSource, /validationFailures/);
   assert.match(planRepairPromptSource, /`hardConstraints\.planSpecSchemaValidation`/);
+  assert.match(planRepairPromptSource, /`hardConstraints\.environmentVariablePolicyValidation`/);
   assert.match(planRepairPromptSource, /空字符串/);
   assert.match(planRepairPromptSource, /禁止执行：调用任何子代理/);
   assert.match(planRepairPromptSource, /只补齐缺失或错误部分/);
   assert.match(planRepairPromptSource, /`\/\.deepagents\/source-prd\.md`/);
   assert.match(planRepairPromptSource, /planSpec\.references/);
+  assert.match(planRepairPromptSource, /必须从 `planSpec\.environmentVariables` 删除对应条目/);
   assert.match(generateRepairPromptSource, /validationFailures/);
   assert.doesNotMatch(generateRepairPromptSource, /当前禁止执行：调用任何子代理/);
   assert.match(generateRepairPromptSource, /鼓励在多个失败项或修补切片彼此独立时调用 `task` 工具启动子代理/);
@@ -6336,6 +6500,8 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generateRepairPromptSource, /并行不会缩短总修复时间，必须由主代理直接修补/);
   assert.match(generateRepairPromptSource, /只补齐缺失实现或错误接线/);
   assert.match(generateRepairPromptSource, /planSpec\.references/);
+  assert.match(generateRepairPromptSource, /声明 locked key 或锁定变量冲突，这是计划规格问题/);
+  assert.match(generateRepairPromptSource, /不要修改 `\.env`\/`\.env\.example` 或应用代码来绕过锁定/);
   assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);
   assert.match(generateRepairPromptSource, /页面修复必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/generation-validation\.json`/);
@@ -6373,10 +6539,14 @@ test("mini-app prompts preserve PRD environment configuration through planSpec",
   assert.match(planPromptSource, /不要求也不提供 `relatedApis`/);
   assert.match(planPromptSource, /targetFile` 写 `\.env\.example`/);
   assert.match(planPromptSource, /template\.environmentPolicy\.lockedKeys/);
+  assert.match(planPromptSource, /hardConstraints\.environmentVariablePolicyValidation/);
+  assert.match(planPromptSource, /优先级高于 PRD 环境变量覆盖请求/);
+  assert.match(planPromptSource, /计划阶段必须省略该变量/);
   assert.match(planRepairPromptSource, /计划修复阶段代理/);
   assert.match(planRepairPromptSource, /planSpec\.environmentVariables/);
   assert.match(planRepairPromptSource, /planSpec\.references/);
   assert.match(planRepairPromptSource, /lockedKeys/);
+  assert.match(planRepairPromptSource, /必须从 `planSpec\.environmentVariables` 删除对应条目/);
   assert.match(generatePromptSource, /planSpec\.environmentVariables/);
   assert.match(generatePromptSource, /planSpec\.references/);
   assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
@@ -6387,4 +6557,6 @@ test("mini-app prompts preserve PRD environment configuration through planSpec",
   assert.match(generateRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);
   assert.match(generateRepairPromptSource, /不要直接修补根目录 `\/\.env\.example`/);
+  assert.match(generateRepairPromptSource, /声明 locked key 或锁定变量冲突，这是计划规格问题/);
+  assert.match(generateRepairPromptSource, /不要修改 `\.env`\/`\.env\.example` 或应用代码来绕过锁定/);
 });

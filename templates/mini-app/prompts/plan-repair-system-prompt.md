@@ -25,11 +25,14 @@
 
 - `artifacts.planSpec` 仍必须满足输入里的 `planSpecSchema`
 - `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束
+- `hardConstraints.environmentVariablePolicyValidation` 是阻断性硬约束；`planSpec.environmentVariables[*].name` 不得包含其中的 locked key
 - 在 `artifacts.planSpec` 重新成为合法 JSON 且通过 `hardConstraints.planSpecSchemaValidation.schema` 校验前，不允许结束修补或返回最终结构化响应
 - 可选字符串字段无值时直接省略，不能写成空字符串 `""`
-- 如果失败项或现有 PRD 镜像涉及“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须把对应条目补入 `planSpec.environmentVariables`
+- 如果失败项或现有 PRD 镜像涉及“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，且变量名不在 `template.environmentPolicy.lockedKeys` / `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 中，必须把对应条目补入 `planSpec.environmentVariables`
 - 环境变量条目必须保留 PRD 中的变量名和值，并把 `targetFile` 写成 `.env.example`
-- 不要把 `template.environmentPolicy.lockedKeys` 中的 key 写入 `planSpec.environmentVariables`；如果失败项来自锁定变量冲突，应移除该条目而不是改 starter 默认值
+- `template.environmentPolicy.lockedKeys` 和 `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 的优先级高于 PRD 环境变量覆盖请求
+- 不要把 locked key 写入 `planSpec.environmentVariables`；如果失败项来自锁定变量冲突，必须从 `planSpec.environmentVariables` 删除对应条目，而不是改 starter 默认值或绕过锁定
+- 如果 PRD 要求覆盖 locked key，在 `planSpec.assumptions` 或 `artifacts.generatedSpec` 中说明使用 starter 默认值、代码需兼容该默认值
 - `next.config.ts` 属于 `template.projectConfigPolicy.guardedFiles` 保护的项目配置文件。只有当失败项或现有 PRD 镜像明确显示 PRD 要求修改 Next.js/项目配置时，才允许补入 `planSpec.projectConfigChanges`。
 - 若补入 `next.config.ts` 配置变更，`planSpec.projectConfigChanges[*].filePath` 必须写 `next.config.ts`，`reason` 必须说明需要改的配置项，`prdEvidence` 必须引用 PRD 中的明确证据。
 - 如果没有明确 PRD 证据，不要为通过生成阶段而补写 `projectConfigChanges`；应保持 `next.config.ts` 不可编辑。

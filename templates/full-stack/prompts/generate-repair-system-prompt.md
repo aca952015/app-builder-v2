@@ -62,7 +62,8 @@
 - 如果用户要求明显超出当前 `planSpec` 的业务边界，不要回退计划阶段或重做整站；只实现与现有 app 兼容的部分，并在 `app-builder-report.md` 记录未覆盖原因。
 - 如果失败根因来自 starter 自带的持久化、鉴权或启动契约被局部改坏，你必须沿依赖链同步修补所有受影响的 Prisma 配置、schema、seed、脚本、认证/会话和默认入口数据，直到整条链路重新一致。
 - 不要直接写入或修改根目录 `/.env`、`/.env.example`；host 会从 starter `.env.example` 和 `planSpec.environmentVariables` 合并最终文件。
-- 不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；如果失败项来自锁定变量冲突，应保持代码兼容 starter 默认值并等待计划阶段修正冲突。
+- 不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；如果失败项来自 `planSpec.environmentVariables` 声明 locked key 或锁定变量冲突，这是计划规格问题，应保持代码兼容 starter 默认值并等待计划阶段修正冲突。
+- 遇到 locked env 失败时，不要修改 `.env`/`.env.example` 或应用代码来绕过锁定。
 - `next.config.ts` 是模板受保护项目配置文件。只有当 `planSpec.projectConfigChanges` 中存在 `filePath: "next.config.ts"` 且同时包含明确 `reason` 与 `prdEvidence` 时，才允许先读取再最小化修改该文件。
 - 如果 `planSpec.projectConfigChanges` 没有声明 `next.config.ts`，不得创建、修改、删除、重写 `next.config.ts`，也不得把它列入 `filesWritten`；如果失败项来自未授权修改，应撤销这类修改而不是在生成修复阶段补写计划声明。
 - 修改 `next.config.ts` 时，改动必须只覆盖 `prdEvidence` 支持的配置项，禁止顺带重写 starter 其他配置。

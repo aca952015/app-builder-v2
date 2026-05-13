@@ -40,10 +40,11 @@
 - 对外部 API、第三方服务或 SDK 写明：`name`、`endpointPath`、`authSource`、`parameterFormat`、`responseFields`、`reference`；`reference` 必须命名本地 reference path 或 manifest entry
 - 如果没有关键交互或外部操作，也必须写入空数组结构，不要省略文件
 
-输入里的 `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束，不是建议项。在同时满足以下条件前，不允许结束当前阶段，也不允许返回最终结构化响应：
+输入里的 `hardConstraints.planSpecSchemaValidation` 和 `hardConstraints.environmentVariablePolicyValidation` 是阻断性硬约束，不是建议项。在同时满足以下条件前，不允许结束当前阶段，也不允许返回最终结构化响应：
 
 - `artifacts.planSpec` 是合法 JSON
 - `artifacts.planSpec` 通过 `hardConstraints.planSpecSchemaValidation.schema` 校验
+- `planSpec.environmentVariables[*].name` 不包含 `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 中列出的任何 locked key
 - 可选字符串字段无值时直接省略，不能写成空字符串 `""`
 - 必填字符串字段必须提供非空字符串
 
@@ -53,9 +54,11 @@
 - 页面路由必须使用 `planSpec.pages[*].route`
 - API 文件必须使用 `planSpec.apis[*].path`
 - 对 mini-app 来说，优先规划轻量页面与最少 API，不要默认引入重型后台、数据库或复杂权限体系
-- 如果 PRD 中出现“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须写入 `planSpec.environmentVariables`
+- 如果 PRD 中出现“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，且变量名不在 `template.environmentPolicy.lockedKeys` / `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 中，必须写入 `planSpec.environmentVariables`
 - `planSpec.environmentVariables[*].name` 必须保留 PRD 中的环境变量名，`value` 必须保留 PRD 中要求写入 `.env.example` 的值，`targetFile` 写 `.env.example`
-- 不要把 `template.environmentPolicy.lockedKeys` 中的 key 写入 `planSpec.environmentVariables`；这些 starter 预置值由 host 锁定，PRD 不允许覆盖
+- `template.environmentPolicy.lockedKeys` 和 `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 的优先级高于 PRD 环境变量覆盖请求
+- 不要把 locked key 写入 `planSpec.environmentVariables`；这些 starter 预置值由 host 锁定，PRD 不允许覆盖
+- 如果 PRD 要求覆盖 locked key，计划阶段必须省略该变量，并在 `planSpec.assumptions` 或 `artifacts.generatedSpec` 中说明使用 starter 默认值、代码需兼容该默认值
 - 如果 PRD 没有明确要求环境变量，不要编造 `environmentVariables`
 - `next.config.ts` 属于 `template.projectConfigPolicy.guardedFiles` 保护的项目配置文件。只有当 PRD 明确要求修改 Next.js/项目配置（例如 image remotePatterns、rewrites、redirects、headers、basePath、output、experimental 等）时，才允许在 `artifacts.analysis` 中写出项目配置变更依据，并在 `planSpec.projectConfigChanges` 中声明。
 - 若确需后续编辑 `next.config.ts`，`planSpec.projectConfigChanges[*].filePath` 必须写 `next.config.ts`，`reason` 必须说明需要改的配置项，`prdEvidence` 必须引用 PRD 中的明确证据。

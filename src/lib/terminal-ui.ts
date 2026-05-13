@@ -27,6 +27,8 @@ export type ArtifactItem = {
 export type AgentWorkStatus = {
   name: string;
   status: AgentWorkStatusValue;
+  workCount?: number | undefined;
+  activeInstanceCount?: number | undefined;
 };
 
 export type TodoBoardState = {
@@ -197,6 +199,19 @@ function splitVisibleLogs(logs: string[], limitPerColumn = 6): {
     execution: execution.slice(-limitPerColumn),
     repair: repair.slice(-limitPerColumn),
   };
+}
+
+function isRepairRuntimePhase(phase: RuntimeStatus["phase"] | undefined): boolean {
+  return phase === "planRepair" ||
+    phase === "plan_repair" ||
+    phase === "generateRepair" ||
+    phase === "generate_repair";
+}
+
+function shouldShowRepairLogColumn(state: TodoBoardState, repairLogs: string[]): boolean {
+  return repairLogs.length > 0 ||
+    isRepairRuntimePhase(state.runtimeStatus?.phase) ||
+    isRepairProgressMessage(state.narrative);
 }
 
 function normalizeRelativePath(filePath: string): string {
@@ -550,10 +565,36 @@ function normalizeAgentStatuses(agentStatuses?: AgentWorkStatus[]): AgentWorkSta
     normalized.push({
       name,
       status: agent.status === "working" || agent.status === "done" ? agent.status : "idle",
+      ...(isFiniteNumber(agent.workCount) && agent.workCount > 0
+        ? { workCount: Math.round(agent.workCount) }
+        : {}),
+      ...(isFiniteNumber(agent.activeInstanceCount) && agent.activeInstanceCount > 0
+        ? { activeInstanceCount: Math.round(agent.activeInstanceCount) }
+        : {}),
     });
   }
 
   return normalized;
+}
+
+function formatAgentStatusValue(agent: AgentWorkStatus): string {
+  if (agent.status === "working" && agent.name !== "leader") {
+    const activeInstanceCount = isFiniteNumber(agent.activeInstanceCount) && agent.activeInstanceCount > 0
+      ? Math.round(agent.activeInstanceCount)
+      : 1;
+    return activeInstanceCount === 1
+      ? "1 instance working"
+      : `${activeInstanceCount} instances working`;
+  }
+
+  if (agent.status !== "done") {
+    return agent.status;
+  }
+
+  const workCount = isFiniteNumber(agent.workCount) && agent.workCount > 0
+    ? Math.round(agent.workCount)
+    : 1;
+  return workCount === 1 ? "worked 1 time" : `worked ${workCount} times`;
 }
 
 function buildAgentStatusLine(state: TodoBoardState): string | null {
@@ -562,7 +603,7 @@ function buildAgentStatusLine(state: TodoBoardState): string | null {
     return null;
   }
 
-  return agentStatuses.map((agent) => `${agent.name}: ${agent.status}`).join(" | ");
+  return agentStatuses.map((agent) => `${agent.name}: ${formatAgentStatusValue(agent)}`).join(" | ");
 }
 
 function formatPercent(value: number): string {
@@ -672,18 +713,21 @@ export function buildTodoBoardLines(state: TodoBoardState): string[] {
   }
   if (state.logs && state.logs.length > 0) {
     const { execution, repair } = splitVisibleLogs(state.logs);
+    const showRepairColumn = shouldShowRepairLogColumn(state, repair);
     lines.push("");
     lines.push(formatExecutionLogHeader());
     for (const logLine of execution) {
       lines.push(`  ${logLine}`);
     }
-    lines.push("");
-    lines.push(formatRepairLogHeader());
-    if (repair.length === 0) {
-      lines.push("  暂无修复进展");
-    }
-    for (const logLine of repair) {
-      lines.push(`  ${logLine}`);
+    if (showRepairColumn) {
+      lines.push("");
+      lines.push(formatRepairLogHeader());
+      if (repair.length === 0) {
+        lines.push("  暂无修复进展");
+      }
+      for (const logLine of repair) {
+        lines.push(`  ${logLine}`);
+      }
     }
   }
   lines.push("");
@@ -924,6 +968,7 @@ function createWorkflowBoardElement(state: TodoBoardState) {
   const borderColor = borderColorForStage(state.stage);
   const sessionLabel = formatShortSessionId(state.sessionId);
   const splitLogs = splitVisibleLogs(state.logs ?? []);
+  const showRepairColumn = shouldShowRepairLogColumn(state, splitLogs.repair);
   const workflowStageSequence = state.stage === "运行验证阶段" || state.runtimeInteraction
     ? WORKFLOW_STAGE_SEQUENCE
     : DEFAULT_WORKFLOW_STAGE_SEQUENCE;
@@ -932,13 +977,14 @@ function createWorkflowBoardElement(state: TodoBoardState) {
     logLines: string[],
     emptyState: string,
     keyPrefix: string,
+    width: string,
   ) =>
     React.createElement(
       Box,
       {
         key: `${keyPrefix}-column`,
         flexDirection: "column",
-        width: "50%",
+        width,
         borderStyle: "round",
         borderColor: "gray",
         paddingX: 1,
@@ -1181,8 +1227,10 @@ function createWorkflowBoardElement(state: TodoBoardState) {
           columnGap: 2,
         },
         [
-          renderLogColumn("执行日志", splitLogs.execution, "暂无执行日志", "execution"),
-          renderLogColumn("修复进展", splitLogs.repair, "暂无修复进展", "repair"),
+          renderLogColumn("执行日志", splitLogs.execution, "暂无执行日志", "execution", showRepairColumn ? "50%" : "100%"),
+          ...(showRepairColumn
+            ? [renderLogColumn("修复进展", splitLogs.repair, "暂无修复进展", "repair", "50%")]
+            : []),
         ],
       ),
       createStatusBarElement(state),
@@ -1217,7 +1265,7 @@ function createAgentStatusElement(state: TodoBoardState): React.ReactNode | null
         agent.status === "working"
           ? React.createElement(AnimatedGradientText, {
               key: `agent-status-value-${index}`,
-              text: agent.status,
+              text: formatAgentStatusValue(agent),
               active: true,
             })
           : React.createElement(
@@ -1226,7 +1274,7 @@ function createAgentStatusElement(state: TodoBoardState): React.ReactNode | null
                 key: `agent-status-value-${index}`,
                 color: agent.status === "done" ? "green" : "white",
               },
-              agent.status,
+              formatAgentStatusValue(agent),
             ),
       ];
 

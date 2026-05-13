@@ -32,7 +32,8 @@
 - 对每个失败相关的 `interactionContract.internalOperations[*]`，必须确保页面控件真实触发对应 `planSpec.apis[*].path`
 - 对每个失败相关的 `interactionContract.externalOperations[*]`，必须按 endpointPath、authSource、parameterFormat、responseFields 和 reference provenance 修复 API route；不要凭记忆猜 endpoint 或参数顺序
 - 如果失败项提到 `.env.example`、`planSpec.environmentVariables` 或环境变量缺失/不一致，不要直接修补根目录 `/.env.example`；host 会从 starter `.env.example` 和 `planSpec.environmentVariables` 合并最终文件
-- 不要写入或修改根目录 `/.env`、`/.env.example`，也不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；如失败项来自锁定变量冲突，应保持代码兼容 starter 默认值并等待计划阶段修正冲突
+- 不要写入或修改根目录 `/.env`、`/.env.example`，也不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；如失败项来自 `planSpec.environmentVariables` 声明 locked key 或锁定变量冲突，这是计划规格问题，应保持代码兼容 starter 默认值并等待计划阶段修正冲突
+- 遇到 locked env 失败时，不要修改 `.env`/`.env.example` 或应用代码来绕过锁定
 - `next.config.ts` 是模板受保护项目配置文件。只有当 `planSpec.projectConfigChanges` 中存在 `filePath: "next.config.ts"` 且同时包含明确 `reason` 与 `prdEvidence` 时，才允许先读取再最小化修改该文件。
 - 如果 `planSpec.projectConfigChanges` 没有声明 `next.config.ts`，不得创建、修改、删除、重写 `next.config.ts`，也不得把它列入 `filesWritten`；如果失败项来自未授权修改，应撤销这类修改而不是在生成修复阶段补写计划声明。
 - 修改 `next.config.ts` 时，改动必须只覆盖 `prdEvidence` 支持的配置项，禁止顺带重写 starter 其他配置。

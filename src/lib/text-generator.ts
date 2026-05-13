@@ -385,8 +385,9 @@ export function toVirtualWorkspacePath(outputDirectory: string, targetPath: stri
 }
 
 export function buildPlanSpecHardConstraints(
-  runtime: Pick<TextGeneratorRuntime, "outputDirectory" | "deepagentsPlanSpecPath" | "deepagentsInteractionContractPath" | "deepagentsReferenceManifestPath">,
+  runtime: Pick<TextGeneratorRuntime, "outputDirectory" | "deepagentsPlanSpecPath" | "deepagentsInteractionContractPath" | "deepagentsReferenceManifestPath" | "templateEnvironmentPolicy">,
 ): Record<string, unknown> {
+  const lockedKeys = Array.from(new Set(runtime.templateEnvironmentPolicy.lockedKeys));
   return {
     planSpecSchemaValidation: {
       artifactKey: "artifacts.planSpec",
@@ -402,6 +403,25 @@ export function buildPlanSpecHardConstraints(
         "必填字符串字段必须提供非空字符串。",
         "只有当 PRD 分析明确要求项目配置变更时，才允许在 artifacts.planSpec.projectConfigChanges 中声明对应配置文件、原因和 PRD 证据。",
       ],
+    },
+    environmentVariablePolicyValidation: {
+      artifactKey: "artifacts.planSpec",
+      artifactPath: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+      blockedPlanSpecPath: "environmentVariables[*].name",
+      blocking: true,
+      required: true,
+      mustValidateBeforeResponse: true,
+      lockedKeys,
+      rules: lockedKeys.length > 0
+        ? [
+            `当前模板锁定的 .env.example 变量为：${lockedKeys.join(", ")}。`,
+            "artifacts.planSpec.environmentVariables[*].name 不得包含上述 lockedKeys 中的任何 key。",
+            "如果 PRD 要求覆盖 locked key，计划阶段必须省略该变量，并在 artifacts.planSpec.assumptions 或 artifacts.generatedSpec 中说明使用 starter 默认值；不得尝试覆盖。",
+            "template.environmentPolicy.lockedKeys 的优先级高于 PRD 中的环境变量覆盖请求。",
+          ]
+        : [
+            "当前模板没有锁定的 .env.example 变量，但新增环境变量仍必须来自 PRD 明确要求。",
+          ],
     },
     interactionContractValidation: {
       artifactKey: "artifacts.interactionContract",
@@ -1182,6 +1202,14 @@ function summarizeWriteTodosEvent(record: Record<string, unknown>, event: string
 function summarizeToolCall(toolCall: ToolCallDetail): string {
   const name = toolCall.name ?? "未知工具";
   const status = typeof toolCall.status === "string" ? toolCall.status : "执行中";
+  const args = toolCall.args && typeof toolCall.args === "object" ? toolCall.args as Record<string, unknown> : null;
+  const target = describeToolTargetFromInput(name, args);
+  const action = humanizeToolName(name);
+  if (target) {
+    return /completed|success|done/i.test(status)
+      ? `${action}完成：${target}`
+      : `${action}：${target}`;
+  }
   return `工具 ${name} ${status}`;
 }
 
@@ -1463,28 +1491,53 @@ function describeToolLocation(toolName: string, input: Record<string, unknown> |
   return null;
 }
 
-function describeToolTarget(toolName: string, payload: unknown): string | null {
+function compactToolDetail(value: string, maxLength = 96): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
+}
+
+function describeToolTargetFromInput(toolName: string, input: Record<string, unknown> | null): string | null {
   if (toolName === "write_todos") {
     return null;
   }
 
+  const target =
+    input?.file_path ??
+    input?.path ??
+    input?.target_file ??
+    input?.targetPath;
+
+  if (typeof target === "string" && target.trim()) {
+    return target.trim();
+  }
+
+  if (toolName === "task") {
+    const subagentName = readStringField(input, ["subagent_type", "subagentType", "agent", "agentName"]);
+    const taskSummary = readStringField(input, ["description", "task", "name", "title", "summary"]);
+    if (subagentName && taskSummary) {
+      return `${subagentName}：${compactToolDetail(taskSummary)}`;
+    }
+    if (taskSummary) {
+      return compactToolDetail(taskSummary);
+    }
+    return subagentName ?? null;
+  }
+
+  const searchableSummary = readStringField(input, ["query", "pattern", "url"]);
+  if (searchableSummary) {
+    return compactToolDetail(searchableSummary);
+  }
+
+  return null;
+}
+
+function describeToolTarget(toolName: string, payload: unknown): string | null {
   if (!payload || typeof payload !== "object") {
     return null;
   }
 
   const record = payload as Record<string, unknown>;
-  const parsedInput = parseToolInput(record.input);
-  const target =
-    parsedInput?.file_path ??
-    parsedInput?.path ??
-    parsedInput?.target_file ??
-    parsedInput?.targetPath;
-
-  if (typeof target === "string" && target.trim()) {
-    return `${toolName} ${target}`;
-  }
-
-  return toolName;
+  return describeToolTargetFromInput(toolName, parseToolInput(record.input));
 }
 
 function humanizeToolName(toolName: string): string {
@@ -1497,6 +1550,8 @@ function humanizeToolName(toolName: string): string {
       return "编辑文件";
     case "write_todos":
       return "更新 todo";
+    case "task":
+      return "启动子任务";
     case "list_dir":
       return "列出目录";
     case "glob_search":
@@ -1527,17 +1582,17 @@ function summarizeToolEvent(payload: unknown): string | null {
   const target = describeToolTarget(toolName, payload);
   const location = describeToolLocation(toolName, parsedInput);
   const action = humanizeToolName(toolName);
-  const detailedTarget =
-    target && target !== toolName
-      ? `${target.replace(`${toolName} `, "")}${location ? `（${location}）` : ""}`
-      : null;
+  const detailedTarget = target ? `${target}${location ? `（${location}）` : ""}` : null;
 
   if (event === "on_tool_start") {
     return detailedTarget ? `${action}：${detailedTarget}` : `${action}。`;
   }
 
   if (event === "on_tool_end") {
-    return detailedTarget ? `${action}完成：${detailedTarget}` : `${action} 完成。`;
+    if (detailedTarget) {
+      return `${action}完成：${detailedTarget}`;
+    }
+    return toolName === "task" || action.startsWith("调用工具 ") ? null : `${action}完成。`;
   }
 
   return detailedTarget ? `${action}：${detailedTarget}` : `${action}。`;
@@ -1552,10 +1607,10 @@ function summarizeMessageToolCall(payload: unknown): string | null {
 
   const action = humanizeToolName(first.name);
   const args = first.args && typeof first.args === "object" ? first.args as Record<string, unknown> : null;
-  const target = args?.file_path ?? args?.path;
+  const target = describeToolTargetFromInput(first.name, args);
   const location = describeToolLocation(first.name, args);
 
-  if (typeof target === "string" && target.trim()) {
+  if (target) {
     return `准备${action}：${target}${location ? `（${location}）` : ""}`;
   }
 
@@ -1584,85 +1639,132 @@ function buildDefaultAgentStatuses(runtimePhase: RuntimeStatusPhase): AgentWorkS
   }));
 }
 
-function markAgentWorking(agentStatuses: AgentWorkStatus[], activeNames: string[]): AgentWorkStatus[] {
-  const active = new Set(activeNames);
-  return agentStatuses.map((agent) => ({
-    ...agent,
-    status: active.has(agent.name)
-      ? "working"
-      : agent.status === "working"
-        ? "done"
-        : agent.status,
-  }));
+function incrementAgentWorkCount(agent: AgentWorkStatus): number {
+  const currentCount = isFiniteNumber(agent.workCount) && agent.workCount > 0
+    ? Math.round(agent.workCount)
+    : 0;
+  return currentCount + 1;
+}
+
+function markAgentWorking(
+  agentStatuses: AgentWorkStatus[],
+  activeInstanceCounts: Map<string, number>,
+): AgentWorkStatus[] {
+  return agentStatuses.map((agent) => {
+    const activeInstanceCount = activeInstanceCounts.get(agent.name);
+    const isActive = isFiniteNumber(activeInstanceCount) && activeInstanceCount > 0;
+    const completedWork = !isActive && agent.status === "working";
+    return {
+      ...agent,
+      status: isActive
+        ? "working"
+        : completedWork
+          ? "done"
+          : agent.status,
+      activeInstanceCount: isActive ? Math.round(activeInstanceCount) : undefined,
+      ...(completedWork ? { workCount: incrementAgentWorkCount(agent) } : {}),
+    };
+  });
 }
 
 function markActiveAgentsDone(agentStatuses: AgentWorkStatus[]): AgentWorkStatus[] {
-  return agentStatuses.map((agent) => ({
-    ...agent,
-    status: agent.status === "working" ? "done" : agent.status,
-  }));
+  return agentStatuses.map((agent) => {
+    const completedWork = agent.status === "working";
+    return {
+      ...agent,
+      status: completedWork ? "done" : agent.status,
+      activeInstanceCount: undefined,
+      ...(completedWork ? { workCount: incrementAgentWorkCount(agent) } : {}),
+    };
+  });
 }
 
-function collectActiveAgentNames(payload: unknown, knownNames: Set<string>, activeNames = new Set<string>(), seen = new Set<object>()): Set<string> {
+function incrementActiveAgentInstance(
+  activeInstanceCounts: Map<string, number>,
+  name: string,
+): void {
+  activeInstanceCounts.set(name, (activeInstanceCounts.get(name) ?? 0) + 1);
+}
+
+function collectActiveAgentInstanceCounts(
+  payload: unknown,
+  knownNames: Set<string>,
+  activeInstanceCounts = new Map<string, number>(),
+  seen = new Set<object>(),
+): Map<string, number> {
+  if (typeof payload === "string") {
+    if (knownNames.has(payload)) {
+      incrementActiveAgentInstance(activeInstanceCounts, payload);
+    }
+    return activeInstanceCounts;
+  }
+
   if (!payload || typeof payload !== "object") {
-    return activeNames;
+    return activeInstanceCounts;
   }
 
   if (seen.has(payload)) {
-    return activeNames;
+    return activeInstanceCounts;
   }
   seen.add(payload);
 
   if (Array.isArray(payload)) {
     for (const item of payload) {
-      collectActiveAgentNames(item, knownNames, activeNames, seen);
+      collectActiveAgentInstanceCounts(item, knownNames, activeInstanceCounts, seen);
     }
-    return activeNames;
+    return activeInstanceCounts;
   }
 
   const record = payload as Record<string, unknown>;
+  const recordActiveNames = new Set<string>();
   for (const [key, value] of Object.entries(record)) {
     if (knownNames.has(key)) {
-      activeNames.add(key);
+      recordActiveNames.add(key);
     }
     if (typeof value === "string" && knownNames.has(value)) {
-      activeNames.add(value);
+      recordActiveNames.add(value);
     }
   }
 
   for (const key of ["agent", "agentName", "name", "node", "nodeName"] as const) {
     const value = readStringField(record, [key]);
     if (value && knownNames.has(value)) {
-      activeNames.add(value);
+      recordActiveNames.add(value);
     }
+  }
+
+  for (const name of recordActiveNames) {
+    incrementActiveAgentInstance(activeInstanceCounts, name);
   }
 
   const metadata = readObjectField(record, ["metadata", "kwargs", "config", "langgraph_node"]);
   if (metadata) {
-    collectActiveAgentNames(metadata, knownNames, activeNames, seen);
+    collectActiveAgentInstanceCounts(metadata, knownNames, activeInstanceCounts, seen);
   }
 
   for (const value of Object.values(record)) {
-    collectActiveAgentNames(value, knownNames, activeNames, seen);
+    if (value && typeof value === "object") {
+      collectActiveAgentInstanceCounts(value, knownNames, activeInstanceCounts, seen);
+    }
   }
 
-  return activeNames;
+  return activeInstanceCounts;
 }
 
 function updateAgentStatusesFromChunk(trace: DeepAgentsTraceState, mode: string | undefined, payload: unknown): void {
   const knownNames = new Set(trace.agentStatuses.map((agent) => agent.name));
-  const activeNames = Array.from(collectActiveAgentNames(payload, knownNames));
+  const activeInstanceCounts = collectActiveAgentInstanceCounts(payload, knownNames);
 
-  if (activeNames.length === 0) {
-    trace.agentStatuses = markAgentWorking(trace.agentStatuses, ["leader"]);
+  if (activeInstanceCounts.size === 0) {
+    trace.agentStatuses = markAgentWorking(trace.agentStatuses, new Map([["leader", 1]]));
     return;
   }
 
   if (mode === "values") {
-    activeNames.push("leader");
+    activeInstanceCounts.set("leader", Math.max(activeInstanceCounts.get("leader") ?? 0, 1));
   }
 
-  trace.agentStatuses = markAgentWorking(trace.agentStatuses, Array.from(new Set(activeNames)));
+  trace.agentStatuses = markAgentWorking(trace.agentStatuses, activeInstanceCounts);
 }
 
 function getTodoBoardStreamProgress(trace: DeepAgentsTraceState): TodoBoardState["streamProgress"] {
@@ -1721,7 +1823,15 @@ export function summarizeDeepAgentsAction(
   return `收到 ${mode} 事件。`;
 }
 
-function shouldAppendDetailedLog(mode: string, summary: string): boolean {
+function isMessageToolIntentSummary(summary: string): boolean {
+  return /^准备(?:读取文件|写入文件|编辑文件|列出目录|搜索文件|更新 todo|启动子任务)：/.test(summary);
+}
+
+export function shouldAppendDeepAgentsWorkflowLog(mode: string, summary: string): boolean {
+  if (mode === "messages") {
+    return isMessageToolIntentSummary(summary);
+  }
+
   if (
     summary === "模型正在工作中" ||
     summary === "模型正在思考。" ||
@@ -1740,11 +1850,7 @@ function shouldAppendDetailedLog(mode: string, summary: string): boolean {
     return false;
   }
 
-  if (/^准备/.test(summary)) {
-    return false;
-  }
-
-  if ((mode === "messages" || mode === "updates") && !/[：:/.\[\]0-9A-Za-z\u4e00-\u9fff-]{4,}/.test(summary)) {
+  if (mode === "updates" && !/[：:/.\[\]0-9A-Za-z\u4e00-\u9fff-]{4,}/.test(summary)) {
     return false;
   }
 
@@ -1945,7 +2051,7 @@ async function logDeepAgentsChunk(
 ): Promise<void> {
   applyStreamProgress(trace, mode, payload);
   const summary = summarizeDeepAgentsAction(mode, payload, getStreamProgressSummary(trace));
-  if (shouldAppendDetailedLog(mode, summary)) {
+  if (shouldAppendDeepAgentsWorkflowLog(mode, summary)) {
     await appendWorkflowLog(`[${mode}] ${summary}`);
   }
   await updateTodoBoard(trace, payload, summary, runtime, mode, true);

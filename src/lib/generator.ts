@@ -643,6 +643,74 @@ async function ensureEnvFile(outputDirectory: string, logPath: string): Promise<
   };
 }
 
+const REQUIRED_BUILT_DEPENDENCIES = ["better-sqlite3", "prisma"];
+
+async function ensurePackageJsonPnpmConfig(outputDirectory: string, logPath: string): Promise<GenerationValidationStep> {
+  const packageJsonPath = path.join(outputDirectory, "package.json");
+  const contents = await readIfExists(packageJsonPath);
+  if (!contents) {
+    await appendRuntimeValidationLog(logPath, [
+      "=== ensure package.json pnpm config ===",
+      "[error] 缺少 package.json，无法确保 pnpm 构建配置。",
+      "",
+    ]);
+    return {
+      name: "ensure package.json pnpm config",
+      ok: false,
+      detail: "缺少 package.json。",
+    };
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(contents) as Record<string, unknown>;
+  } catch {
+    await appendRuntimeValidationLog(logPath, [
+      "=== ensure package.json pnpm config ===",
+      "[error] package.json 解析失败。",
+      "",
+    ]);
+    return {
+      name: "ensure package.json pnpm config",
+      ok: false,
+      detail: "package.json 解析失败。",
+    };
+  }
+
+  const pnpm = (parsed.pnpm as Record<string, unknown> | undefined) ?? {};
+  const existing = Array.isArray(pnpm.onlyBuiltDependencies)
+    ? (pnpm.onlyBuiltDependencies as string[])
+    : [];
+  const missing = REQUIRED_BUILT_DEPENDENCIES.filter((dep) => !existing.includes(dep));
+
+  if (missing.length > 0) {
+    pnpm.onlyBuiltDependencies = [...existing, ...missing];
+    parsed.pnpm = pnpm;
+    await fs.writeFile(packageJsonPath, JSON.stringify(parsed, null, 2) + "\n", "utf8");
+    await appendRuntimeValidationLog(logPath, [
+      "=== ensure package.json pnpm config ===",
+      `[ok] 已注入缺失的 onlyBuiltDependencies：${missing.join(", ")}。`,
+      "",
+    ]);
+    return {
+      name: "ensure package.json pnpm config",
+      ok: true,
+      detail: `已注入缺失的 onlyBuiltDependencies：${missing.join(", ")}。`,
+    };
+  }
+
+  await appendRuntimeValidationLog(logPath, [
+    "=== ensure package.json pnpm config ===",
+    "[ok] onlyBuiltDependencies 已包含所需依赖。",
+    "",
+  ]);
+  return {
+    name: "ensure package.json pnpm config",
+    ok: true,
+    detail: "onlyBuiltDependencies 已包含所需依赖。",
+  };
+}
+
 async function reserveFreePort(): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     const server = createServer();
@@ -966,6 +1034,25 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
         };
       }
       await appendWorkflowLog("[host] mv .env.example .env 通过。");
+
+      await appendWorkflowLog("[host] 正在确保 package.json pnpm 构建配置...");
+      const pnpmStep = await measureRuntimeStep(
+        runtime,
+        {
+          name: "runtime_validation.package_json_pnpm",
+          phase: (runtime.generateAttempt ?? 1) > 1 ? "generate_repair" : "generate",
+          metadata: { stepName: "ensure package.json pnpm config" },
+        },
+        async () => await ensurePackageJsonPnpmConfig(outputDirectory, runtime.deepagentsRuntimeValidationLogPath),
+      );
+      steps.push(pnpmStep);
+      if (!pnpmStep.ok) {
+        return {
+          reasons: [`生成阶段运行验证失败：${pnpmStep.name} 未通过。${pnpmStep.detail} 详见 .deepagents/runtime-validation.log。`],
+          steps,
+        };
+      }
+      await appendWorkflowLog("[host] package.json pnpm 配置通过。");
     }
 
     for (const validationStep of runtimeValidation.steps) {
@@ -1155,6 +1242,30 @@ async function snapshotStarterProjectConfigFiles(
 function collectEnvExampleVariables(planSpec: PlanSpec): EnvExampleVariable[] {
   return (planSpec.environmentVariables ?? [])
     .filter((variable) => (variable.targetFile ?? ".env.example") === ".env.example");
+}
+
+function collectPlanEnvironmentPolicyIssues(
+  runtime: Pick<TextGeneratorRuntime, "templateEnvironmentPolicy">,
+  planSpec: PlanSpec,
+): string[] {
+  const lockedKeys = new Set((runtime.templateEnvironmentPolicy ?? defaultTemplateEnvironmentPolicy()).lockedKeys);
+  if (lockedKeys.size === 0) {
+    return [];
+  }
+
+  const lockedDeclarations = uniqueValues(
+    (planSpec.environmentVariables ?? [])
+      .filter((variable) => lockedKeys.has(variable.name))
+      .map((variable) => variable.name),
+  );
+
+  if (lockedDeclarations.length === 0) {
+    return [];
+  }
+
+  return [
+    `planSpec.environmentVariables 不允许声明模板锁定的 .env.example 变量：${lockedDeclarations.join(", ")}。`,
+  ];
 }
 
 function collectProjectConfigChanges(planSpec: PlanSpec): ProjectConfigChange[] {
@@ -2240,6 +2351,9 @@ async function collectPersistedPlanValidation(runtime: TextGeneratorRuntime): Pr
         planSpec = await normalizePersistedPlanSpec(runtime, validation.data);
         reasons.push(...collectPlanSpecConsistencyIssues(planSpec).map(
           (issue) => `计划阶段未完成：artifacts.planSpec 一致性校验失败：${issue}`,
+        ));
+        reasons.push(...collectPlanEnvironmentPolicyIssues(runtime, planSpec).map(
+          (issue) => `计划阶段未完成：${issue}`,
         ));
         reasons.push(...(await collectPlanReferenceIssues(runtime, planSpec)).map(
           (issue) => `计划阶段未完成：参考资料校验失败：${issue}`,

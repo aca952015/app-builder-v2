@@ -63,11 +63,12 @@
 
 `artifacts.planSpec` 是最关键产物。它必须严格符合输入里的 `planSpecSchema`，并且使用结构化定义表达后续生成和验证所需的关键信息。
 
-输入里的 `hardConstraints.planSpecSchemaValidation`、`hardConstraints.referenceUsageValidation` 是阻断性硬约束，不是建议项。
+输入里的 `hardConstraints.planSpecSchemaValidation`、`hardConstraints.environmentVariablePolicyValidation`、`hardConstraints.referenceUsageValidation` 是阻断性硬约束，不是建议项。
 在同时满足以下条件前，不允许结束当前阶段，也不允许返回最终结构化响应：
 
 - `artifacts.planSpec` 是合法 JSON
 - `artifacts.planSpec` 通过 `hardConstraints.planSpecSchemaValidation.schema` 校验
+- `planSpec.environmentVariables[*].name` 不包含 `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 中列出的任何 locked key
 - 可选字符串字段无值时直接省略，不能写成空字符串 `""`
 - 必填字符串字段必须提供非空字符串
 - 如果输入的 `externalReferences`、`localReferences` 或 `artifacts.referenceManifest` 中存在已下载本地资料，必须先读取对应 `localPath` 文件，再组装 `artifacts.generatedSpec`、`artifacts.planSpec` 和 `artifacts.interactionContract`
@@ -106,7 +107,10 @@
 - 如果 PRD 信息不足，可以做保守默认，但这些默认必须写入 `assumptions`，并体现在 JSON 定义中。
 - 不允许输出“数据模型：无”“后续补充”这类不可执行描述。
 - 如果 PRD 中包含外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须写入 `planSpec.references`，并在 `artifacts.generatedSpec` 中增加 `References` 章节说明。
-- 如果 PRD 中出现“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须写入 `planSpec.environmentVariables`；但不要写入 `template.environmentPolicy.lockedKeys` 中的 key，这些 starter 预置值由 host 锁定，PRD 不允许覆盖。
+- 如果 PRD 中出现“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，且变量名不在 `template.environmentPolicy.lockedKeys` / `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 中，必须写入 `planSpec.environmentVariables`。
+- `template.environmentPolicy.lockedKeys` 和 `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 的优先级高于 PRD 环境变量覆盖请求。
+- 不要把 locked key 写入 `planSpec.environmentVariables`；这些 starter 预置值由 host 锁定，PRD 不允许覆盖。
+- 如果 PRD 要求覆盖 locked key，计划阶段必须省略该变量，并在 `planSpec.assumptions` 或 `artifacts.generatedSpec` 中说明使用 starter 默认值、代码需兼容该默认值。
 - `planSpec.environmentVariables[*].targetFile` 写 `.env.example`；新增环境变量最终由 host 合并进 `.env.example`。
 - `next.config.ts` 属于 `template.projectConfigPolicy.guardedFiles` 保护的项目配置文件。只有当 PRD 明确要求修改 Next.js/项目配置（例如 image remotePatterns、rewrites、redirects、headers、basePath、output、experimental 等）时，才允许在 `artifacts.analysis` 中写出项目配置变更依据，并在 `planSpec.projectConfigChanges` 中声明。
 - 若确需后续编辑 `next.config.ts`，`planSpec.projectConfigChanges[*].filePath` 必须写 `next.config.ts`，`reason` 必须说明需要改的配置项，`prdEvidence` 必须引用 PRD 中的明确证据。

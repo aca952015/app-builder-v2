@@ -47,6 +47,7 @@ import {
   renderTodoBoardToString,
   renderTodoStatus,
   stripAnsi,
+  shouldAppendDeepAgentsWorkflowLog,
   summarizeDeepAgentsAction,
   toVirtualWorkspacePath,
   withActivityTimeout,
@@ -690,8 +691,8 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /\[待生成\]/);
   assert.match(output, /当前动作：正在整理分析稿。/);
   assert.match(output, /执行日志/);
-  assert.match(output, /修复进展/);
-  assert.match(output, /暂无修复进展/);
+  assert.doesNotMatch(output, /修复进展/);
+  assert.doesNotMatch(output, /暂无修复进展/);
   assert.match(output, /\[12:34:56\] \[FLOW\] 进入计划阶段/);
   assert.match(output, /\[12:34:57\] \[READ\]/);
   assert.match(output, /读取文件：\.deepagents\/source-prd\.md（1-1000行）/);
@@ -789,6 +790,82 @@ test("renderTodoBoardToString splits execution logs and repair progress into two
   assert.match(output, /\[12:35:03\] \[FIX\] 启动生成修复轮次 1/);
   assert.match(output, /\[12:35:05\] \[FIX\] 生成修复输出完成，开始复核/);
   assert.doesNotMatch(output, /暂无修复进展/);
+});
+
+test("renderTodoBoardToString shows an empty repair column only during repair context", () => {
+  const normalOutput = stripAnsi(renderTodoBoardToString({
+    stage: "生成阶段",
+    todos: [
+      { content: "读取已验证的 planSpec 与 starter", status: "completed" },
+      { content: "实现资源模型与 REST API", status: "in_progress" },
+    ],
+    artifacts: createArtifactItemsForStage("生成阶段", "generating"),
+    narrative: "正在实现页面。",
+    logs: [
+      "[12:36:01] [FLOW] 生成阶段流式输出完成，开始宿主校验。",
+      "[12:36:02] [READ] 读取文件：app/page.tsx（1-120行）",
+    ],
+    runtimeStatus: {
+      phase: "generate",
+    },
+  }, 140));
+
+  const repairOutput = stripAnsi(renderTodoBoardToString({
+    stage: "生成阶段",
+    todos: [
+      { content: "读取已验证的 planSpec 与 starter", status: "completed" },
+      { content: "修复生成阶段交付物", status: "in_progress" },
+    ],
+    artifacts: createArtifactItemsForStage("生成阶段", "generating"),
+    narrative: "正在等待修复输出。",
+    logs: [
+      "[12:37:01] [FLOW] 读取已验证产物。",
+    ],
+    runtimeStatus: {
+      phase: "generate_repair",
+    },
+  }, 140));
+
+  assert.match(normalOutput, /执行日志/);
+  assert.doesNotMatch(normalOutput, /修复进展/);
+  assert.doesNotMatch(normalOutput, /暂无修复进展/);
+  assert.match(repairOutput, /修复进展/);
+  assert.match(repairOutput, /暂无修复进展/);
+});
+
+test("buildTodoBoardLines hides the empty repair section outside repair context", () => {
+  const normalLines = buildTodoBoardLines({
+    stage: "生成阶段",
+    todos: [
+      { content: "读取已验证的 planSpec 与 starter", status: "completed" },
+    ],
+    artifacts: createArtifactItemsForStage("生成阶段", "generating"),
+    narrative: "正在实现页面。",
+    logs: [
+      "[12:36:01] [FLOW] 生成阶段流式输出完成，开始宿主校验。",
+    ],
+    runtimeStatus: {
+      phase: "generate",
+    },
+  });
+  const repairLines = buildTodoBoardLines({
+    stage: "生成阶段",
+    todos: [
+      { content: "修复生成阶段交付物", status: "in_progress" },
+    ],
+    artifacts: createArtifactItemsForStage("生成阶段", "generating"),
+    narrative: "正在等待修复输出。",
+    logs: [
+      "[12:37:01] [FLOW] 读取已验证产物。",
+    ],
+    runtimeStatus: {
+      phase: "generate_repair",
+    },
+  });
+
+  assert.equal(normalLines.some((line) => /修复进展|暂无修复进展/.test(line)), false);
+  assert.equal(repairLines.some((line) => /修复进展：/.test(line)), true);
+  assert.equal(repairLines.some((line) => /暂无修复进展/.test(line)), true);
 });
 
 test("renderTodoBoardToString can render the completion stage", () => {
@@ -1006,14 +1083,18 @@ test("renderTodoBoardToString renders agent statuses below runtime status bar", 
     },
     agentStatuses: [
       { name: "leader", status: "working" },
-      { name: "frontend-implementer", status: "done" },
-      { name: "backend-implementer", status: "idle" },
+      { name: "frontend-implementer", status: "working", activeInstanceCount: 2 },
+      { name: "backend-implementer", status: "done" },
+      { name: "qa-implementer", status: "working" },
     ],
   }, 140));
 
   assert.match(output, /model: gpt-5\.4 .* phase: generate/);
-  assert.match(output, /subagents: 2/);
-  assert.match(output, /leader: working \| frontend-implementer: done \| backend-implementer: idle/);
+  assert.match(output, /subagents: 3/);
+  assert.match(
+    output,
+    /leader: working \| frontend-implementer: 2 instances working \| backend-implementer: worked 1 time \| qa-implementer: 1 instance working/,
+  );
   assert.ok(
     output.indexOf("leader: working") > output.indexOf("phase: generate"),
     "agent status row should render below the runtime status bar",
@@ -1136,6 +1217,29 @@ test("summarizeDeepAgentsAction exposes concrete tool events", () => {
   );
 });
 
+test("summarizeDeepAgentsAction describes task events when useful and suppresses low-information task completion", () => {
+  assert.equal(
+    summarizeDeepAgentsAction("tools", {
+      event: "on_tool_start",
+      name: "task",
+      input: JSON.stringify({
+        subagent_type: "frontend-implementer",
+        description: "实现订单列表页面并接入筛选交互",
+      }),
+    }),
+    "启动子任务：frontend-implementer：实现订单列表页面并接入筛选交互",
+  );
+
+  const lowInformationSummary = summarizeDeepAgentsAction("tools", {
+    event: "on_tool_end",
+    name: "task",
+    input: "{}",
+  });
+
+  assert.equal(lowInformationSummary, "收到工具调用事件。");
+  assert.equal(shouldAppendDeepAgentsWorkflowLog("tools", lowInformationSummary), false);
+});
+
 test("summarizeDeepAgentsAction marks whole-file reads explicitly", () => {
   assert.equal(
     summarizeDeepAgentsAction("tools", {
@@ -1148,20 +1252,57 @@ test("summarizeDeepAgentsAction marks whole-file reads explicitly", () => {
 });
 
 test("summarizeDeepAgentsAction exposes message tool-call intent", () => {
-  assert.equal(
-    summarizeDeepAgentsAction("messages", [
-      {
-        tool_calls: [
-          {
-            name: "write_file",
-            args: {
-              path: "app/page.tsx",
-            },
+  const writeIntent = summarizeDeepAgentsAction("messages", [
+    {
+      tool_calls: [
+        {
+          name: "write_file",
+          args: {
+            path: "app/page.tsx",
           },
-        ],
-      },
-    ]),
-    "准备写入文件：app/page.tsx",
+        },
+      ],
+    },
+  ]);
+  const readIntent = summarizeDeepAgentsAction("messages", [
+    {
+      tool_calls: [
+        {
+          name: "read_file",
+          args: {
+            file_path: "app/page.tsx",
+            offset: 0,
+            limit: 120,
+          },
+        },
+      ],
+    },
+  ]);
+
+  assert.equal(writeIntent, "准备写入文件：app/page.tsx");
+  assert.equal(readIntent, "准备读取文件：app/page.tsx（1-120行）");
+  assert.equal(shouldAppendDeepAgentsWorkflowLog("messages", writeIntent), true);
+  assert.equal(shouldAppendDeepAgentsWorkflowLog("messages", readIntent), true);
+});
+
+test("shouldAppendDeepAgentsWorkflowLog suppresses message text deltas", () => {
+  const shortFragment = summarizeDeepAgentsAction("messages", { content: "have" });
+  const textFragment = summarizeDeepAgentsAction("messages", { content: "corresponding resource type" });
+
+  assert.equal(shortFragment, "have");
+  assert.equal(textFragment, "corresponding resource type");
+  assert.equal(shouldAppendDeepAgentsWorkflowLog("messages", shortFragment), false);
+  assert.equal(shouldAppendDeepAgentsWorkflowLog("messages", textFragment), false);
+  assert.equal(
+    shouldAppendDeepAgentsWorkflowLog(
+      "tools",
+      summarizeDeepAgentsAction("tools", {
+        event: "on_tool_start",
+        name: "write_file",
+        input: "{\"file_path\":\"app/page.tsx\"}",
+      }),
+    ),
+    true,
   );
 });
 

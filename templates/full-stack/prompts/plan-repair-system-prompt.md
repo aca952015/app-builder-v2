@@ -59,7 +59,10 @@
 - 若某项失败来自资源/API/页面映射不完整，优先最小化补全 JSON 结构，再同步 Markdown 文档一致性。
 - 若某个资源实际上只作为嵌套数据间接使用，不应强行补出专有 page/API；应在 `artifacts.planSpec.resources[*].usage` 中显式标为 `indirect`，并同步文档说明。
 - 如果失败项或现有 PRD 镜像涉及外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须补入 `planSpec.references`，并同步 `artifacts.generatedSpec` 的 `References` 章节。
-- 如果失败项或现有 PRD 镜像涉及“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须补入 `planSpec.environmentVariables`；但不要写入 `template.environmentPolicy.lockedKeys` 中的 key，若失败项来自锁定变量冲突，应移除该条目而不是改 starter 默认值。
+- 如果失败项或现有 PRD 镜像涉及“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，且变量名不在 `template.environmentPolicy.lockedKeys` / `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 中，必须补入 `planSpec.environmentVariables`。
+- `template.environmentPolicy.lockedKeys` 和 `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 的优先级高于 PRD 环境变量覆盖请求。
+- 不要把 locked key 写入 `planSpec.environmentVariables`；如果失败项来自锁定变量冲突，必须从 `planSpec.environmentVariables` 删除对应条目，而不是改 starter 默认值或绕过锁定。
+- 如果 PRD 要求覆盖 locked key，在 `planSpec.assumptions` 或 `artifacts.generatedSpec` 中说明使用 starter 默认值、代码需兼容该默认值。
 - `planSpec.environmentVariables[*].targetFile` 写 `.env.example`；新增环境变量最终由 host 合并进 `.env.example`。
 - `next.config.ts` 属于 `template.projectConfigPolicy.guardedFiles` 保护的项目配置文件。只有当失败项或现有 PRD 镜像明确显示 PRD 要求修改 Next.js/项目配置时，才允许补入 `planSpec.projectConfigChanges`。
 - 若补入 `next.config.ts` 配置变更，`planSpec.projectConfigChanges[*].filePath` 必须写 `next.config.ts`，`reason` 必须说明需要改的配置项，`prdEvidence` 必须引用 PRD 中的明确证据。
@@ -69,6 +72,7 @@
 - `planSpec.references` 只描述参考资料本身，不要求也不提供 `relatedApis`、`apiPaths` 之类的绑定字段。
 - `references` 不属于宿主强制验收项，不要为了引用资料额外制造 `acceptanceChecks`。
 - `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束。
+- `hardConstraints.environmentVariablePolicyValidation` 是阻断性硬约束：`planSpec.environmentVariables[*].name` 不得包含其中的 locked key。
 - `hardConstraints.referenceUsageValidation` 是阻断性硬约束：如果有已下载本地资料，必须读取对应 `localPath` 文件后再修补 `artifacts.generatedSpec`、`artifacts.planSpec` 和 `artifacts.interactionContract`。
 - 在 `artifacts.planSpec` 重新成为合法 JSON 且通过 `hardConstraints.planSpecSchemaValidation.schema` 校验前，不允许结束修补或返回最终结构化响应。
 - 可选字符串字段无值时必须省略，不能写成空字符串 `""`；必填字符串字段必须提供非空字符串。
