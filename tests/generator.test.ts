@@ -421,6 +421,9 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
     templateEnvironmentPolicy: {
       lockedKeys: [],
     },
+    templateProjectConfigPolicy: {
+      guardedFiles: [],
+    },
     modelRoles: resolveModelRoleConfigs({
       APP_BUILDER_API_KEY: "test-key",
     }),
@@ -1905,7 +1908,7 @@ test("interactive runtime detects compile errors before MallocStackLogging noise
   }
 });
 
-test("planSpec schema accepts PRD-derived environment variables and references", () => {
+test("planSpec schema accepts PRD-derived environment variables, references, and project config changes", () => {
   const planSpec = buildPlanSpec();
   planSpec.environmentVariables = [
     {
@@ -1934,6 +1937,13 @@ test("planSpec schema accepts PRD-derived environment variables and references",
       retrievalStatus: "downloaded",
     },
   ];
+  planSpec.projectConfigChanges = [
+    {
+      filePath: "next.config.ts",
+      reason: "Allow remote product images required by the PRD.",
+      prdEvidence: "PRD: product images are hosted on https://cdn.example.com and must render in the app.",
+    },
+  ];
 
   const validation = validatePlanSpec(planSpec);
 
@@ -1943,6 +1953,7 @@ test("planSpec schema accepts PRD-derived environment variables and references",
     assert.equal(validation.data.environmentVariables?.[0]?.name, "QWEATHER_API_KEY");
     assert.equal(validation.data.references?.length, 1);
     assert.equal(validation.data.references?.[0]?.type, "external_api");
+    assert.equal(validation.data.projectConfigChanges?.[0]?.filePath, "next.config.ts");
   }
 });
 
@@ -2744,6 +2755,69 @@ class LockedEnvConflictTextGenerator extends LockedEnvMutationTextGenerator {
 
     return {
       summary: "Planner wrote a locked env conflict.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+}
+
+class UnauthorizedNextConfigMutationTextGenerator extends StubTextGenerator {
+  override async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject> {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Config Report\n\nGenerated app tried to edit protected config.\n",
+      extraFiles: [
+        {
+          path: "next.config.ts",
+          contents: "import type { NextConfig } from \"next\";\n\nconst nextConfig: NextConfig = { output: \"standalone\" };\n\nexport default nextConfig;\n",
+        },
+      ],
+    });
+
+    return {
+      summary: "Generated app wrote protected config without PRD declaration.",
+      filesWritten: ["app-builder-report.md", "next.config.ts"],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+}
+
+class AuthorizedNextConfigMutationTextGenerator extends UnauthorizedNextConfigMutationTextGenerator {
+  override async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildPlanSpec();
+    planSpec.projectConfigChanges = [
+      {
+        filePath: "next.config.ts",
+        reason: "Enable standalone output required by the PRD deployment target.",
+        prdEvidence: "PRD: deploy the generated app as a standalone Next.js server bundle.",
+      },
+    ];
+
+    await writeFile(
+      runtime.deepagentsAnalysisPath,
+      "# Config 分析\n\n## 项目配置变更\n\nPRD 明确要求 standalone 部署，需要修改 next.config.ts。\n",
+      "utf8",
+    );
+    await writeFile(
+      runtime.deepagentsDetailedSpecPath,
+      "# Config 规格\n\n需要在 next.config.ts 中设置 output: standalone。\n",
+      "utf8",
+    );
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "Planner declared the PRD-backed project config change.",
       artifactsWritten: [
         ".deepagents/prd-analysis.md",
         ".deepagents/generated-spec.md",
@@ -4047,8 +4121,11 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(templateLock, /"generate": \{[\s\S]*"effort": "medium"/);
     assert.match(templateLock, /"environmentPolicy": \{[\s\S]*"lockedKeys": \[/);
     assert.match(templateLock, /"DATABASE_URL"/);
+    assert.match(templateLock, /"projectConfigPolicy": \{[\s\S]*"guardedFiles": \[/);
+    assert.match(templateLock, /"next\.config\.ts"/);
     assert.match(stagedTemplateManifest, /"repairRetries": \{/);
     assert.match(stagedTemplateManifest, /"environmentPolicy": \{/);
+    assert.match(stagedTemplateManifest, /"projectConfigPolicy": \{/);
     assert.match(stagedTemplateManifest, /"phases": \{/);
     assert.match(stagedTemplateManifest, /"plan": \{\s*"prompt": "prompts\/plan-system-prompt\.md"/);
     assert.match(stagedTemplateManifest, /"planRepair": \{[\s\S]*"prompt": "prompts\/plan-repair-system-prompt\.md"/);
@@ -4074,6 +4151,11 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(generatePromptSnapshot, /implementedResources/);
     assert.match(generatePromptSnapshot, /Current stage: Generate Stage/);
     assert.match(generatePromptSnapshot, /template\.runtimeValidation/);
+    assert.match(generatePromptSnapshot, /Host-Enforced Project Config Guard/);
+    assert.match(generatePromptSnapshot, /projectConfigChanges` is absent or empty/);
+    assert.match(generatePromptSnapshot, /explicitly forbidden to create, modify, delete, rewrite/);
+    assert.match(generatePromptSnapshot, /`next\.config\.ts`/);
+    assert.match(generatePromptSnapshot, /do not add that declaration during generation/);
     assert.match(generateRepairPromptSnapshot, /生成修复阶段代理/);
     assert.match(generateRepairPromptSnapshot, /validationFailures/);
     assert.match(generateRepairPromptSnapshot, /runtimeValidationLog/);
@@ -4112,6 +4194,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     )));
     assert.match(deepagentsConfig, /"repairRetries": \{/);
     assert.match(deepagentsConfig, /"environmentPolicy": \{/);
+    assert.match(deepagentsConfig, /"projectConfigPolicy": \{/);
     assert.match(deepagentsConfig, /"phases": \{/);
     assert.match(deepagentsConfig, /"plan": \{[\s\S]*"prompt": "prompts\/plan-system-prompt\.md"[\s\S]*"effort": "high"/);
     assert.doesNotMatch(deepagentsConfig, /\/Users\/aca\/dev\/app-builder-v2/);
@@ -4816,6 +4899,118 @@ test("generateApplication fails generation validation when planSpec changes a lo
   }
 });
 
+test("generateApplication fails generation validation when next.config.ts changes without PRD-backed project config declaration", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-next-config-guard-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const previousCwd = process.cwd();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "mini-app",
+      interactiveEnabled: false,
+      generateRepairRetries: 0,
+    });
+    const templateDirectory = path.join(tempRoot, "templates", "mini-app");
+    const manifestPath = path.join(templateDirectory, "template.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.starterDir = "starter";
+    manifest.projectConfigPolicy = {
+      guardedFiles: ["next.config.ts"],
+    };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await mkdir(path.join(templateDirectory, "starter"), { recursive: true });
+    await writeFile(
+      path.join(templateDirectory, "starter", "next.config.ts"),
+      "import type { NextConfig } from \"next\";\n\nconst nextConfig: NextConfig = {};\n\nexport default nextConfig;\n",
+      "utf8",
+    );
+    process.chdir(tempRoot);
+
+    await assert.rejects(
+      () => generateApplication({
+        specPath,
+        outputDirectory: path.join(tempRoot, "output"),
+        templateId: "mini-app",
+        generator: new UnauthorizedNextConfigMutationTextGenerator(),
+        validator: new SuccessfulRuntimeValidator(),
+      }),
+      /projectConfigChanges.*next\.config\.ts/s,
+    );
+
+    const generationValidation = await readFile(
+      path.join(tempRoot, "output", ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.match(generationValidation, /受保护项目配置文件被修改/);
+    assert.match(generationValidation, /next\.config\.ts/);
+    assert.match(generationValidation, /projectConfigChanges/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication allows next.config.ts changes when planSpec declares PRD-backed project config change", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-next-config-declared-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const previousCwd = process.cwd();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "mini-app",
+      interactiveEnabled: false,
+    });
+    const templateDirectory = path.join(tempRoot, "templates", "mini-app");
+    const manifestPath = path.join(templateDirectory, "template.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.starterDir = "starter";
+    manifest.projectConfigPolicy = {
+      guardedFiles: ["next.config.ts"],
+    };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await mkdir(path.join(templateDirectory, "starter"), { recursive: true });
+    await writeFile(
+      path.join(templateDirectory, "starter", "next.config.ts"),
+      "import type { NextConfig } from \"next\";\n\nconst nextConfig: NextConfig = {};\n\nexport default nextConfig;\n",
+      "utf8",
+    );
+    process.chdir(tempRoot);
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "mini-app",
+      generator: new AuthorizedNextConfigMutationTextGenerator(),
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const planSpec = JSON.parse(
+      await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8"),
+    ) as PlanSpec;
+    const nextConfig = await readFile(path.join(result.outputDirectory, "next.config.ts"), "utf8");
+    const generatePrompt = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generate-system-prompt.md"),
+      "utf8",
+    );
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.equal(planSpec.projectConfigChanges?.[0]?.filePath, "next.config.ts");
+    assert.match(planSpec.projectConfigChanges?.[0]?.prdEvidence ?? "", /standalone/);
+    assert.match(nextConfig, /output: "standalone"/);
+    assert.doesNotMatch(generatePrompt, /Host-Enforced Project Config Guard/);
+    assert.match(generationValidation, /"valid": true/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication retries the plan phase until plan-spec.json is valid", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-retry-plan-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -5450,6 +5645,7 @@ test("full-stack template starter copies scaffold files into the output root", a
     assert.equal(template.phases.generate.effort, "medium");
     assert.equal(template.phases.generateRepair.effort, "high");
     assert.deepEqual(template.environmentPolicy.lockedKeys, ["DATABASE_URL", "APP_URL", "SESSION_SECRET"]);
+    assert.deepEqual(template.projectConfigPolicy.guardedFiles, ["next.config.ts"]);
     assert.ok(copied.includes("package.json"));
     assert.ok(copied.includes("prisma.config.ts"));
     assert.ok(copied.includes("app/layout.tsx"));
@@ -5545,6 +5741,33 @@ test("template generation prompts encourage bounded parallel subagents", async (
   }
 });
 
+test("template prompts guard next.config.ts edits behind PRD-backed project config declarations", async () => {
+  for (const templateId of ["mini-app", "full-stack"] as const) {
+    const template = await loadTemplatePack(templateId);
+    const planPrompts = [template.planPromptPath, template.planRepairPromptPath];
+    const generationPrompts = [template.generatePromptPath, template.generateRepairPromptPath];
+
+    for (const promptPath of planPrompts) {
+      const prompt = await readFile(promptPath, "utf8");
+      assert.match(prompt, /next\.config\.ts/);
+      assert.match(prompt, /template\.projectConfigPolicy\.guardedFiles/);
+      assert.match(prompt, /planSpec\.projectConfigChanges/);
+      assert.match(prompt, /prdEvidence/);
+      assert.match(prompt, /PRD.*明确/s);
+      assert.match(prompt, /项目配置/);
+    }
+
+    for (const promptPath of generationPrompts) {
+      const prompt = await readFile(promptPath, "utf8");
+      assert.match(prompt, /next\.config\.ts/);
+      assert.match(prompt, /planSpec\.projectConfigChanges/);
+      assert.match(prompt, /filePath: "next\.config\.ts"/);
+      assert.match(prompt, /不得创建、修改、删除、重写 `next\.config\.ts`/);
+      assert.match(prompt, /不得把它列入 `filesWritten`/);
+    }
+  }
+});
+
 test("mini-app template enables interactive runtime validation", async () => {
   const template = await loadTemplatePack("mini-app");
   const planPrompt = await readFile(template.planPromptPath, "utf8");
@@ -5582,6 +5805,7 @@ test("mini-app template enables interactive runtime validation", async () => {
     "SYSTEM_USER_EMAIL",
     "SYSTEM_USER_PASSWORD",
   ]);
+  assert.deepEqual(template.projectConfigPolicy.guardedFiles, ["next.config.ts"]);
 
   const nextConfig = await readFile(path.join(template.starterDirectory ?? "", "next.config.ts"), "utf8");
   assert.match(nextConfig, /allowedDevOrigins:\s*\["127\.0\.0\.1", "localhost"\]/);
@@ -5648,6 +5872,54 @@ test("loadTemplatePack parses and validates template environment policy", async 
     await assert.rejects(
       () => loadTemplatePack("env-policy-template"),
       /environmentPolicy\.lockedKeys\[1\].*non-empty string/,
+    );
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadTemplatePack parses and validates template project config policy", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-template-config-policy-"));
+  const previousCwd = process.cwd();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "config-policy-template",
+      interactiveEnabled: false,
+    });
+    const manifestPath = path.join(tempRoot, "templates", "config-policy-template", "template.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.projectConfigPolicy = {
+      guardedFiles: ["./next.config.ts", "next.config.ts"],
+    };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    process.chdir(tempRoot);
+
+    const template = await loadTemplatePack("config-policy-template");
+
+    assert.deepEqual(template.projectConfigPolicy.guardedFiles, ["next.config.ts"]);
+
+    manifest.projectConfigPolicy = { guardedFiles: "next.config.ts" };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await assert.rejects(
+      () => loadTemplatePack("config-policy-template"),
+      /projectConfigPolicy\.guardedFiles.*array of strings/,
+    );
+
+    manifest.projectConfigPolicy = { guardedFiles: ["next.config.ts", ""] };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await assert.rejects(
+      () => loadTemplatePack("config-policy-template"),
+      /projectConfigPolicy\.guardedFiles\[1\].*non-empty string/,
+    );
+
+    manifest.projectConfigPolicy = { guardedFiles: ["../next.config.ts"] };
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await assert.rejects(
+      () => loadTemplatePack("config-policy-template"),
+      /projectConfigPolicy\.guardedFiles\[0\].*workspace-relative file path/,
     );
   } finally {
     process.chdir(previousCwd);
@@ -5807,6 +6079,7 @@ test("generated app architecture reference matches the TailAdmin starter skeleto
   assert.match(architectureSource, /SQLite/);
   assert.match(architectureSource, /TailAdmin/);
   assert.match(architectureSource, /route groups/);
+  assert.match(architectureSource, /next\.config\.ts.*protected project configuration file/s);
 });
 
 test("planning payload passes plan-spec schema validation as a blocking hard constraint to the agent", () => {
@@ -5866,6 +6139,7 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.required, true);
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /空字符串/);
+  assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /项目配置变更/);
   assert.ok(payload.planSpecSchema);
   assert.equal(payload.artifacts.interactionContract, "/.deepagents/interaction-contract.json");
   assert.equal(
@@ -5891,6 +6165,7 @@ test("planning payload passes plan-spec schema validation as a blocking hard con
   assert.equal(payload.hardConstraints.referenceUsageValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.referenceUsageValidation.rules.join("\n"), /必须先读取其 localPath/);
   assert.match(JSON.stringify(payload.planSpecSchema), /references/);
+  assert.match(JSON.stringify(payload.planSpecSchema), /projectConfigChanges/);
   assert.doesNotMatch(JSON.stringify(payload.planSpecSchema), /relatedApis/);
 });
 

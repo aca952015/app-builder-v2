@@ -42,6 +42,7 @@ Implementation constraints:
 - Keep generated APIs under `app/api/**/route.ts`.
 - Prefer extending the existing shell instead of replacing the whole starter.
 - Do not introduce a database layer unless the plan explicitly requires one.
+- Treat `next.config.ts` as a protected project configuration file. It can only be edited when `planSpec.projectConfigChanges` explicitly cites PRD evidence for a project/Next.js configuration change.
 
 Data layer conventions:
 

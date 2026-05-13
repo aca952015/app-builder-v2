@@ -90,6 +90,8 @@ svg.d.ts
 app-builder-report.md
 ```
 
+`next.config.ts` is a protected project configuration file. Edit it only when `planSpec.projectConfigChanges` explicitly cites PRD evidence for a project/Next.js configuration change.
+
 ## 路由分组与职责
 
 ### `app/layout.tsx`

@@ -148,6 +148,16 @@ test("buildGenerationSubagents exposes subagents only for generation phases", ()
   assert.match(String(generateSubagents[0]?.systemPrompt), /throughput optimization/);
   assert.match(String(generateSubagents[0]?.systemPrompt), /Do not edit files outside your assigned ownership/);
 
+  const guardedSubagents = buildGenerationSubagents(
+    "generate",
+    false,
+    "## Host-Enforced Project Config Guard\nDo not edit `next.config.ts`.",
+  );
+  assert.equal(guardedSubagents.length, 3);
+  assert.match(String(guardedSubagents[0]?.systemPrompt), /Host-Enforced Project Config Guard/);
+  assert.match(String(guardedSubagents[1]?.systemPrompt), /next\.config\.ts/);
+  assert.match(String(guardedSubagents[2]?.systemPrompt), /Do not edit `next\.config\.ts`/);
+
   const repairSubagents = buildGenerationSubagents("generateRepair", false);
   assert.equal(repairSubagents.length, 3);
   assert.equal("skills" in repairSubagents[0]!, false);

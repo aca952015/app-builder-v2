@@ -16,6 +16,11 @@
       "SYSTEM_USER_PASSWORD"
     ]
   },
+  "projectConfigPolicy": {
+    "guardedFiles": [
+      "next.config.ts"
+    ]
+  },
   "phases": {
     "plan": {
       "prompt": "prompts/plan-system-prompt.md",

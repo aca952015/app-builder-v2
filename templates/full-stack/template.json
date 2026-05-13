@@ -15,6 +15,11 @@
       "SESSION_SECRET"
     ]
   },
+  "projectConfigPolicy": {
+    "guardedFiles": [
+      "next.config.ts"
+    ]
+  },
   "phases": {
     "plan": {
       "prompt": "prompts/plan-system-prompt.md",

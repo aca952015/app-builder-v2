@@ -33,6 +33,9 @@
 - 对每个失败相关的 `interactionContract.externalOperations[*]`，必须按 endpointPath、authSource、parameterFormat、responseFields 和 reference provenance 修复 API route；不要凭记忆猜 endpoint 或参数顺序
 - 如果失败项提到 `.env.example`、`planSpec.environmentVariables` 或环境变量缺失/不一致，不要直接修补根目录 `/.env.example`；host 会从 starter `.env.example` 和 `planSpec.environmentVariables` 合并最终文件
 - 不要写入或修改根目录 `/.env`、`/.env.example`，也不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；如失败项来自锁定变量冲突，应保持代码兼容 starter 默认值并等待计划阶段修正冲突
+- `next.config.ts` 是模板受保护项目配置文件。只有当 `planSpec.projectConfigChanges` 中存在 `filePath: "next.config.ts"` 且同时包含明确 `reason` 与 `prdEvidence` 时，才允许先读取再最小化修改该文件。
+- 如果 `planSpec.projectConfigChanges` 没有声明 `next.config.ts`，不得创建、修改、删除、重写 `next.config.ts`，也不得把它列入 `filesWritten`；如果失败项来自未授权修改，应撤销这类修改而不是在生成修复阶段补写计划声明。
+- 修改 `next.config.ts` 时，改动必须只覆盖 `prdEvidence` 支持的配置项，禁止顺带重写 starter 其他配置。
 - 如果失败项来自运行验证，必须结合 `artifacts.runtimeValidationLog` 的真实输出修复，并确保输入里的 `template.runtimeValidation` 步骤可以通过
 - 如果失败项来自交互式运行验证，必须结合 `artifacts.runtimeInteractionValidation` 与 `artifacts.runtimeValidationLog` 中记录的代理 HTTP 请求/响应、5xx 响应体摘要、failureChain、dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线，确保用户访问运行验证代理 URL 时不再产生编译或运行时错误
 - 如果 `validationFailures` 包含“用户在运行验证页提交实现要求”，必须把该要求视为本轮修复目标：在不改写 `planSpec` 的前提下，按现有页面、资源和 API 边界做最小可行实现，并同步更新 `app-builder-report.md`

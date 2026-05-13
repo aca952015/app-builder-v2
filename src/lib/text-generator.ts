@@ -225,6 +225,59 @@ async function composeInlineSystemPrompt(
   return composeStageSystemPrompt(stage, templatePrompt, sessionPolicy);
 }
 
+function normalizeWorkspaceRelativePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "");
+}
+
+function buildProjectConfigGuardPrompt(
+  runtime: Pick<TextGeneratorRuntime, "templateProjectConfigPolicy">,
+  planSpec?: PlanSpec,
+): string {
+  const guardedFiles = Array.from(
+    new Set(
+      runtime.templateProjectConfigPolicy.guardedFiles
+        .map((filePath) => normalizeWorkspaceRelativePath(filePath))
+        .filter(Boolean),
+    ),
+  );
+  if (guardedFiles.length === 0 || !planSpec) {
+    return "";
+  }
+
+  const declaredFiles = new Set(
+    (planSpec.projectConfigChanges ?? [])
+      .map((change) => normalizeWorkspaceRelativePath(change.filePath))
+      .filter(Boolean),
+  );
+  const undeclaredGuardedFiles = guardedFiles.filter((filePath) => !declaredFiles.has(filePath));
+  if (undeclaredGuardedFiles.length === 0) {
+    return "";
+  }
+
+  if ((planSpec.projectConfigChanges ?? []).length === 0) {
+    return [
+      "## Host-Enforced Project Config Guard",
+      "",
+      "`artifacts.planSpec.projectConfigChanges` is absent or empty for this phase.",
+      `Therefore this phase and every subagent are explicitly forbidden to create, modify, delete, rewrite, or list in \`filesWritten\` these protected project configuration files: ${undeclaredGuardedFiles.map((filePath) => `\`${filePath}\``).join(", ")}.`,
+      "If a configuration edit appears necessary, stop and report that the PRD/planSpec must first declare a project config change with `reason` and `prdEvidence`; do not add that declaration during generation.",
+    ].join("\n");
+  }
+
+  return [
+    "## Host-Enforced Project Config Guard",
+    "",
+    `Only project configuration files declared in \`artifacts.planSpec.projectConfigChanges\` may be edited. Do not create, modify, delete, rewrite, or list in \`filesWritten\` these undeclared protected files: ${undeclaredGuardedFiles.map((filePath) => `\`${filePath}\``).join(", ")}.`,
+  ].join("\n");
+}
+
+function appendProjectConfigGuard(systemPrompt: string, guardPrompt: string): string {
+  if (guardPrompt.trim() === "") {
+    return systemPrompt;
+  }
+  return `${systemPrompt.trimEnd()}\n\n${guardPrompt}\n`;
+}
+
 export async function materializeSessionPromptSnapshots(
   runtime: Pick<
     TextGeneratorRuntime,
@@ -274,6 +327,35 @@ export async function materializeSessionPromptSnapshots(
   );
 }
 
+export async function materializeGenerationPromptSnapshot(
+  runtime: Pick<
+    TextGeneratorRuntime,
+    | "deepagentsAgentsPath"
+    | "templateGeneratePromptPath"
+    | "templateGenerateRepairPromptPath"
+    | "deepagentsGeneratePromptSnapshotPath"
+    | "deepagentsGenerateRepairPromptSnapshotPath"
+    | "templateProjectConfigPolicy"
+  >,
+  planSpec: PlanSpec,
+  stage: Extract<SessionPolicyStage, "generate" | "generate_repair">,
+): Promise<void> {
+  const promptPath = stage === "generate"
+    ? runtime.templateGeneratePromptPath
+    : runtime.templateGenerateRepairPromptPath;
+  const snapshotPath = stage === "generate"
+    ? runtime.deepagentsGeneratePromptSnapshotPath
+    : runtime.deepagentsGenerateRepairPromptSnapshotPath;
+  const baseSystemPrompt = await loadSystemPrompt(runtime, promptPath, stage);
+  const projectConfigGuardPrompt = buildProjectConfigGuardPrompt(runtime, planSpec);
+
+  await fs.writeFile(
+    snapshotPath,
+    appendProjectConfigGuard(baseSystemPrompt, projectConfigGuardPrompt),
+    "utf8",
+  );
+}
+
 async function pathExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
@@ -318,6 +400,7 @@ export function buildPlanSpecHardConstraints(
         "artifacts.planSpec 必须通过这里提供的 schema 校验后，才允许结束当前阶段并返回结构化响应。",
         "可选字符串字段如果没有值，必须省略，不能写成空字符串。",
         "必填字符串字段必须提供非空字符串。",
+        "只有当 PRD 分析明确要求项目配置变更时，才允许在 artifacts.planSpec.projectConfigChanges 中声明对应配置文件、原因和 PRD 证据。",
       ],
     },
     interactionContractValidation: {
@@ -378,6 +461,7 @@ export function buildPlanProjectPayload(
       runtimeValidation: runtime.templateRuntimeValidation,
       interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
       environmentPolicy: runtime.templateEnvironmentPolicy,
+      projectConfigPolicy: runtime.templateProjectConfigPolicy,
     },
     planPolicy: {
       planSpecVersion: 1,
@@ -417,6 +501,7 @@ export function buildPlanRepairPayload(runtime: TextGeneratorRuntime): Record<st
       runtimeValidation: runtime.templateRuntimeValidation,
       interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
       environmentPolicy: runtime.templateEnvironmentPolicy,
+      projectConfigPolicy: runtime.templateProjectConfigPolicy,
     },
     planRepairPolicy: {
       planSpecVersion: 1,
@@ -2231,6 +2316,7 @@ function resolveConstructorModelRoles(options?: DeepAgentsTextGeneratorOptions):
 export function buildGenerationSubagents(
   runtimePhase: RuntimeStatusPhase,
   includeTemplateSkills: boolean,
+  projectConfigGuardPrompt = "",
 ): Array<Record<string, unknown>> {
   if (runtimePhase !== "generate" && runtimePhase !== "generateRepair" && runtimePhase !== "generate_repair") {
     return [];
@@ -2244,7 +2330,8 @@ export function buildGenerationSubagents(
     "Do not edit files outside your assigned ownership. If the work appears coupled or conflict-prone, report that it should be handled by the main agent instead.",
     "Subagents are allowed only as a throughput optimization for genuinely parallel work; if your slice cannot proceed independently, stop and report the blocker.",
     "Return one concise final report listing files touched, work completed, blockers, and validation gaps.",
-  ].join("\n");
+    projectConfigGuardPrompt.trim(),
+  ].filter(Boolean).join("\n");
   const withSkills = (subagent: Record<string, unknown>): Record<string, unknown> => (
     skills ? { ...subagent, skills } : subagent
   );
@@ -2309,9 +2396,18 @@ export class DeepAgentsTextGenerator implements TextGenerator {
           ? runtime.templatePhases.planRepair?.effort
           : runtime.templatePhases.generateRepair?.effort,
     );
-    const systemPrompt = options.systemPrompt !== undefined
+    const payloadPlanSpec = planSpecSchema.safeParse(options.payload.planSpec);
+    const projectConfigGuardPrompt = buildProjectConfigGuardPrompt(
+      runtime,
+      payloadPlanSpec.success ? payloadPlanSpec.data : undefined,
+    );
+    const baseSystemPrompt = options.systemPrompt !== undefined
       ? await composeInlineSystemPrompt(runtime, options.systemPrompt, options.stage)
       : await loadSystemPrompt(runtime, options.promptPath as string, options.stage);
+    const systemPrompt =
+      options.stage === "generate" || options.stage === "generate_repair"
+        ? appendProjectConfigGuard(baseSystemPrompt, projectConfigGuardPrompt)
+        : baseSystemPrompt;
     const skillsDirectory = path.join(runtime.templateDirectory, "skills");
 
     await fs.writeFile(options.promptSnapshotPath, systemPrompt, "utf8");
@@ -2327,7 +2423,11 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       agentOptions.skills = ["/.deepagents/skills"];
     }
 
-    const generationSubagents = buildGenerationSubagents(runtimePhase, hasTemplateSkills);
+    const generationSubagents = buildGenerationSubagents(
+      runtimePhase,
+      hasTemplateSkills,
+      projectConfigGuardPrompt,
+    );
     if (generationSubagents.length > 0) {
       agentOptions.subagents = generationSubagents;
     }
@@ -2532,6 +2632,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             runtimeValidation: runtime.templateRuntimeValidation,
             interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
             environmentPolicy: runtime.templateEnvironmentPolicy,
+            projectConfigPolicy: runtime.templateProjectConfigPolicy,
           },
           generationPolicy: {
             dataMode: "rest_api",
@@ -2586,6 +2687,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
             runtimeValidation: runtime.templateRuntimeValidation,
             interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
             environmentPolicy: runtime.templateEnvironmentPolicy,
+            projectConfigPolicy: runtime.templateProjectConfigPolicy,
           },
           generationRepairPolicy: {
             dataMode: "rest_api",

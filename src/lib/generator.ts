@@ -25,7 +25,11 @@ import { prepareOutputWorkspace, writeDeepagentsConfig } from "./output-workspac
 import { parsePrd } from "./prd-parser.js";
 import { extractExternalReferenceDrafts, normalizeSpec } from "./spec-normalizer.js";
 import { copyStarterScaffold, loadTemplatePack, stageTemplatePack } from "./template-pack.js";
-import { DeepAgentsTextGenerator, materializeSessionPromptSnapshots } from "./text-generator.js";
+import {
+  DeepAgentsTextGenerator,
+  materializeGenerationPromptSnapshot,
+  materializeSessionPromptSnapshots,
+} from "./text-generator.js";
 import {
   closeRuntimeInteractionValidationSession,
   runInteractiveRuntimeValidation,
@@ -62,6 +66,7 @@ import {
   type TemplateRepairRetries,
   type TemplateInteractiveRuntimeValidation,
   type TemplateEnvironmentPolicy,
+  type TemplateProjectConfigPolicy,
   type TemplatePhaseEffort,
   type TemplateRuntimeValidation,
   type TemplateRuntimeValidationStep,
@@ -80,6 +85,7 @@ const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 const DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY = 8;
 const DESIGN_ARTIFACT_RELATIVE_PATH = "DESIGN.md";
 const STARTER_ENV_EXAMPLE_SNAPSHOT_FILE = "starter.env.example";
+const STARTER_PROJECT_CONFIG_SNAPSHOT_FILE = "starter.project-config.json";
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段" | "运行验证修复阶段";
 
 function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
@@ -95,6 +101,10 @@ function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
 
 function defaultTemplateEnvironmentPolicy(): TemplateEnvironmentPolicy {
   return { lockedKeys: [] };
+}
+
+function defaultTemplateProjectConfigPolicy(): TemplateProjectConfigPolicy {
+  return { guardedFiles: [] };
 }
 
 function slugifyReferenceUrl(url: string): string {
@@ -1072,9 +1082,22 @@ async function pathExists(filePath: string): Promise<boolean> {
 }
 
 type EnvExampleVariable = NonNullable<PlanSpec["environmentVariables"]>[number];
+type ProjectConfigChange = NonNullable<PlanSpec["projectConfigChanges"]>[number];
+type StarterProjectConfigSnapshot = {
+  version: 1;
+  files: Array<{
+    path: string;
+    exists: boolean;
+    contents?: string;
+  }>;
+};
 
 function starterEnvExampleSnapshotPath(runtime: Pick<TextGeneratorRuntime, "deepagentsDirectory">): string {
   return path.join(runtime.deepagentsDirectory, STARTER_ENV_EXAMPLE_SNAPSHOT_FILE);
+}
+
+function starterProjectConfigSnapshotPath(runtime: Pick<TextGeneratorRuntime, "deepagentsDirectory">): string {
+  return path.join(runtime.deepagentsDirectory, STARTER_PROJECT_CONFIG_SNAPSHOT_FILE);
 }
 
 async function snapshotStarterEnvExample(outputDirectory: string, deepagentsDirectory: string): Promise<void> {
@@ -1090,9 +1113,52 @@ async function snapshotStarterEnvExample(outputDirectory: string, deepagentsDire
   );
 }
 
+function normalizeProjectConfigPath(filePath: string): string {
+  return normalizeRelativePath(filePath).replace(/^\.\//, "");
+}
+
+function collectGuardedProjectConfigFiles(policy: TemplateProjectConfigPolicy): string[] {
+  return uniqueValues(policy.guardedFiles.map((filePath) => normalizeProjectConfigPath(filePath)));
+}
+
+async function snapshotStarterProjectConfigFiles(
+  outputDirectory: string,
+  deepagentsDirectory: string,
+  policy: TemplateProjectConfigPolicy,
+): Promise<void> {
+  const guardedFiles = collectGuardedProjectConfigFiles(policy);
+  if (guardedFiles.length === 0) {
+    return;
+  }
+
+  const snapshot: StarterProjectConfigSnapshot = {
+    version: 1,
+    files: [],
+  };
+
+  for (const guardedFile of guardedFiles) {
+    const contents = await readIfExists(path.join(outputDirectory, guardedFile));
+    snapshot.files.push({
+      path: guardedFile,
+      exists: contents !== null,
+      ...(contents !== null ? { contents } : {}),
+    });
+  }
+
+  await fs.writeFile(
+    path.join(deepagentsDirectory, STARTER_PROJECT_CONFIG_SNAPSHOT_FILE),
+    `${JSON.stringify(snapshot, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 function collectEnvExampleVariables(planSpec: PlanSpec): EnvExampleVariable[] {
   return (planSpec.environmentVariables ?? [])
     .filter((variable) => (variable.targetFile ?? ".env.example") === ".env.example");
+}
+
+function collectProjectConfigChanges(planSpec: PlanSpec): ProjectConfigChange[] {
+  return planSpec.projectConfigChanges ?? [];
 }
 
 function parseEnvAssignmentLine(rawLine: string): { key: string } | null {
@@ -1361,6 +1427,88 @@ async function collectEnvironmentVariableIssues(
   }
 
   return issues;
+}
+
+async function readStarterProjectConfigSnapshot(
+  runtime: Pick<TextGeneratorRuntime, "deepagentsDirectory">,
+): Promise<StarterProjectConfigSnapshot | null> {
+  const snapshotContents = await readIfExists(starterProjectConfigSnapshotPath(runtime));
+  if (!snapshotContents || snapshotContents.trim().length === 0) {
+    return null;
+  }
+
+  const parsed = JSON.parse(snapshotContents) as Partial<StarterProjectConfigSnapshot>;
+  if (parsed.version !== 1 || !Array.isArray(parsed.files)) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    files: parsed.files.flatMap((file) => {
+      if (
+        !file ||
+        typeof file.path !== "string" ||
+        file.path.trim() === "" ||
+        typeof file.exists !== "boolean"
+      ) {
+        return [];
+      }
+
+      const normalizedPath = normalizeProjectConfigPath(file.path);
+      return [{
+        path: normalizedPath,
+        exists: file.exists,
+        ...(typeof file.contents === "string" ? { contents: file.contents } : {}),
+      }];
+    }),
+  };
+}
+
+async function collectProjectConfigPolicyIssues(
+  outputDirectory: string,
+  runtime: TextGeneratorRuntime,
+  planSpec: PlanSpec,
+): Promise<string[]> {
+  const policy = runtime.templateProjectConfigPolicy ?? defaultTemplateProjectConfigPolicy();
+  const guardedFiles = collectGuardedProjectConfigFiles(policy);
+  if (guardedFiles.length === 0) {
+    return [];
+  }
+
+  const guardedSet = new Set(guardedFiles);
+  const snapshot = await readStarterProjectConfigSnapshot(runtime);
+  if (!snapshot) {
+    return [];
+  }
+
+  const declaredChanges = new Set(
+    collectProjectConfigChanges(planSpec).map((change) => normalizeProjectConfigPath(change.filePath)),
+  );
+  const unauthorizedChangedFiles: string[] = [];
+
+  for (const file of snapshot.files) {
+    const guardedFile = normalizeProjectConfigPath(file.path);
+    if (!guardedSet.has(guardedFile)) {
+      continue;
+    }
+
+    const currentContents = await readIfExists(path.join(outputDirectory, guardedFile));
+    const changed = file.exists
+      ? currentContents !== (file.contents ?? "")
+      : currentContents !== null;
+
+    if (changed && !declaredChanges.has(guardedFile)) {
+      unauthorizedChangedFiles.push(guardedFile);
+    }
+  }
+
+  if (unauthorizedChangedFiles.length === 0) {
+    return [];
+  }
+
+  return [
+    `生成阶段未完成：受保护项目配置文件被修改但 artifacts.planSpec.projectConfigChanges 未声明来自 PRD 分析的项目配置变更：${unauthorizedChangedFiles.join(", ")}。只有 PRD 明确要求项目配置变更时才允许编辑这些文件。`,
+  ];
 }
 
 function resolveAppPrefixedPath(outputDirectory: string, filePath: string): string {
@@ -2213,6 +2361,7 @@ async function collectPersistedGeneratedValidation(
   const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
   const environmentPolicyIssues = await reconcileHostManagedEnvironment(runtime, planSpec);
   const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, runtime, planSpec);
+  const projectConfigIssues = await collectProjectConfigPolicyIssues(outputDirectory, runtime, planSpec);
 
   if (coverage.missingApiPaths.length > 0) {
     reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
@@ -2225,7 +2374,7 @@ async function collectPersistedGeneratedValidation(
   if (missingAcceptanceChecks.length > 0) {
     reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
   }
-  reasons.push(...environmentPolicyIssues, ...environmentIssues);
+  reasons.push(...environmentPolicyIssues, ...environmentIssues, ...projectConfigIssues);
 
   let steps: GenerationValidationStep[] = [];
   if (reasons.length === 0) {
@@ -2299,6 +2448,7 @@ async function validateGeneratedArtifacts(
       const missingAcceptanceChecks = collectMissingDeliveryAcceptanceChecks(planSpec, coverage);
       const environmentPolicyIssues = await reconcileHostManagedEnvironment(runtime, planSpec);
       const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, runtime, planSpec);
+      const projectConfigIssues = await collectProjectConfigPolicyIssues(outputDirectory, runtime, planSpec);
       if (coverage.missingPageRoutes.length > 0) {
         reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
       }
@@ -2308,7 +2458,7 @@ async function validateGeneratedArtifacts(
       if (missingAcceptanceChecks.length > 0) {
         reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
       }
-      reasons.push(...environmentPolicyIssues, ...environmentIssues);
+      reasons.push(...environmentPolicyIssues, ...environmentIssues, ...projectConfigIssues);
 
       let steps: GenerationValidationStep[] = [];
       if (reasons.length === 0) {
@@ -2504,6 +2654,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
   let templateRuntimeValidation = defaultTemplateRuntimeValidation();
   let templateInteractiveRuntimeValidation = defaultTemplateInteractiveRuntimeValidation();
   let templateEnvironmentPolicy = defaultTemplateEnvironmentPolicy();
+  let templateProjectConfigPolicy = defaultTemplateProjectConfigPolicy();
   let persistedModelName: string | undefined;
   let persistedModelRoles: Partial<SanitizedModelRoleConfigMap> = {};
   let designArtifactRelativePath: string | undefined;
@@ -2526,6 +2677,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
           runtimeValidation?: unknown;
           interactiveRuntimeValidation?: unknown;
           environmentPolicy?: unknown;
+          projectConfigPolicy?: unknown;
         };
       };
       if (typeof parsed.model === "string" && parsed.model.trim() !== "") {
@@ -2700,6 +2852,21 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
           };
         }
       }
+      if (
+        parsed.template?.projectConfigPolicy &&
+        typeof parsed.template.projectConfigPolicy === "object" &&
+        !Array.isArray(parsed.template.projectConfigPolicy)
+      ) {
+        const candidate = parsed.template.projectConfigPolicy as Partial<TemplateProjectConfigPolicy>;
+        if (
+          Array.isArray(candidate.guardedFiles) &&
+          candidate.guardedFiles.every((filePath) => typeof filePath === "string" && filePath.trim() !== "")
+        ) {
+          templateProjectConfigPolicy = {
+            guardedFiles: Array.from(new Set(candidate.guardedFiles.map((filePath) => normalizeProjectConfigPath(filePath)))),
+          };
+        }
+      }
     } catch {
       // Ignore malformed config here; phase validation will report durable artifact failures separately.
     }
@@ -2749,6 +2916,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     templateRuntimeValidation,
     templateInteractiveRuntimeValidation,
     templateEnvironmentPolicy,
+    templateProjectConfigPolicy,
     modelRoles,
   };
 }
@@ -3932,6 +4100,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       templateRuntimeValidation: template.runtimeValidation,
       templateInteractiveRuntimeValidation: template.interactiveRuntimeValidation,
       templateEnvironmentPolicy: template.environmentPolicy,
+      templateProjectConfigPolicy: template.projectConfigPolicy,
       modelRoles,
       ...overrides,
     });
@@ -3965,6 +4134,20 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
           metadata: { templateId: template.id },
         },
         async () => await snapshotStarterEnvExample(workspace.outputDirectory, workspace.deepagentsDirectory),
+      );
+      await measureWorkflowStep(
+        workspace.deepagentsMetricsLogPath,
+        workspace.sessionId,
+        {
+          name: "workspace.snapshot_project_config",
+          phase: "workspace",
+          metadata: { templateId: template.id },
+        },
+        async () => await snapshotStarterProjectConfigFiles(
+          workspace.outputDirectory,
+          workspace.deepagentsDirectory,
+          template.projectConfigPolicy,
+        ),
       );
 
       if (designSourcePath) {
@@ -4260,6 +4443,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         generateAttempt: 1,
         retryReasons: [],
       });
+      await materializeGenerationPromptSnapshot(initialRuntime, approvedPlan, "generate");
       let generatedProject: GeneratedProject;
       try {
         generatedProject = await measureRuntimeStep(
@@ -4322,6 +4506,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         generateAttempt: repairIndex + 2,
         retryReasons: generationRetryReasons,
       });
+      await materializeGenerationPromptSnapshot(repairRuntime, approvedPlan, "generate_repair");
       let repairedProject: GeneratedProject;
       try {
         repairedProject = await measureRuntimeStep(

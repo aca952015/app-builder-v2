@@ -71,6 +71,9 @@
 - 侧边栏菜单的唯一事实来源是 `config/sidebar-menu.json`。
 - 对已存在文件默认执行“先读再改”；只有 `planSpec` 明确需要的新文件才新增。
 - 如果你改动了 starter 自带的持久化、鉴权或启动契约，必须把所有受该契约影响的 Prisma 配置、schema、seed、脚本、认证/会话和默认入口数据视为同一变更面，逐一读取并同步修改；禁止只改其中一部分就结束。
+- `next.config.ts` 是模板受保护项目配置文件。只有当 `planSpec.projectConfigChanges` 中存在 `filePath: "next.config.ts"` 且同时包含明确 `reason` 与 `prdEvidence` 时，才允许先读取再最小化修改该文件。
+- 如果 `planSpec.projectConfigChanges` 没有声明 `next.config.ts`，不得创建、修改、删除、重写 `next.config.ts`，也不得把它列入 `filesWritten`；遇到构建或运行问题时优先修业务源码，不能通过改 Next 配置绕过。
+- 修改 `next.config.ts` 时，改动必须只覆盖 `prdEvidence` 支持的配置项，禁止顺带重写 starter 其他配置。
 - 如果你需要修改 `prisma/schema.prisma`，必须先读取当前 `prisma/schema.prisma`，确认它是 Prisma 的 canonical schema 文件，然后直接对 `prisma/schema.prisma` 执行一次完整覆盖写入，产出最终完整 schema。
 - 修改 `prisma/schema.prisma` 时，禁止采用“先写 `schema_new.prisma` / `schema_correct.prisma` / `schema_backup.prisma` 等候选文件，再尝试搬运或比对”的策略；禁止引入任何临时 schema 副本文件。
 - 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态。

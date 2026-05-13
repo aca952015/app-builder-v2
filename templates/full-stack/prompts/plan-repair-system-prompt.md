@@ -61,6 +61,9 @@
 - 如果失败项或现有 PRD 镜像涉及外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须补入 `planSpec.references`，并同步 `artifacts.generatedSpec` 的 `References` 章节。
 - 如果失败项或现有 PRD 镜像涉及“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，必须补入 `planSpec.environmentVariables`；但不要写入 `template.environmentPolicy.lockedKeys` 中的 key，若失败项来自锁定变量冲突，应移除该条目而不是改 starter 默认值。
 - `planSpec.environmentVariables[*].targetFile` 写 `.env.example`；新增环境变量最终由 host 合并进 `.env.example`。
+- `next.config.ts` 属于 `template.projectConfigPolicy.guardedFiles` 保护的项目配置文件。只有当失败项或现有 PRD 镜像明确显示 PRD 要求修改 Next.js/项目配置时，才允许补入 `planSpec.projectConfigChanges`。
+- 若补入 `next.config.ts` 配置变更，`planSpec.projectConfigChanges[*].filePath` 必须写 `next.config.ts`，`reason` 必须说明需要改的配置项，`prdEvidence` 必须引用 PRD 中的明确证据。
+- 如果没有明确 PRD 证据，不要为通过生成阶段而补写 `projectConfigChanges`；应保持 `next.config.ts` 不可编辑。
 - 如果输入包含 `externalReferences`、`localReferences` 或 `artifacts.referenceManifest` 中已有下载成功的本地资料，外部 API endpoint、认证方式、参数格式/顺序和响应字段必须先读取并优先来自这些本地文件；不要凭记忆猜测。
 - `planSpec.references[*]` 对应已下载资料时必须填写 `localPath`、`retrievedAt`、`contentType`、`retrievalStatus`；`artifacts.generatedSpec` 的 References 章节必须在远程 URL 旁写出同一个本地路径。
 - `planSpec.references` 只描述参考资料本身，不要求也不提供 `relatedApis`、`apiPaths` 之类的绑定字段。

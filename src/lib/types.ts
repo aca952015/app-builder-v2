@@ -276,11 +276,16 @@ export type TemplatePack = {
   runtimeValidation: TemplateRuntimeValidation;
   interactiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
   environmentPolicy: TemplateEnvironmentPolicy;
+  projectConfigPolicy: TemplateProjectConfigPolicy;
   hash: string;
 };
 
 export type TemplateEnvironmentPolicy = {
   lockedKeys: string[];
+};
+
+export type TemplateProjectConfigPolicy = {
+  guardedFiles: string[];
 };
 
 export type TemplateLock = {
@@ -294,6 +299,7 @@ export type TemplateLock = {
   runtimeValidation: TemplateRuntimeValidation;
   interactiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
   environmentPolicy: TemplateEnvironmentPolicy;
+  projectConfigPolicy: TemplateProjectConfigPolicy;
   hash: string;
   stagedAt: string;
   workspaceTemplateDirectory: string;
@@ -368,6 +374,7 @@ export type TextGeneratorRuntime = {
   templateRuntimeValidation: TemplateRuntimeValidation;
   templateInteractiveRuntimeValidation: TemplateInteractiveRuntimeValidation;
   templateEnvironmentPolicy: TemplateEnvironmentPolicy;
+  templateProjectConfigPolicy: TemplateProjectConfigPolicy;
   modelRoles: ModelRoleConfigMap;
 };
 

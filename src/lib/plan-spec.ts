@@ -108,6 +108,11 @@ export const planSpecSchema = z.object({
     contentType: z.string().min(1).optional(),
     retrievalStatus: z.enum(["downloaded", "failed", "skipped"]).optional(),
   })).optional(),
+  projectConfigChanges: z.array(z.object({
+    filePath: z.string().min(1),
+    reason: z.string().min(1),
+    prdEvidence: z.string().min(1),
+  })).optional(),
   assumptions: z.array(z.string().min(1)).default([]),
   acceptanceChecks: z.array(z.object({
     id: z.string().min(1),

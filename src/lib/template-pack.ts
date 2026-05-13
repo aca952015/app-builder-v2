@@ -12,6 +12,7 @@ import {
   TemplateEnvironmentPolicy,
   TemplateLock,
   TemplatePack,
+  TemplateProjectConfigPolicy,
   TemplateRepairRetries,
   TemplateRuntimeValidation,
   TemplateRuntimeValidationStep,
@@ -40,6 +41,10 @@ const defaultInteractiveRuntimeValidation: Omit<TemplateInteractiveRuntimeValida
 
 const defaultEnvironmentPolicy: TemplateEnvironmentPolicy = {
   lockedKeys: [],
+};
+
+const defaultProjectConfigPolicy: TemplateProjectConfigPolicy = {
+  guardedFiles: [],
 };
 
 export const DEFAULT_TEMPLATE_ID = "full-stack";
@@ -113,6 +118,7 @@ type TemplateManifest = {
   runtimeValidation?: TemplateRuntimeValidation;
   interactiveRuntimeValidation?: TemplateInteractiveRuntimeValidation;
   environmentPolicy: TemplateEnvironmentPolicy;
+  projectConfigPolicy: TemplateProjectConfigPolicy;
 };
 
 function assertNonEmptyString(value: unknown, fieldName: string): asserts value is string {
@@ -317,6 +323,51 @@ function parseEnvironmentPolicy(raw: unknown): TemplateEnvironmentPolicy {
   return { lockedKeys };
 }
 
+function normalizeGuardedFilePath(value: string, fieldName: string): string {
+  const normalized = value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "");
+  if (
+    normalized === "" ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../")
+  ) {
+    throw new Error(`Template manifest field "${fieldName}" must be a workspace-relative file path.`);
+  }
+  return normalized;
+}
+
+function parseProjectConfigPolicy(raw: unknown): TemplateProjectConfigPolicy {
+  if (raw === undefined) {
+    return { ...defaultProjectConfigPolicy };
+  }
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error('Template manifest field "projectConfigPolicy" must be an object.');
+  }
+
+  const policy = raw as Record<string, unknown>;
+  if (!Array.isArray(policy.guardedFiles)) {
+    throw new Error('Template manifest field "projectConfigPolicy.guardedFiles" must be an array of strings.');
+  }
+
+  const guardedFiles: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, value] of policy.guardedFiles.entries()) {
+    if (typeof value !== "string" || value.trim() === "") {
+      throw new Error(`Template manifest field "projectConfigPolicy.guardedFiles[${index}]" must be a non-empty string.`);
+    }
+
+    const guardedFile = normalizeGuardedFilePath(value, `projectConfigPolicy.guardedFiles[${index}]`);
+    if (!seen.has(guardedFile)) {
+      guardedFiles.push(guardedFile);
+      seen.add(guardedFile);
+    }
+  }
+
+  return { guardedFiles };
+}
+
 function parseTemplatePhaseConfig(raw: unknown, fieldName: string): TemplatePhaseConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`Template manifest field "${fieldName}" must be an object.`);
@@ -380,6 +431,7 @@ function parseTemplateManifest(raw: unknown): TemplateManifest {
       runtimeValidation,
     ),
     environmentPolicy: parseEnvironmentPolicy(manifest.environmentPolicy),
+    projectConfigPolicy: parseProjectConfigPolicy(manifest.projectConfigPolicy),
   };
 
   if (typeof manifest.description === "string" && manifest.description.trim() !== "") {
@@ -485,6 +537,7 @@ export async function loadTemplatePack(templateId = DEFAULT_TEMPLATE_ID): Promis
     runtimeValidation: manifest.runtimeValidation ?? defaultRuntimeValidation,
     interactiveRuntimeValidation: manifest.interactiveRuntimeValidation ?? { ...defaultInteractiveRuntimeValidation },
     environmentPolicy: manifest.environmentPolicy,
+    projectConfigPolicy: manifest.projectConfigPolicy,
     hash: await hashDirectory(directory),
   };
 }
@@ -549,6 +602,7 @@ export async function stageTemplatePack(
     runtimeValidation: template.runtimeValidation,
     interactiveRuntimeValidation: template.interactiveRuntimeValidation,
     environmentPolicy: template.environmentPolicy,
+    projectConfigPolicy: template.projectConfigPolicy,
     hash: template.hash,
     stagedAt: new Date().toISOString(),
     workspaceTemplateDirectory: path.relative(workspace.outputDirectory, workspace.deepagentsDirectory).split(path.sep).join("/"),
