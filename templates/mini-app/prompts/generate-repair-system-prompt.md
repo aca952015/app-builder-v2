@@ -38,7 +38,7 @@
 - 如果 `planSpec.projectConfigChanges` 没有声明 `next.config.ts`，不得创建、修改、删除、重写 `next.config.ts`，也不得把它列入 `filesWritten`；如果失败项来自未授权修改，应撤销这类修改而不是在生成修复阶段补写计划声明。
 - 修改 `next.config.ts` 时，改动必须只覆盖 `prdEvidence` 支持的配置项，禁止顺带重写 starter 其他配置。
 - 如果失败项来自运行验证，必须结合 `artifacts.runtimeValidationLog` 的真实输出修复，并确保输入里的 `template.runtimeValidation` 步骤可以通过
-- 如果失败项来自非交互式或交互式运行验证，必须结合 `artifacts.runtimeInteractionValidation` 与 `artifacts.runtimeValidationLog` 中记录的 HTTP 请求/响应、5xx 响应体摘要、failureChain、dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线，确保对应页面与 API 被宿主再次访问时不再产生编译、运行时、代理或鉴权错误
+- 如果失败项来自非交互式、交互式或 smoke 运行验证，必须结合 `artifacts.runtimeInteractionValidation` 与 `artifacts.runtimeValidationLog` 中记录的 HTTP 请求/响应、真实浏览器渲染结果、5xx 响应体摘要、failureChain、dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线，确保对应页面与 API 被宿主再次访问或渲染时不再产生编译、运行时、代理、鉴权或空白页错误
 - 如果 `validationFailures` 包含“用户在运行验证页提交实现要求”，必须把该要求视为本轮修复目标：在不改写 `planSpec` 的前提下，按现有页面、资源和 API 边界做最小可行实现，并同步更新 `app-builder-report.md`
 - 如果用户要求明显超出当前 `planSpec` 的业务边界，不要重做计划阶段；只实现与现有 app 兼容的部分，并在 `app-builder-report.md` 记录未覆盖原因
 - `app-builder-report.md` 必须同步维护 “Interaction contract trace” 章节，说明本轮修复后每个相关 contract 项映射到哪些文件、函数或 API route

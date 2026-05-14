@@ -402,7 +402,7 @@ test("runCli generate accepts --skip-validation", async () => {
     const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
 
     await runCli(
-      ["generate", specPath, "--skip-validation", "--runtime-validation-mode", "interactive", "--stdout", "log"],
+      ["generate", specPath, "--skip-validation", "--runtime-validation-mode", "smoke", "--stdout", "log"],
       {
         generator: new CliTestGenerator(),
         validator: new SuccessfulCliValidator(),
@@ -415,7 +415,7 @@ test("runCli generate accepts --skip-validation", async () => {
     assert.equal(stderrLines.length, 0);
     assert.match(stdoutLines.join("\n"), /- command: generate/);
     assert.match(stdoutLines.join("\n"), /- skipValidation: true/);
-    assert.match(stdoutLines.join("\n"), /- runtimeValidationMode: interactive/);
+    assert.match(stdoutLines.join("\n"), /- runtimeValidationMode: smoke/);
     assert.match(stdoutLines.join("\n"), /Generated Field Ops Planner/);
 
     const sessionId = await getOnlySessionId(tempRoot);
@@ -430,6 +430,27 @@ test("runCli generate accepts --skip-validation", async () => {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("runCli rejects an invalid runtime validation mode with all valid choices", async () => {
+  const stdoutLines: string[] = [];
+  const stderrLines: string[] = [];
+
+  await assert.rejects(
+    () =>
+      runCli(
+        ["generate", "tests/fixtures/sample-spec.md", "--runtime-validation-mode", "browser"],
+        {
+          stdout: { log: (line: string) => stdoutLines.push(line) },
+          stderr: { error: (line: string) => stderrLines.push(line) },
+          cwd: process.cwd(),
+        },
+      ),
+    /"non-interactive", "interactive", or "smoke"/,
+  );
+
+  assert.equal(stdoutLines.length, 0);
+  assert.equal(stderrLines.length, 0);
 });
 
 test("runCli generate copies an explicit design document into the output root", async () => {

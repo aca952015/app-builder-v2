@@ -34,7 +34,7 @@ import type {
 } from "./types.js";
 
 type RuntimeInteractionTargetKind = "page" | "api";
-type RuntimeInteractionRequestSource = "proxy" | "dev-server-output" | "non-interactive-probe";
+type RuntimeInteractionRequestSource = "proxy" | "dev-server-output" | "non-interactive-probe" | "browser-smoke";
 
 export type RuntimeInteractionTarget = {
   id: string;
@@ -78,7 +78,7 @@ export type RuntimeInteractionValidationArtifact = {
   proxyUrl?: string;
   validationUrl?: string;
   manualCompleted?: boolean;
-  completionMode?: "manual_override" | "coverage_proven" | "automated_probe";
+  completionMode?: "manual_override" | "coverage_proven" | "automated_probe" | "browser_smoke";
   coverageSatisfied: boolean;
   criticalUncoveredTargets: string[];
   implementationRequest?: RuntimeInteractionImplementationRequest;
@@ -166,6 +166,35 @@ export type BrowserOpenResult = {
   error?: string;
 };
 
+export type SmokeConsoleMessage = {
+  type(): string;
+  text(): string;
+  location?(): { url?: string; lineNumber?: number; columnNumber?: number };
+};
+
+export type SmokeResponse = {
+  status(): number;
+  url(): string;
+};
+
+export type SmokePage = {
+  on(event: "console", listener: (message: SmokeConsoleMessage) => void): unknown;
+  on(event: "pageerror", listener: (error: Error) => void): unknown;
+  on(event: "response", listener: (response: SmokeResponse) => void): unknown;
+  goto(url: string, options: { waitUntil: "networkidle"; timeout: number }): Promise<SmokeResponse | null>;
+  evaluate<T>(pageFunction: () => T | Promise<T>): Promise<T>;
+  close?(): Promise<void>;
+};
+
+export type SmokeBrowser = {
+  newPage(): Promise<SmokePage>;
+  close(): Promise<void>;
+};
+
+export type SmokeBrowserLauncher = {
+  launch(options: { headless: boolean }): Promise<SmokeBrowser>;
+};
+
 export type RuntimeInteractionValidationSession = {
   devPort?: number;
   proxyPort?: number;
@@ -186,6 +215,7 @@ export type RuntimeInteractionValidationSession = {
 const MAX_RECORDED_REQUESTS = 100;
 const REQUEST_POLL_INTERVAL_MS = 200;
 const DEFAULT_NON_INTERACTIVE_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_SMOKE_NAVIGATION_TIMEOUT_MS = 30_000;
 const MAX_DEV_SERVER_OUTPUT_CHARS = 40_000;
 const MAX_RESPONSE_BODY_CAPTURE_BYTES = 32_768;
 const MAX_RESPONSE_BODY_SUMMARY_CHARS = 6_000;
@@ -1177,6 +1207,50 @@ async function probeRuntimeInteractionTarget(options: {
   });
 }
 
+function buildRuntimeSmokeTargets(planSpec: PlanSpec): RuntimeInteractionTarget[] {
+  return buildRuntimeInteractionTargets(planSpec).filter((target) => target.kind === "page");
+}
+
+async function loadPlaywrightChromium(): Promise<SmokeBrowserLauncher> {
+  try {
+    const playwright = await import("playwright") as { chromium?: SmokeBrowserLauncher };
+    if (!playwright.chromium) {
+      throw new Error("Playwright did not expose a Chromium launcher.");
+    }
+    return playwright.chromium;
+  } catch (error) {
+    throw new Error(
+      [
+        `无法加载 Playwright：${errorSummary(error)}`,
+        "请确认依赖已安装：pnpm install。",
+      ].join(" "),
+    );
+  }
+}
+
+function addPlaywrightBrowserInstallHint(message: string): string {
+  if (/playwright\s+install|executable doesn't exist|browser executable|install browsers/i.test(message)) {
+    return `${message} 请安装 Playwright Chromium：pnpm exec playwright install chromium。`;
+  }
+  return message;
+}
+
+function formatSmokeConsoleMessage(message: SmokeConsoleMessage): string {
+  const location = message.location?.();
+  const where = location?.url
+    ? ` (${location.url}${location.lineNumber !== undefined ? `:${location.lineNumber}` : ""})`
+    : "";
+  return `${message.type()}: ${message.text()}${where}`;
+}
+
+function responseBelongsToDevServer(response: SmokeResponse, devServerUrl: string): boolean {
+  try {
+    return new URL(response.url()).origin === devServerUrl;
+  } catch {
+    return response.url().startsWith(devServerUrl);
+  }
+}
+
 function buildRuntimeInteractionArtifact(options: {
   valid: boolean;
   reasons: string[];
@@ -2040,6 +2114,367 @@ export async function runNonInteractiveRuntimeValidation(options: {
   } finally {
     child?.stdout?.off("data", recordDevServerOutput);
     child?.stderr?.off("data", recordDevServerOutput);
+    if ((child || managedDevServer) && !devServerProcessCleanup) {
+      stopping = true;
+      if (managedDevServer) {
+        await terminateManagedDevServerProcess(managedDevServer);
+      } else if (child) {
+        await terminateDevServerProcess(child);
+      }
+    }
+  }
+}
+
+export async function runSmokeRuntimeValidation(options: {
+  runtime: TextGeneratorRuntime;
+  planSpec: PlanSpec;
+  devServerStep: TemplateRuntimeValidationStep;
+  readyTimeoutMs?: number;
+  navigationTimeoutMs?: number;
+  browserLauncher?: SmokeBrowserLauncher;
+}): Promise<RuntimeInteractionValidationResult> {
+  const startedAt = new Date().toISOString();
+  const targets = buildRuntimeSmokeTargets(options.planSpec);
+  const tracker = new RuntimeInteractionCoverageTracker(targets);
+  const readyTimeoutMs = options.readyTimeoutMs ?? 90_000;
+  const navigationTimeoutMs = options.navigationTimeoutMs ?? DEFAULT_SMOKE_NAVIGATION_TIMEOUT_MS;
+  const devPort = await reserveFreePort();
+  const devServerUrl = `http://127.0.0.1:${devPort}`;
+  const config: TemplateInteractiveRuntimeValidation = {
+    enabled: false,
+    coverageThreshold: 1,
+    idleTimeoutMs: 0,
+    readyTimeoutMs,
+    devServerStep: options.devServerStep,
+  };
+
+  let output = "";
+  let child: ChildProcess | null = null;
+  let managedDevServer: ManagedDevServerProcess | null = null;
+  let devServerProcessCleanup: DevServerProcessCleanupResult | undefined;
+  let browser: SmokeBrowser | null = null;
+  let failureReason: string | null = null;
+  let failureRecord: RuntimeInteractionRequestRecord | undefined;
+  let stopping = false;
+  let pendingOutputLine = "";
+
+  const buildFailureChain = (): RuntimeInteractionFailureChain | undefined => {
+    if (!failureReason) {
+      return undefined;
+    }
+
+    return {
+      reason: failureReason,
+      devServerUrl,
+      ...(failureRecord ? { request: failureRecord } : {}),
+      recentRequests: tracker.getRecentRequests(),
+      recentDevServerOutput: recentOutputLines(output, 24),
+    };
+  };
+
+  const finish = async (valid: boolean, reasons: string[]) => {
+    stopping = true;
+    if (browser) {
+      await browser.close().catch(() => undefined);
+      browser = null;
+    }
+    if (managedDevServer && !devServerProcessCleanup) {
+      devServerProcessCleanup = await terminateManagedDevServerProcess(managedDevServer);
+    } else if (child && !devServerProcessCleanup) {
+      devServerProcessCleanup = await terminateDevServerProcess(child);
+    }
+    child = null;
+    managedDevServer = null;
+
+    const failureChain = buildFailureChain();
+    const artifact = buildRuntimeInteractionArtifact({
+      valid,
+      reasons,
+      validationMode: "smoke",
+      ...(valid ? { completionMode: "browser_smoke" } : {}),
+      devServerUrl,
+      devServerOutput: output,
+      ...(failureReason ? { detectedDevServerError: failureReason } : {}),
+      ...(devServerProcessCleanup ? { devServerProcessCleanup } : {}),
+      startedAt,
+      completedAt: new Date().toISOString(),
+      config,
+      tracker,
+      ...(failureChain ? { failureChain } : {}),
+    });
+    await writeRuntimeInteractionArtifact(options.runtime.deepagentsRuntimeInteractionValidationPath, artifact);
+    return artifact;
+  };
+
+  const recordDevServerOutput = (chunk: Buffer) => {
+    const text = chunk.toString("utf8");
+    const detectedOutputFailure = failureReason
+      ? undefined
+      : detectDevServerOutputFailure(`${output}${text}`) ?? detectDevServerOutputFailure(text);
+    output = appendBoundedDevServerOutput(output, text);
+    void fs.appendFile(options.runtime.deepagentsRuntimeValidationLogPath, text, "utf8");
+
+    const outputWithPending = `${pendingOutputLine}${text}`;
+    const outputLines = outputWithPending.split(/\r?\n/);
+    pendingOutputLine = outputLines.pop() ?? "";
+    for (const line of outputLines) {
+      const requestRecord = parseDevServerRequestLine(line);
+      if (!requestRecord) {
+        continue;
+      }
+      const recordResult = tracker.record(requestRecord);
+      if (!failureReason && recordResult.repairReason) {
+        failureReason = recordResult.repairReason;
+        failureRecord = recordResult.record;
+      }
+    }
+
+    if (!failureReason) {
+      failureReason = detectedOutputFailure ?? detectDevServerOutputFailure(output) ?? null;
+    }
+  };
+
+  await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+    "=== smoke runtime validation ===",
+    `$ PORT=${devPort} HOSTNAME=127.0.0.1 ${[options.devServerStep.command, ...options.devServerStep.args].join(" ")}`,
+    `[smoke] Planned page targets: ${targets.map((target) => target.label).join(", ") || "none"}`,
+    "",
+  ]);
+
+  try {
+    await cleanupStaleNextDevServerBeforeStart({
+      outputDirectory: options.runtime.outputDirectory,
+      logPath: options.runtime.deepagentsRuntimeValidationLogPath,
+    });
+
+    try {
+      managedDevServer = await spawnDevServer({
+        step: options.devServerStep,
+        cwd: options.runtime.outputDirectory,
+        port: devPort,
+      });
+      child = managedDevServer.child;
+    } catch (error) {
+      const reason = `冒烟运行验证无法启动开发服务器：${errorSummary(error)}`;
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] ${reason}`,
+        "",
+      ]);
+      const artifact = await finish(false, [reason]);
+      return {
+        reasons: [reason],
+        steps: [{ name: options.devServerStep.name, ok: false, detail: reason }],
+        artifact,
+      };
+    }
+
+    child.stdout?.on("data", recordDevServerOutput);
+    child.stderr?.on("data", recordDevServerOutput);
+    child.once("exit", (exitCode, signal) => {
+      if (stopping) {
+        return;
+      }
+      failureReason = `开发服务器提前退出，exitCode=${exitCode ?? "null"} signal=${signal ?? "null"}。摘要：${summarizeCommandOutput(output)}`;
+    });
+
+    const readyTimeoutAt = Date.now() + readyTimeoutMs;
+    while (Date.now() < readyTimeoutAt) {
+      if (failureReason) {
+        const artifact = await finish(false, [failureReason]);
+        await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+          `[error] ${failureReason}`,
+          "",
+        ]);
+        return {
+          reasons: [`冒烟运行验证失败：${failureReason} 详见 .deepagents/runtime-validation.log。`],
+          steps: [{ name: options.devServerStep.name, ok: false, detail: failureReason }],
+          artifact,
+        };
+      }
+
+      if (await pingDevServer(devPort)) {
+        break;
+      }
+
+      await sleep(1_000);
+    }
+
+    if (!(await pingDevServer(devPort))) {
+      const reason = `冒烟运行验证等待开发服务器启动超时。摘要：${summarizeCommandOutput(output)}`;
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] ${reason}`,
+        "",
+      ]);
+      const artifact = await finish(false, [reason]);
+      return {
+        reasons: [reason],
+        steps: [{ name: options.devServerStep.name, ok: false, detail: reason }],
+        artifact,
+      };
+    }
+
+    await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+      `[smoke] Dev server ready at ${devServerUrl}.`,
+      "",
+    ]);
+
+    try {
+      const launcher = options.browserLauncher ?? await loadPlaywrightChromium();
+      browser = await launcher.launch({ headless: true });
+    } catch (error) {
+      const reason = `冒烟运行验证无法启动 Playwright Chromium：${addPlaywrightBrowserInstallHint(errorSummary(error))}`;
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] ${reason}`,
+        "",
+      ]);
+      const artifact = await finish(false, [reason]);
+      return {
+        reasons: [reason],
+        steps: [{ name: "browser smoke runtime validation", ok: false, detail: reason }],
+        artifact,
+      };
+    }
+
+    const reasons: string[] = [];
+    for (const target of targets) {
+      if (failureReason) {
+        reasons.push(failureReason);
+        break;
+      }
+
+      const smokePath = runtimeInteractionTargetToProbePath(target);
+      const smokeUrl = `${devServerUrl}${smokePath}`;
+      const page = await browser.newPage();
+      const consoleErrors: string[] = [];
+      const pageErrors: string[] = [];
+      const responseFailures: string[] = [];
+      const startedRequestAt = Date.now();
+
+      page.on("console", (message) => {
+        if (message.type() === "error") {
+          consoleErrors.push(formatSmokeConsoleMessage(message));
+        }
+      });
+      page.on("pageerror", (error) => {
+        pageErrors.push(errorSummary(error));
+      });
+      page.on("response", (response) => {
+        if (responseBelongsToDevServer(response, devServerUrl) && response.status() >= 500) {
+          responseFailures.push(`${response.status()} ${response.url()}`);
+        }
+      });
+
+      let mainResponse: SmokeResponse | null = null;
+      let navigationError: string | undefined;
+      try {
+        mainResponse = await page.goto(smokeUrl, {
+          waitUntil: "networkidle",
+          timeout: navigationTimeoutMs,
+        });
+      } catch (error) {
+        navigationError = errorSummary(error);
+      }
+
+      const status = mainResponse?.status();
+      const responseBodyLength = navigationError
+        ? undefined
+        : await page.evaluate(() => document.body?.innerText?.trim().length ?? 0).catch(() => undefined);
+      const recordResult = tracker.record({
+        source: "browser-smoke",
+        method: "GET",
+        path: smokePath,
+        durationMs: Date.now() - startedRequestAt,
+        proxiedUrl: smokeUrl,
+        devServerOutputContext: recentOutputLines(output, 16),
+        ...(status !== undefined ? { status } : {}),
+        ...(navigationError ? { errorSummary: navigationError } : {}),
+        ...(responseBodyLength !== undefined
+          ? { responseBodySummary: `[browser innerText length: ${responseBodyLength}]` }
+          : {}),
+      }, {
+        countNotFoundAsCovered: shouldAllowNotFoundProbeCoverage(target),
+      });
+      const record = recordResult.record;
+      const statusLabel = record.status === undefined ? "ERR" : String(record.status);
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[smoke] GET ${smokePath} -> ${statusLabel} (${target.label})`,
+        ...(navigationError ? [`[smoke] navigation error: ${navigationError}`] : []),
+        ...(responseBodyLength !== undefined ? [`[smoke] body innerText length: ${responseBodyLength}`] : []),
+        ...pageErrors.map((error) => `[smoke] pageerror: ${error}`),
+        ...consoleErrors.map((error) => `[smoke] console.error: ${error}`),
+        ...responseFailures.map((failure) => `[smoke] HTTP 5xx response: ${failure}`),
+      ]);
+
+      const targetReasons = [
+        navigationError ? `冒烟运行验证导航失败：GET ${smokePath}。${navigationError}` : undefined,
+        !navigationError && !mainResponse ? `冒烟运行验证没有收到导航响应：GET ${smokePath}` : undefined,
+        recordResult.repairReason,
+        status === 404 && !shouldAllowNotFoundProbeCoverage(target)
+          ? `冒烟运行验证页面返回 404：GET ${smokePath}（目标：${target.label}）`
+          : undefined,
+        !navigationError && status !== 404 && responseBodyLength === 0
+          ? `冒烟运行验证渲染空白页：GET ${smokePath}（目标：${target.label}）`
+          : undefined,
+        ...pageErrors.map((error) => `冒烟运行验证捕获 pageerror：GET ${smokePath}。${error}`),
+        ...consoleErrors.map((error) => `冒烟运行验证捕获 console.error：GET ${smokePath}。${error}`),
+        ...responseFailures.map((failure) => `冒烟运行验证捕获 HTTP 5xx 响应：${failure}`),
+      ].filter((reason): reason is string => Boolean(reason));
+
+      if (targetReasons.length > 0) {
+        reasons.push(...targetReasons);
+        if (!failureReason) {
+          failureReason = targetReasons[0] ?? null;
+          failureRecord = record;
+        }
+      }
+
+      await page.close?.().catch(() => undefined);
+    }
+
+    const coverage = tracker.getSummary();
+    if (coverage.covered < coverage.total) {
+      reasons.push(
+        `冒烟运行验证覆盖不足：${coverage.covered}/${coverage.total}。未覆盖：${coverage.uncoveredTargets.join(", ") || "无"}`,
+      );
+    }
+
+    if (reasons.length > 0) {
+      const artifact = await finish(false, reasons);
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] Smoke runtime validation failed. Covered ${coverage.covered}/${coverage.total}.`,
+        "",
+      ]);
+      return {
+        reasons: [`冒烟运行验证失败：${reasons.join(" | ")} 详见 .deepagents/runtime-validation.log。`],
+        steps: [{
+          name: "browser smoke runtime validation",
+          ok: false,
+          detail: `真实浏览器访问 ${coverage.covered}/${coverage.total} 个页面目标后失败：${reasons.join(" | ")}`,
+        }],
+        artifact,
+      };
+    }
+
+    const artifact = await finish(true, []);
+    await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+      `[ok] Smoke runtime validation rendered all ${coverage.total} page targets in headless Chromium with no pageerror, console.error, HTTP 5xx, non-dynamic 404, blank render, or dev server error output.`,
+      "",
+    ]);
+    return {
+      reasons: [],
+      steps: [{
+        name: "browser smoke runtime validation",
+        ok: true,
+        detail: `冒烟运行验证已启动 dev server，并用真实浏览器渲染全部 ${coverage.total} 个页面目标。`,
+      }],
+      artifact,
+    };
+  } finally {
+    child?.stdout?.off("data", recordDevServerOutput);
+    child?.stderr?.off("data", recordDevServerOutput);
+    if (browser) {
+      await browser.close().catch(() => undefined);
+    }
     if ((child || managedDevServer) && !devServerProcessCleanup) {
       stopping = true;
       if (managedDevServer) {

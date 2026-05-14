@@ -124,7 +124,7 @@ export type TemplateInteractiveRuntimeValidation = {
   devServerStep?: TemplateRuntimeValidationStep;
 };
 
-export type RuntimeValidationMode = "non-interactive" | "interactive";
+export type RuntimeValidationMode = "non-interactive" | "interactive" | "smoke";
 
 export const TEMPLATE_PHASE_EFFORTS = ["low", "medium", "high", "max"] as const;
 

@@ -51,7 +51,7 @@ export type TodoBoardState = {
     proxyUrl?: string;
     validationUrl?: string;
     manualCompleted?: boolean;
-    completionMode?: "manual_override" | "coverage_proven" | "automated_probe";
+    completionMode?: "manual_override" | "coverage_proven" | "automated_probe" | "browser_smoke";
     coverageSatisfied?: boolean;
     criticalUncoveredTargets?: string[];
     implementationRequest?: string;
@@ -643,6 +643,9 @@ function buildRuntimeInteractionLines(state: TodoBoardState): string[] {
   }
   if (interaction.completionMode === "automated_probe") {
     lines.push("  完成方式：非交互式自动访问通过");
+  }
+  if (interaction.completionMode === "browser_smoke") {
+    lines.push("  完成方式：浏览器冒烟渲染通过");
   }
   if (interaction.criticalUncoveredTargets && interaction.criticalUncoveredTargets.length > 0) {
     lines.push(`  关键未覆盖：${interaction.criticalUncoveredTargets.slice(0, 4).join(", ")}`);

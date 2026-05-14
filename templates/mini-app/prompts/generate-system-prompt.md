@@ -75,4 +75,4 @@
 
 默认运行验证模式是非交互式：宿主会启动 dev server，并自动访问 `planSpec.pages` 的全部页面路由和 `planSpec.apis` 的全部 API 方法，收集 HTTP 状态、响应体摘要和 dev server stdout/stderr 判断是否需要修复。
 
-如果用户显式选择交互式运行验证且 `template.interactiveRuntimeValidation.enabled` 为 true，宿主会改用交互式代理/浏览器验证；非交互式和交互式二选一运行，不会同时运行。页面必须支持真实用户操作触发 API，而不是只输出静态占位内容。
+如果用户显式选择交互式运行验证且 `template.interactiveRuntimeValidation.enabled` 为 true，宿主会改用交互式代理/浏览器验证；如果用户显式选择 smoke，宿主会用 Playwright/Chromium 静默渲染全部 `planSpec.pages` 页面路由并检查 pageerror、console.error、HTTP 5xx、非动态页面 404 和空白渲染。非交互式、交互式和 smoke 三选一运行，不会同时运行。页面必须支持真实用户操作触发 API，而不是只输出静态占位内容。

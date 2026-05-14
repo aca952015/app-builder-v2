@@ -24,6 +24,7 @@
     "deepagents": "^1.10.0",
     "ink": "^7.0.2",
     "langchain": "^1.4.0",
+    "playwright": "^1.60.0",
     "react": "^19.2.5",
     "zod": "^4.4.3"
   },

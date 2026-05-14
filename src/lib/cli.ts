@@ -121,17 +121,21 @@ function normalizeRuntimeValidationMode(value: string | undefined): RuntimeValid
     return "interactive";
   }
 
-  throw new Error('The --runtime-validation-mode option must be "non-interactive" or "interactive".');
+  if (value === "smoke") {
+    return "smoke";
+  }
+
+  throw new Error('The --runtime-validation-mode option must be "non-interactive", "interactive", or "smoke".');
 }
 
 function helpText(): string {
   return `Usage:
-  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
-  app-builder generate --resume <session-id> [--skip-validation] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
-  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
-  app-builder -g --resume <session-id> [--skip-validation] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
-  app-builder validate <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
-  app-builder -v <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
+  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
+  app-builder generate --resume <session-id> [--skip-validation] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
+  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
+  app-builder -g --resume <session-id> [--skip-validation] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
+  app-builder validate <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
+  app-builder -v <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
 
 Environment:
   APP_BUILDER_API_KEY Required unless role-specific API keys or a custom generator are used

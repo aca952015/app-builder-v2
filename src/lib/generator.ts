@@ -34,6 +34,7 @@ import {
   closeRuntimeInteractionValidationSession,
   runInteractiveRuntimeValidation,
   runNonInteractiveRuntimeValidation,
+  runSmokeRuntimeValidation,
   type RuntimeInteractionValidationArtifact,
   type RuntimeInteractionValidationSession,
 } from "./interactive-runtime-validation.js";
@@ -2452,7 +2453,7 @@ function resolveRuntimeValidationMode(mode?: RuntimeValidationMode): RuntimeVali
 }
 
 function shouldSkipRuntimeDevServerStepsForMode(mode?: RuntimeValidationMode): boolean {
-  return resolveRuntimeValidationMode(mode) === "interactive";
+  return resolveRuntimeValidationMode(mode) !== "non-interactive";
 }
 
 function runtimeValidationModeOption(mode?: RuntimeValidationMode): { runtimeValidationMode?: RuntimeValidationMode } {
@@ -2470,6 +2471,11 @@ function createRuntimeWithoutDevServerValidation(runtime: TextGeneratorRuntime):
   };
 }
 
+function resolveRuntimeDevServerStep(runtime: TextGeneratorRuntime): TemplateRuntimeValidationStep | undefined {
+  return runtime.templateInteractiveRuntimeValidation.devServerStep ??
+    getRuntimeValidationForRuntime(runtime).steps.find((step) => step.kind === "dev-server");
+}
+
 function createSkippedDevServerValidationSteps(runtime: TextGeneratorRuntime): GenerationValidationStep[] {
   return getRuntimeValidationForRuntime(runtime)
     .steps
@@ -2477,7 +2483,7 @@ function createSkippedDevServerValidationSteps(runtime: TextGeneratorRuntime): G
     .map((step) => ({
       name: step.name,
       ok: true,
-      detail: "已跳过：当前 validation 阶段复用同一个交互式 dev server/proxy 会话，不再单独启动 dev server。",
+      detail: "已跳过：当前 validation 阶段由所选浏览器运行验证模式统一启动 dev server，不再单独启动 dev server。",
     }));
 }
 
@@ -2535,7 +2541,7 @@ async function collectPersistedGeneratedValidation(
       : runtimeValidation.steps;
     if (skipRuntimeDevServerSteps) {
       await appendRuntimeValidationLog(runtime.deepagentsRuntimeValidationLogPath, [
-        "[skip] dev-server validation steps are owned by the selected interactive runtime validation mode.",
+        "[skip] dev-server validation steps are owned by the selected browser runtime validation mode.",
         "",
       ]);
     }
@@ -2627,7 +2633,7 @@ async function validateGeneratedArtifacts(
           : runtimeValidation.steps;
         if (skipRuntimeDevServerSteps) {
           await appendRuntimeValidationLog(runtime.deepagentsRuntimeValidationLogPath, [
-            "[skip] dev-server validation steps are owned by the selected interactive runtime validation mode.",
+            "[skip] dev-server validation steps are owned by the selected browser runtime validation mode.",
             "",
           ]);
         }
@@ -3208,8 +3214,14 @@ async function completeAfterGenerateValidation(options: {
     return;
   }
 
-  if (!options.runtime.templateInteractiveRuntimeValidation.enabled) {
+  if (runtimeValidationMode === "interactive" && !options.runtime.templateInteractiveRuntimeValidation.enabled) {
     throw new Error("Interactive runtime validation was requested, but template.interactiveRuntimeValidation.enabled=false.");
+  }
+  const smokeDevServerStep = runtimeValidationMode === "smoke"
+    ? resolveRuntimeDevServerStep(options.runtime)
+    : undefined;
+  if (runtimeValidationMode === "smoke" && !smokeDevServerStep) {
+    throw new Error("Smoke runtime validation was requested, but template.runtimeValidation.steps has no dev-server step.");
   }
 
   let retryReasons: string[] = [];
@@ -3223,94 +3235,108 @@ async function completeAfterGenerateValidation(options: {
       if (retryReasons.length === 0) {
         validationAttempt += 1;
         await updateWorkflowState(options.runtime.deepagentsConfigPath, "validation", ["plan", "generate"]);
-        await appendWorkflowLog("[host] 进入运行验证阶段，启动或复用 dev server，并启动本地请求代理，合并监听 HTTP 响应与 stdout/stderr。");
+        await appendWorkflowLog(
+          runtimeValidationMode === "smoke"
+            ? "[host] 进入运行验证阶段，启动 dev server，并用 Playwright/Chromium 静默渲染计划页面。"
+            : "[host] 进入运行验证阶段，启动或复用 dev server，并启动本地请求代理，合并监听 HTTP 响应与 stdout/stderr。",
+        );
         await updateRuntimeValidationWorkflowBoard({
           runtime: options.runtime,
-          narrative: "正在启动交互式运行验证。",
+          narrative: runtimeValidationMode === "smoke"
+            ? "正在启动浏览器冒烟运行验证。"
+            : "正在启动交互式运行验证。",
           lifecycle: "generating",
         });
 
         const validation = await measureRuntimeStep(
           options.runtime,
           {
-            name: "validation.interactive_runtime",
+            name: runtimeValidationMode === "smoke" ? "validation.smoke_runtime" : "validation.interactive_runtime",
             phase: "validation",
             attempt: validationAttempt,
             metadata: {
+              runtimeValidationMode,
               coverageThreshold: options.runtime.templateInteractiveRuntimeValidation.coverageThreshold,
               idleTimeoutMs: options.runtime.templateInteractiveRuntimeValidation.idleTimeoutMs,
               readyTimeoutMs: options.runtime.templateInteractiveRuntimeValidation.readyTimeoutMs,
             },
           },
-          async () => await runInteractiveRuntimeValidation({
-            runtime: options.runtime,
-            planSpec: options.approvedPlan,
-            config: options.runtime.templateInteractiveRuntimeValidation,
-            session: runtimeInteractionSession,
-            onReady: async ({ proxyUrl, validationUrl, devServerUrl, browserOpened, browserOpenReused, browserOpenError }) => {
-              const visitUrl = validationUrl ?? proxyUrl ?? devServerUrl;
-              if (browserOpenReused && browserOpened) {
-                await appendWorkflowLog(`[host] 继续使用已打开的运行验证地址：${visitUrl}`);
-                return;
-              }
-              if (browserOpenReused) {
-                if (browserOpenError) {
-                  await appendWorkflowLog(`[host] 保留上次默认浏览器打开失败结果，不重复启动浏览器：${browserOpenError}`);
-                }
-                await appendWorkflowLog(`[host] 请继续使用运行验证地址：${visitUrl}`);
-                return;
-              }
-              if (browserOpened) {
-                await appendWorkflowLog(`[host] 已使用默认浏览器打开运行验证地址：${visitUrl}`);
-                return;
-              }
-              if (browserOpenError) {
-                await appendWorkflowLog(`[host] 默认浏览器打开失败：${browserOpenError}`);
-              }
-              await appendWorkflowLog(`[host] 请在浏览器访问运行验证地址：${visitUrl}`);
-            },
-            onUpdate: async (update) => {
-              const recentRequests = update.recentRequests.slice(-4).map((requestRecord) => {
-                const status = requestRecord.status === undefined ? "ERR" : String(requestRecord.status);
-                const target = requestRecord.targetLabel ? ` ${requestRecord.targetLabel}` : "";
-                const source = requestRecord.source === "proxy" ? "proxy " : "";
-                const error = requestRecord.errorSummary ? ` ${requestRecord.errorSummary}` : "";
-                return `${source}${requestRecord.method} ${requestRecord.rawPath ?? requestRecord.path} -> ${status}${target}${error}`;
-              });
-              await updateWorkflowBoard({
-                stage: "运行验证阶段",
-                todos: createStepItemsForLifecycle("运行验证阶段", "validating"),
-                artifacts: createArtifactItemsForStage("运行验证阶段", "validating"),
-                narrative: "正在监听代理请求、HTTP 响应和 dev server 输出，并等待静默窗口。",
-                sessionId: options.runtime.sessionId,
-                outputDirectory: options.runtime.outputDirectory,
-                runtimeStatus: {
-                  phase: "validation",
-                  effort: undefined,
+          async () => runtimeValidationMode === "smoke"
+            ? await runSmokeRuntimeValidation({
+                runtime: options.runtime,
+                planSpec: options.approvedPlan,
+                devServerStep: smokeDevServerStep!,
+                readyTimeoutMs: options.runtime.templateInteractiveRuntimeValidation.readyTimeoutMs,
+              })
+            : await runInteractiveRuntimeValidation({
+                runtime: options.runtime,
+                planSpec: options.approvedPlan,
+                config: options.runtime.templateInteractiveRuntimeValidation,
+                session: runtimeInteractionSession,
+                onReady: async ({ proxyUrl, validationUrl, devServerUrl, browserOpened, browserOpenReused, browserOpenError }) => {
+                  const visitUrl = validationUrl ?? proxyUrl ?? devServerUrl;
+                  if (browserOpenReused && browserOpened) {
+                    await appendWorkflowLog(`[host] 继续使用已打开的运行验证地址：${visitUrl}`);
+                    return;
+                  }
+                  if (browserOpenReused) {
+                    if (browserOpenError) {
+                      await appendWorkflowLog(`[host] 保留上次默认浏览器打开失败结果，不重复启动浏览器：${browserOpenError}`);
+                    }
+                    await appendWorkflowLog(`[host] 请继续使用运行验证地址：${visitUrl}`);
+                    return;
+                  }
+                  if (browserOpened) {
+                    await appendWorkflowLog(`[host] 已使用默认浏览器打开运行验证地址：${visitUrl}`);
+                    return;
+                  }
+                  if (browserOpenError) {
+                    await appendWorkflowLog(`[host] 默认浏览器打开失败：${browserOpenError}`);
+                  }
+                  await appendWorkflowLog(`[host] 请在浏览器访问运行验证地址：${visitUrl}`);
                 },
-                runtimeInteraction: {
-                  devServerUrl: update.devServerUrl,
-                  ...(update.browserOpenAttempted !== undefined
-                    ? { browserOpenAttempted: update.browserOpenAttempted }
-                    : {}),
-                  ...(update.browserOpened !== undefined ? { browserOpened: update.browserOpened } : {}),
-                  ...(update.browserOpenError ? { browserOpenError: update.browserOpenError } : {}),
-                  ...(update.proxyUrl ? { proxyUrl: update.proxyUrl } : {}),
-                  ...(update.validationUrl ? { validationUrl: update.validationUrl } : {}),
-                  ...(update.implementationRequest ? { implementationRequest: update.implementationRequest.requirement } : {}),
-                  ...(recentRequests.length > 0
-                    ? {
-                        coverageRatio: update.coverage.ratio,
-                        coveredTargets: update.coverage.coveredTargets,
-                        uncoveredTargets: update.coverage.uncoveredTargets,
-                        recentRequests,
-                      }
-                    : {}),
-                  recentDevServerOutput: update.recentDevServerOutput,
+                onUpdate: async (update) => {
+                  const recentRequests = update.recentRequests.slice(-4).map((requestRecord) => {
+                    const status = requestRecord.status === undefined ? "ERR" : String(requestRecord.status);
+                    const target = requestRecord.targetLabel ? ` ${requestRecord.targetLabel}` : "";
+                    const source = requestRecord.source === "proxy" ? "proxy " : "";
+                    const error = requestRecord.errorSummary ? ` ${requestRecord.errorSummary}` : "";
+                    return `${source}${requestRecord.method} ${requestRecord.rawPath ?? requestRecord.path} -> ${status}${target}${error}`;
+                  });
+                  await updateWorkflowBoard({
+                    stage: "运行验证阶段",
+                    todos: createStepItemsForLifecycle("运行验证阶段", "validating"),
+                    artifacts: createArtifactItemsForStage("运行验证阶段", "validating"),
+                    narrative: "正在监听代理请求、HTTP 响应和 dev server 输出，并等待静默窗口。",
+                    sessionId: options.runtime.sessionId,
+                    outputDirectory: options.runtime.outputDirectory,
+                    runtimeStatus: {
+                      phase: "validation",
+                      effort: undefined,
+                    },
+                    runtimeInteraction: {
+                      devServerUrl: update.devServerUrl,
+                      ...(update.browserOpenAttempted !== undefined
+                        ? { browserOpenAttempted: update.browserOpenAttempted }
+                        : {}),
+                      ...(update.browserOpened !== undefined ? { browserOpened: update.browserOpened } : {}),
+                      ...(update.browserOpenError ? { browserOpenError: update.browserOpenError } : {}),
+                      ...(update.proxyUrl ? { proxyUrl: update.proxyUrl } : {}),
+                      ...(update.validationUrl ? { validationUrl: update.validationUrl } : {}),
+                      ...(update.implementationRequest ? { implementationRequest: update.implementationRequest.requirement } : {}),
+                      ...(recentRequests.length > 0
+                        ? {
+                            coverageRatio: update.coverage.ratio,
+                            coveredTargets: update.coverage.coveredTargets,
+                            uncoveredTargets: update.coverage.uncoveredTargets,
+                            recentRequests,
+                          }
+                        : {}),
+                      recentDevServerOutput: update.recentDevServerOutput,
+                    },
+                  });
                 },
-              });
-            },
-          }),
+              }),
         );
 
         if (validation.reasons.length === 0) {
@@ -3407,7 +3433,11 @@ async function completeAfterGenerateValidation(options: {
       );
 
       if (generationValidation.reasons.length === 0) {
-        await appendWorkflowLog("[host] 运行验证修复后的生成门禁通过，继续交互式监听。");
+        await appendWorkflowLog(
+          runtimeValidationMode === "smoke"
+            ? "[host] 运行验证修复后的生成门禁通过，继续浏览器冒烟验证。"
+            : "[host] 运行验证修复后的生成门禁通过，继续交互式监听。",
+        );
         retryReasons = [];
         continue;
       }

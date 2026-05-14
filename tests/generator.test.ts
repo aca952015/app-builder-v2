@@ -17,8 +17,13 @@ import {
   parseDevServerRequestLine,
   runInteractiveRuntimeValidation,
   runNonInteractiveRuntimeValidation,
+  runSmokeRuntimeValidation,
   RuntimeInteractionCoverageTracker,
   runtimeInteractionTargetToProbePath,
+  type SmokeBrowserLauncher,
+  type SmokeConsoleMessage,
+  type SmokePage,
+  type SmokeResponse,
   type RuntimeInteractionValidationSession,
 } from "../src/lib/interactive-runtime-validation.js";
 import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
@@ -483,6 +488,115 @@ async function requestLocalResponse(
     }
     req.end();
   });
+}
+
+type FakeSmokeBrowserBehavior = {
+  consoleErrors?: Record<string, string[]>;
+  pageErrors?: Record<string, string[]>;
+  extraResponses?: Record<string, Array<{ url: string; status: number }>>;
+};
+
+class FakeSmokeResponse implements SmokeResponse {
+  constructor(
+    private readonly responseUrl: string,
+    private readonly statusCode: number,
+  ) {}
+
+  status(): number {
+    return this.statusCode;
+  }
+
+  url(): string {
+    return this.responseUrl;
+  }
+}
+
+class FakeSmokeConsoleMessage implements SmokeConsoleMessage {
+  constructor(private readonly message: string) {}
+
+  type(): string {
+    return "error";
+  }
+
+  text(): string {
+    return this.message;
+  }
+}
+
+class FakeSmokePage implements SmokePage {
+  private readonly consoleListeners: Array<(message: SmokeConsoleMessage) => void> = [];
+  private readonly pageErrorListeners: Array<(error: Error) => void> = [];
+  private readonly responseListeners: Array<(response: SmokeResponse) => void> = [];
+  private bodyText = "";
+
+  constructor(
+    private readonly behavior: FakeSmokeBrowserBehavior,
+    private readonly visitedPaths: string[],
+  ) {}
+
+  on(event: "console" | "pageerror" | "response", listener: ((message: SmokeConsoleMessage) => void) | ((error: Error) => void) | ((response: SmokeResponse) => void)): unknown {
+    if (event === "console") {
+      this.consoleListeners.push(listener as (message: SmokeConsoleMessage) => void);
+    } else if (event === "pageerror") {
+      this.pageErrorListeners.push(listener as (error: Error) => void);
+    } else {
+      this.responseListeners.push(listener as (response: SmokeResponse) => void);
+    }
+    return this;
+  }
+
+  async goto(url: string): Promise<SmokeResponse> {
+    const pathname = new URL(url).pathname;
+    this.visitedPaths.push(pathname);
+    const response = await requestLocalResponse(url);
+    this.bodyText = response.body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    const smokeResponse = new FakeSmokeResponse(url, response.status);
+    for (const listener of this.responseListeners) {
+      listener(smokeResponse);
+    }
+    for (const extraResponse of this.behavior.extraResponses?.[pathname] ?? []) {
+      for (const listener of this.responseListeners) {
+        listener(new FakeSmokeResponse(extraResponse.url, extraResponse.status));
+      }
+    }
+    for (const message of this.behavior.consoleErrors?.[pathname] ?? []) {
+      for (const listener of this.consoleListeners) {
+        listener(new FakeSmokeConsoleMessage(message));
+      }
+    }
+    for (const message of this.behavior.pageErrors?.[pathname] ?? []) {
+      for (const listener of this.pageErrorListeners) {
+        listener(new Error(message));
+      }
+    }
+    return smokeResponse;
+  }
+
+  async evaluate<T>(): Promise<T> {
+    return this.bodyText.length as T;
+  }
+
+  async close(): Promise<void> {}
+}
+
+function createFakeSmokeBrowserLauncher(behavior: FakeSmokeBrowserBehavior = {}): {
+  launcher: SmokeBrowserLauncher;
+  visitedPaths: string[];
+} {
+  const visitedPaths: string[] = [];
+  return {
+    visitedPaths,
+    launcher: {
+      async launch() {
+        return {
+          async newPage() {
+            return new FakeSmokePage(behavior, visitedPaths);
+          },
+          async close() {},
+        };
+      },
+    },
+  };
 }
 
 async function requestWebSocketUpgradeStatusLine(url: string): Promise<string> {
@@ -1115,6 +1229,255 @@ test("non-interactive runtime validation starts dev server and visits every page
     assert.match(log, /\[non-interactive\] GET \/work-orders -> 200/);
     assert.match(log, /\[non-interactive\] GET \/work-orders\/1 -> 404/);
     assert.match(log, /\[non-interactive\] POST \/api\/work-orders -> 201/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("smoke runtime validation starts dev server and renders every planned page only", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-smoke-dev-server-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+  const fakeBrowser = createFakeSmokeBrowserLauncher();
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "function send(req, res, status, body, contentType = 'text/plain') {",
+        "  console.log(`${req.method} ${req.url} ${status} in 1ms`);",
+        "  res.writeHead(status, { 'content-type': contentType });",
+        "  res.end(body);",
+        "}",
+        "const server = http.createServer((req, res) => {",
+        "  if (req.url === '/__app_builder_ready') { send(req, res, 200, 'ready'); return; }",
+        "  if (req.url?.startsWith('/api/')) { send(req, res, 500, 'api should not be directly smoked'); return; }",
+        "  if (req.url?.startsWith('/work-orders/1')) { send(req, res, 404, '<main>dynamic page not seeded</main>', 'text/html'); return; }",
+        "  if (req.url?.startsWith('/work-orders')) { send(req, res, 200, '<main>work orders</main>', 'text/html'); return; }",
+        "  send(req, res, 404, 'missing');",
+        "});",
+        "server.listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+    });
+
+    const result = await runSmokeRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      devServerStep,
+      readyTimeoutMs: 5_000,
+      navigationTimeoutMs: 5_000,
+      browserLauncher: fakeBrowser.launcher,
+    });
+
+    const dynamicPageRecord = result.artifact.recentRequests.find((record) =>
+      record.source === "browser-smoke" && record.targetLabel === "GET /work-orders/[id]"
+    );
+    const artifact = await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8");
+    const log = await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8");
+
+    assert.deepEqual(result.reasons, []);
+    assert.equal(result.steps[0]?.ok, true);
+    assert.equal(result.artifact.valid, true);
+    assert.equal(result.artifact.validationMode, "smoke");
+    assert.equal(result.artifact.completionMode, "browser_smoke");
+    assert.equal(result.artifact.coverage.covered, 2);
+    assert.equal(result.artifact.coverage.total, 2);
+    assert.equal(result.artifact.coverageSatisfied, true);
+    assert.equal(dynamicPageRecord?.status, 404);
+    assert.equal(dynamicPageRecord?.counted, true);
+    assert.deepEqual(fakeBrowser.visitedPaths.sort(), ["/work-orders", "/work-orders/1"]);
+    assert.equal(fakeBrowser.visitedPaths.some((visitedPath) => visitedPath.startsWith("/api/")), false);
+    assert.match(artifact, /"validationMode": "smoke"/);
+    assert.match(artifact, /"completionMode": "browser_smoke"/);
+    assert.match(log, /=== smoke runtime validation ===/);
+    assert.match(log, /\[smoke\] GET \/work-orders -> 200/);
+    assert.match(log, /\[smoke\] GET \/work-orders\/1 -> 404/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("smoke runtime validation fails on browser render and runtime errors", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const cases: Array<{
+    name: string;
+    status: number;
+    body: string;
+    behavior?: FakeSmokeBrowserBehavior;
+    expected: RegExp;
+    logExpected?: RegExp;
+  }> = [
+    { name: "page 500", status: 500, body: "server error", expected: /500/ },
+    { name: "static 404", status: 404, body: "missing", expected: /页面返回 404/ },
+    { name: "empty body", status: 200, body: "<main></main>", expected: /空白页/ },
+    {
+      name: "pageerror",
+      status: 200,
+      body: "<main>work orders</main>",
+      behavior: { pageErrors: { "/work-orders": ["render exploded"] } },
+      expected: /pageerror/,
+    },
+    {
+      name: "console error",
+      status: 200,
+      body: "<main>work orders</main>",
+      behavior: { consoleErrors: { "/work-orders": ["client exploded"] } },
+      expected: /console\.error/,
+    },
+  ];
+
+  for (const smokeCase of cases) {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), `app-builder-smoke-failure-${smokeCase.name.replace(/\s+/g, "-")}-`));
+    const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+    const serverPath = path.join(tempRoot, "server.mjs");
+    const devServerStep = {
+      name: "node dev server",
+      command: process.execPath,
+      args: ["server.mjs"],
+      kind: "dev-server" as const,
+    };
+    const planSpec = buildPlanSpec();
+    planSpec.pages = [planSpec.pages[0]!];
+    planSpec.apis = [];
+    const fakeBrowser = createFakeSmokeBrowserLauncher(smokeCase.behavior);
+
+    try {
+      await mkdir(deepagentsDirectory, { recursive: true });
+      await writeFile(
+        serverPath,
+        [
+          "import http from 'node:http';",
+          "const port = Number(process.env.PORT);",
+          `const pageStatus = ${smokeCase.status};`,
+          `const pageBody = ${JSON.stringify(smokeCase.body)};`,
+          "function send(req, res, status, body, contentType = 'text/plain') {",
+          "  console.log(`${req.method} ${req.url} ${status} in 1ms`);",
+          "  res.writeHead(status, { 'content-type': contentType });",
+          "  res.end(body);",
+          "}",
+          "const server = http.createServer((req, res) => {",
+          "  if (req.url === '/__app_builder_ready') { send(req, res, 200, 'ready'); return; }",
+          "  if (req.url?.startsWith('/work-orders')) { send(req, res, pageStatus, pageBody, 'text/html'); return; }",
+          "  send(req, res, 404, 'missing');",
+          "});",
+          "server.listen(port, '127.0.0.1');",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const runtime = buildTestRuntime({
+        outputDirectory: tempRoot,
+        deepagentsDirectory,
+        deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+        deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+      });
+
+      const result = await runSmokeRuntimeValidation({
+        runtime,
+        planSpec,
+        devServerStep,
+        readyTimeoutMs: 5_000,
+        navigationTimeoutMs: 5_000,
+        browserLauncher: fakeBrowser.launcher,
+      });
+      const artifact = await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8");
+      const log = await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8");
+
+      assert.equal(result.artifact.valid, false, smokeCase.name);
+      assert.equal(result.steps[0]?.ok, false, smokeCase.name);
+      assert.match(result.reasons.join("\n"), smokeCase.expected, smokeCase.name);
+      assert.match(artifact, /"validationMode": "smoke"/, smokeCase.name);
+      assert.match(artifact, smokeCase.expected, smokeCase.name);
+      assert.match(log, smokeCase.logExpected ?? smokeCase.expected, smokeCase.name);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  }
+});
+
+test("smoke runtime validation reports missing Playwright Chromium with an install hint", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-smoke-missing-browser-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "const server = http.createServer((req, res) => {",
+        "  res.writeHead(200, { 'content-type': 'text/plain' });",
+        "  res.end(req.url === '/__app_builder_ready' ? 'ready' : 'ok');",
+        "});",
+        "server.listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+    });
+
+    const result = await runSmokeRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      devServerStep,
+      readyTimeoutMs: 5_000,
+      browserLauncher: {
+        async launch() {
+          throw new Error("Executable doesn't exist at /missing/chromium");
+        },
+      },
+    });
+
+    assert.equal(result.artifact.valid, false);
+    assert.match(result.reasons.join("\n"), /pnpm exec playwright install chromium/);
+    assert.match(await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8"), /install chromium/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -4315,7 +4678,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(generatePromptSnapshot, /Current stage: Generate Stage/);
     assert.match(generatePromptSnapshot, /template\.runtimeValidation/);
     assert.match(generatePromptSnapshot, /默认运行验证模式是非交互式/);
-    assert.match(generatePromptSnapshot, /非交互式和交互式二选一运行/);
+    assert.match(generatePromptSnapshot, /非交互式、交互式和 smoke 三选一运行/);
     assert.match(generatePromptSnapshot, /Host-Enforced Project Config Guard/);
     assert.match(generatePromptSnapshot, /projectConfigChanges` is absent or empty/);
     assert.match(generatePromptSnapshot, /explicitly forbidden to create, modify, delete, rewrite/);
@@ -4324,7 +4687,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(generateRepairPromptSnapshot, /生成修复阶段代理/);
     assert.match(generateRepairPromptSnapshot, /validationFailures/);
     assert.match(generateRepairPromptSnapshot, /runtimeValidationLog/);
-    assert.match(generateRepairPromptSnapshot, /非交互式或交互式运行验证/);
+    assert.match(generateRepairPromptSnapshot, /非交互式、交互式或 smoke 运行验证/);
     assert.match(generateRepairPromptSnapshot, /Current stage: Generate Repair Stage/);
     assert.match(sourcePrdSnapshot, /# Field Ops Planner/);
     assert.match(analysisSnapshot, /# Stub 需求分析报告/);
@@ -6599,7 +6962,7 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /按输入里的 `template\.runtimeValidation` 执行运行验证/);
   assert.match(generatePromptSource, /默认运行验证模式是非交互式/);
   assert.match(generatePromptSource, /`planSpec\.pages` 的全部页面路由和 `planSpec\.apis` 的全部 API 方法/);
-  assert.match(generatePromptSource, /非交互式和交互式二选一运行/);
+  assert.match(generatePromptSource, /非交互式、交互式和 smoke 三选一运行/);
   assert.match(generatePromptSource, /把 `\/app-builder-report\.md` 改成 `\/app\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /页面实现必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
   assert.match(generatePromptSource, /所有承载业务数据的页面必须对接 `planSpec\.apis` 中定义的 Route Handlers/);
@@ -6631,7 +6994,7 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generateRepairPromptSource, /页面修复必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/generation-validation\.json`/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/runtime-validation\.log`/);
-  assert.match(generateRepairPromptSource, /非交互式或交互式运行验证/);
+  assert.match(generateRepairPromptSource, /非交互式、交互式或 smoke 运行验证/);
   assert.match(generateRepairPromptSource, /持久化、鉴权或启动契约被局部改坏/);
   assert.match(generateRepairPromptSource, /Prisma 配置、schema、seed、脚本/);
   assert.match(generateRepairPromptSource, /schema、seed、脚本、认证\/会话和默认入口数据/);
@@ -6680,12 +7043,12 @@ test("mini-app prompts preserve PRD environment configuration through planSpec",
   assert.match(generatePromptSource, /最终合并和落盘由 host 负责/);
   assert.match(generatePromptSource, /不应仅因为环境变量合并而包含 `\.env\.example`/);
   assert.match(generatePromptSource, /默认运行验证模式是非交互式/);
-  assert.match(generatePromptSource, /非交互式和交互式二选一运行/);
+  assert.match(generatePromptSource, /非交互式、交互式和 smoke 三选一运行/);
   assert.match(generateRepairPromptSource, /planSpec\.environmentVariables/);
   assert.match(generateRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);
   assert.match(generateRepairPromptSource, /不要直接修补根目录 `\/\.env\.example`/);
-  assert.match(generateRepairPromptSource, /非交互式或交互式运行验证/);
+  assert.match(generateRepairPromptSource, /非交互式、交互式或 smoke 运行验证/);
   assert.match(generateRepairPromptSource, /声明 locked key 或锁定变量冲突，这是计划规格问题/);
   assert.match(generateRepairPromptSource, /不要修改 `\.env`\/`\.env\.example` 或应用代码来绕过锁定/);
 });
