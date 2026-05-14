@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { inspect } from "node:util";
 
-import { toolStrategy } from "langchain";
+import { createMiddleware, toolStrategy } from "langchain";
 import { z } from "zod";
 
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
@@ -1093,14 +1093,144 @@ function isTodoList(
   );
 }
 
+function isTodoStatus(value: unknown): value is TodoStatus {
+  return value === "pending" || value === "in_progress" || value === "completed";
+}
+
+function normalizeTodoItemCandidate(value: unknown): TodoItem | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  return typeof record.content === "string" && isTodoStatus(record.status)
+    ? { content: record.content, status: record.status }
+    : null;
+}
+
+function decodeJsonStringFragment(value: string): string {
+  try {
+    const parsed = JSON.parse(`"${value}"`);
+    return typeof parsed === "string" ? parsed : value;
+  } catch {
+    return value;
+  }
+}
+
+function extractLooseTodoList(value: string): TodoItem[] | null {
+  const todos: TodoItem[] = [];
+  const objectPattern = /\{[^{}]*\}/g;
+  for (const match of value.matchAll(objectPattern)) {
+    const itemText = match[0];
+    const contentMatch = itemText.match(/"content"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    const statusMatch = itemText.match(/"status"\s*:\s*"(pending|in_progress|completed)"/);
+    if (!contentMatch?.[1] || !statusMatch?.[1]) {
+      continue;
+    }
+
+    todos.push({
+      content: decodeJsonStringFragment(contentMatch[1]),
+      status: statusMatch[1] as TodoStatus,
+    });
+  }
+
+  return todos.length > 0 ? todos : null;
+}
+
+function normalizeTodoListCandidate(value: unknown, depth = 0): TodoItem[] | null {
+  if (isTodoList(value)) {
+    return value.map((todo) => ({ content: todo.content, status: todo.status }));
+  }
+
+  if (Array.isArray(value)) {
+    const todos = value.map(normalizeTodoItemCandidate);
+    return todos.every(Boolean) ? todos as TodoItem[] : null;
+  }
+
+  if (typeof value !== "string" || depth > 2) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed === "string" && parsed !== value) {
+      return normalizeTodoListCandidate(parsed, depth + 1);
+    }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return normalizeTodoListCandidate((parsed as Record<string, unknown>).todos, depth + 1);
+    }
+    return normalizeTodoListCandidate(parsed, depth + 1);
+  } catch {
+    return extractLooseTodoList(trimmed);
+  }
+}
+
+export function normalizeWriteTodosToolCallArgs(args: unknown): Record<string, unknown> | null {
+  let record: Record<string, unknown> | null = null;
+
+  if (typeof args === "string") {
+    try {
+      const parsed = JSON.parse(args);
+      record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      record = null;
+    }
+  } else if (args && typeof args === "object" && !Array.isArray(args)) {
+    record = args as Record<string, unknown>;
+  }
+
+  if (!record) {
+    return null;
+  }
+
+  const todos = normalizeTodoListCandidate(record.todos);
+  return todos ? { ...record, todos } : null;
+}
+
+function normalizeWriteTodosToolCall(toolCall: unknown): unknown {
+  if (!toolCall || typeof toolCall !== "object") {
+    return toolCall;
+  }
+
+  const record = toolCall as Record<string, unknown>;
+  if (record.name !== "write_todos") {
+    return toolCall;
+  }
+
+  const normalizedArgs = normalizeWriteTodosToolCallArgs(record.args);
+  return normalizedArgs ? { ...record, args: normalizedArgs } : toolCall;
+}
+
+function createWriteTodosCompatibilityMiddleware() {
+  return createMiddleware({
+    name: "writeTodosCompatibilityMiddleware",
+    wrapToolCall: async (request, handler) => {
+      const normalizedToolCall = normalizeWriteTodosToolCall(request.toolCall);
+      return handler(
+        normalizedToolCall === request.toolCall
+          ? request
+          : { ...request, toolCall: normalizedToolCall as typeof request.toolCall },
+      );
+    },
+  });
+}
+
 function extractTodosFromPayload(value: unknown): TodoItem[] | null {
   if (!value || typeof value !== "object") {
     return null;
   }
 
   const record = value as Record<string, unknown>;
-  if (isTodoList(record.todos)) {
-    return record.todos;
+  const normalizedTodos = normalizeTodoListCandidate(record.todos);
+  if (normalizedTodos) {
+    return normalizedTodos;
   }
 
   for (const nested of Object.values(record)) {
@@ -1121,12 +1251,7 @@ function extractTodosFromText(value: string): TodoItem[] | null {
     return null;
   }
 
-  try {
-    const parsed = JSON.parse(match[1]!);
-    return isTodoList(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
+  return normalizeTodoListCandidate(match[1]!);
 }
 
 function extractTodosFromToolOutput(value: unknown): TodoItem[] | null {
@@ -2423,6 +2548,7 @@ export function buildGenerationSubagents(
   runtimePhase: RuntimeStatusPhase,
   includeTemplateSkills: boolean,
   projectConfigGuardPrompt = "",
+  middleware?: readonly unknown[],
 ): Array<Record<string, unknown>> {
   if (runtimePhase !== "generate" && runtimePhase !== "generateRepair" && runtimePhase !== "generate_repair") {
     return [];
@@ -2441,24 +2567,44 @@ export function buildGenerationSubagents(
   const withSkills = (subagent: Record<string, unknown>): Record<string, unknown> => (
     skills ? { ...subagent, skills } : subagent
   );
+  const withMiddleware = (subagent: Record<string, unknown>): Record<string, unknown> => (
+    middleware && middleware.length > 0 ? { ...subagent, middleware } : subagent
+  );
 
   return [
-    withSkills({
+    withMiddleware(withSkills({
       name: "frontend-implementer",
       description: "Implements independently owned pages, components, styles, and client interactions when that work can run in parallel with other generation slices.",
       systemPrompt: `${basePrompt}\nFrontend scope: implement only assigned page/component/client-interaction files and preserve existing routing, shell, sidebar, and data-fetching contracts.`,
-    }),
-    withSkills({
+    })),
+    withMiddleware(withSkills({
       name: "backend-implementer",
       description: "Implements independently owned API routes, server logic, Prisma/data wiring, and persistence changes when that work can run in parallel with other generation slices.",
       systemPrompt: `${basePrompt}\nBackend scope: implement only assigned API/server/data files. Do not split ownership of shared schema or configuration files with another agent.`,
-    }),
-    withSkills({
+    })),
+    withMiddleware(withSkills({
       name: "integration-verifier",
       description: "Checks independently verifiable integration coverage and reports gaps while other implementation slices run in parallel.",
       systemPrompt: `${basePrompt}\nVerification scope: prefer read-only inspection. Only make narrow fixes when explicitly assigned; otherwise report missing pages, APIs, data wiring, or report coverage gaps.`,
-    }),
+    })),
   ];
+}
+
+function buildGeneralPurposeCompatibilitySubagent(
+  deepagents: Record<string, unknown>,
+  middleware: readonly unknown[],
+  includeTemplateSkills: boolean,
+): Record<string, unknown> | null {
+  const generalPurpose = deepagents.GENERAL_PURPOSE_SUBAGENT;
+  if (!generalPurpose || typeof generalPurpose !== "object" || Array.isArray(generalPurpose)) {
+    return null;
+  }
+
+  return {
+    ...(generalPurpose as Record<string, unknown>),
+    middleware,
+    ...(includeTemplateSkills ? { skills: ["/.deepagents/skills"] } : {}),
+  };
 }
 
 export class DeepAgentsTextGenerator implements TextGenerator {
@@ -2523,6 +2669,8 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       responseFormat: toolStrategy(options.responseSchema),
       systemPrompt,
     };
+    const writeTodosCompatibilityMiddleware = createWriteTodosCompatibilityMiddleware();
+    agentOptions.middleware = [writeTodosCompatibilityMiddleware];
 
     const hasTemplateSkills = await pathExists(skillsDirectory);
     if (hasTemplateSkills) {
@@ -2533,9 +2681,19 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       runtimePhase,
       hasTemplateSkills,
       projectConfigGuardPrompt,
+      [writeTodosCompatibilityMiddleware],
     );
-    if (generationSubagents.length > 0) {
-      agentOptions.subagents = generationSubagents;
+    const generalPurposeSubagent = buildGeneralPurposeCompatibilitySubagent(
+      deepagents as Record<string, unknown>,
+      [writeTodosCompatibilityMiddleware],
+      hasTemplateSkills,
+    );
+    const subagents = [
+      ...(generalPurposeSubagent ? [generalPurposeSubagent] : []),
+      ...generationSubagents,
+    ];
+    if (subagents.length > 0) {
+      agentOptions.subagents = subagents;
     }
 
     agentOptions.backend = new deepagents.FilesystemBackend({
@@ -2579,8 +2737,10 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       const createDeepAgent = deepagents.createDeepAgent;
       const modelConfig = runtime.modelRoles?.plan ?? this.modelRoles.plan;
       const resolvedModel = await resolveModel(modelConfig, runtime.templatePhases.plan?.effort);
+      const writeTodosCompatibilityMiddleware = createWriteTodosCompatibilityMiddleware();
       const agentOptions: any = {
         model: resolvedModel,
+        middleware: [writeTodosCompatibilityMiddleware],
         responseFormat: toolStrategy(referenceMarkdownConversionSchema),
         systemPrompt: REFERENCE_MARKDOWN_CONVERSION_SYSTEM_PROMPT,
         backend: new deepagents.FilesystemBackend({
@@ -2588,6 +2748,14 @@ export class DeepAgentsTextGenerator implements TextGenerator {
           virtualMode: true,
         }),
       };
+      const generalPurposeSubagent = buildGeneralPurposeCompatibilitySubagent(
+        deepagents as Record<string, unknown>,
+        [writeTodosCompatibilityMiddleware],
+        false,
+      );
+      if (generalPurposeSubagent) {
+        agentOptions.subagents = [generalPurposeSubagent];
+      }
       const agent = createDeepAgent(agentOptions);
       const state = {
         messages: [

@@ -33,6 +33,7 @@ import {
 import {
   closeRuntimeInteractionValidationSession,
   runInteractiveRuntimeValidation,
+  runNonInteractiveRuntimeValidation,
   type RuntimeInteractionValidationArtifact,
   type RuntimeInteractionValidationSession,
 } from "./interactive-runtime-validation.js";
@@ -70,6 +71,7 @@ import {
   type TemplatePhaseEffort,
   type TemplateRuntimeValidation,
   type TemplateRuntimeValidationStep,
+  type RuntimeValidationMode,
   TextGenerator,
   TextGeneratorRuntime,
   type LocalReference,
@@ -1006,7 +1008,7 @@ async function runConfiguredDevValidationStep(options: {
 }
 
 class ShellGeneratedAppValidator implements GeneratedAppValidator {
-  async validate(outputDirectory: string, runtime: TextGeneratorRuntime): Promise<{
+  async validate(outputDirectory: string, runtime: TextGeneratorRuntime, planSpec?: PlanSpec): Promise<{
     reasons: string[];
     steps: GenerationValidationStep[];
   }> {
@@ -1070,14 +1072,27 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
           },
         },
         async () => validationStep.kind === "dev-server"
-          ? await runConfiguredDevValidationStep({
-              outputDirectory,
-              logPath: runtime.deepagentsRuntimeValidationLogPath,
-              command: validationStep.command,
-              args: validationStep.args,
-              name: validationStep.name,
-              ...(validationStep.env ? { env: validationStep.env } : {}),
-            })
+          ? (
+              planSpec
+                ? (await runNonInteractiveRuntimeValidation({
+                    runtime,
+                    planSpec,
+                    devServerStep: validationStep,
+                    readyTimeoutMs: runtime.templateInteractiveRuntimeValidation.readyTimeoutMs,
+                  })).steps[0] ?? {
+                    name: validationStep.name,
+                    ok: false,
+                    detail: "非交互式运行验证没有返回步骤结果。",
+                  }
+                : await runConfiguredDevValidationStep({
+                    outputDirectory,
+                    logPath: runtime.deepagentsRuntimeValidationLogPath,
+                    command: validationStep.command,
+                    args: validationStep.args,
+                    name: validationStep.name,
+                    ...(validationStep.env ? { env: validationStep.env } : {}),
+                  })
+            )
           : (
               await runCommandStep({
                 name: validationStep.name,
@@ -2432,6 +2447,18 @@ function getRuntimeValidationForRuntime(runtime: TextGeneratorRuntime): Template
   return runtime.templateRuntimeValidation ?? defaultTemplateRuntimeValidation();
 }
 
+function resolveRuntimeValidationMode(mode?: RuntimeValidationMode): RuntimeValidationMode {
+  return mode ?? "non-interactive";
+}
+
+function shouldSkipRuntimeDevServerStepsForMode(mode?: RuntimeValidationMode): boolean {
+  return resolveRuntimeValidationMode(mode) === "interactive";
+}
+
+function runtimeValidationModeOption(mode?: RuntimeValidationMode): { runtimeValidationMode?: RuntimeValidationMode } {
+  return mode ? { runtimeValidationMode: mode } : {};
+}
+
 function createRuntimeWithoutDevServerValidation(runtime: TextGeneratorRuntime): TextGeneratorRuntime {
   const runtimeValidation = getRuntimeValidationForRuntime(runtime);
   return {
@@ -2459,7 +2486,7 @@ async function collectPersistedGeneratedValidation(
   runtime: TextGeneratorRuntime,
   planSpec: PlanSpec,
   validator: GeneratedAppValidator,
-  options: { skipRuntimeDevServerSteps?: boolean } = {},
+  options: { skipRuntimeDevServerSteps?: boolean; runtimeValidationMode?: RuntimeValidationMode } = {},
 ): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
   await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
 
@@ -2492,20 +2519,23 @@ async function collectPersistedGeneratedValidation(
 
   let steps: GenerationValidationStep[] = [];
   if (reasons.length === 0) {
-    const validationRuntime = options.skipRuntimeDevServerSteps
+    const skipRuntimeDevServerSteps =
+      options.skipRuntimeDevServerSteps === true ||
+      shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode);
+    const validationRuntime = skipRuntimeDevServerSteps
       ? createRuntimeWithoutDevServerValidation(runtime)
       : runtime;
-    const runtimeValidation = await validator.validate(outputDirectory, validationRuntime);
+    const runtimeValidation = await validator.validate(outputDirectory, validationRuntime, planSpec);
     reasons.push(...runtimeValidation.reasons);
-    steps = options.skipRuntimeDevServerSteps
+    steps = skipRuntimeDevServerSteps
       ? [
           ...runtimeValidation.steps,
           ...createSkippedDevServerValidationSteps(runtime),
         ]
       : runtimeValidation.steps;
-    if (options.skipRuntimeDevServerSteps) {
+    if (skipRuntimeDevServerSteps) {
       await appendRuntimeValidationLog(runtime.deepagentsRuntimeValidationLogPath, [
-        "[skip] dev-server validation steps are owned by the active interactive runtime validation session.",
+        "[skip] dev-server validation steps are owned by the selected interactive runtime validation mode.",
         "",
       ]);
     }
@@ -2529,7 +2559,7 @@ async function validateGeneratedArtifacts(
   planSpec: PlanSpec,
   result: GeneratedProject,
   validator: GeneratedAppValidator,
-  options: { skipRuntimeDevServerSteps?: boolean } = {},
+  options: { skipRuntimeDevServerSteps?: boolean; runtimeValidationMode?: RuntimeValidationMode } = {},
 ): Promise<{ reasons: string[]; steps: GenerationValidationStep[] }> {
   return await measureRuntimeStep(
     runtime,
@@ -2537,7 +2567,12 @@ async function validateGeneratedArtifacts(
       name: "generate.validate_artifacts",
       phase: (runtime.generateAttempt ?? 1) > 1 ? "generate_repair" : "generate",
       attempt: runtime.generateAttempt ?? 1,
-      metadata: { skipRuntimeDevServerSteps: options.skipRuntimeDevServerSteps === true },
+      metadata: {
+        skipRuntimeDevServerSteps:
+          options.skipRuntimeDevServerSteps === true ||
+          shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode),
+        runtimeValidationMode: resolveRuntimeValidationMode(options.runtimeValidationMode),
+      },
     },
     async () => {
       await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
@@ -2576,20 +2611,23 @@ async function validateGeneratedArtifacts(
 
       let steps: GenerationValidationStep[] = [];
       if (reasons.length === 0) {
-        const validationRuntime = options.skipRuntimeDevServerSteps
+        const skipRuntimeDevServerSteps =
+          options.skipRuntimeDevServerSteps === true ||
+          shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode);
+        const validationRuntime = skipRuntimeDevServerSteps
           ? createRuntimeWithoutDevServerValidation(runtime)
           : runtime;
-        const runtimeValidation = await validator.validate(outputDirectory, validationRuntime);
+        const runtimeValidation = await validator.validate(outputDirectory, validationRuntime, planSpec);
         reasons.push(...runtimeValidation.reasons);
-        steps = options.skipRuntimeDevServerSteps
+        steps = skipRuntimeDevServerSteps
           ? [
               ...runtimeValidation.steps,
               ...createSkippedDevServerValidationSteps(runtime),
             ]
           : runtimeValidation.steps;
-        if (options.skipRuntimeDevServerSteps) {
+        if (skipRuntimeDevServerSteps) {
           await appendRuntimeValidationLog(runtime.deepagentsRuntimeValidationLogPath, [
-            "[skip] dev-server validation steps are owned by the active interactive runtime validation session.",
+            "[skip] dev-server validation steps are owned by the selected interactive runtime validation mode.",
             "",
           ]);
         }
@@ -3138,6 +3176,7 @@ async function completeAfterGenerateValidation(options: {
   validator: GeneratedAppValidator;
   approvedPlan: PlanSpec;
   skipValidation?: boolean;
+  runtimeValidationMode?: RuntimeValidationMode;
 }): Promise<void> {
   if (options.skipValidation) {
     await measureRuntimeStep(
@@ -3155,17 +3194,22 @@ async function completeAfterGenerateValidation(options: {
     return;
   }
 
-  if (!options.runtime.templateInteractiveRuntimeValidation.enabled) {
+  const runtimeValidationMode = resolveRuntimeValidationMode(options.runtimeValidationMode);
+  if (runtimeValidationMode === "non-interactive") {
     await measureRuntimeStep(
       options.runtime,
       {
-        name: "validation.disabled",
+        name: "validation.non_interactive_complete",
         phase: "validation",
-        metadata: { reason: "template.interactiveRuntimeValidation.enabled=false" },
+        metadata: { runtimeValidationMode },
       },
       async () => await markWorkflowComplete(options.runtime, ["plan", "generate"]),
     );
     return;
+  }
+
+  if (!options.runtime.templateInteractiveRuntimeValidation.enabled) {
+    throw new Error("Interactive runtime validation was requested, but template.interactiveRuntimeValidation.enabled=false.");
   }
 
   let retryReasons: string[] = [];
@@ -3387,6 +3431,7 @@ async function continueGenerateFlow(options: {
   approvedPlan: PlanSpec;
   initialRetryReasons: string[];
   skipValidation?: boolean;
+  runtimeValidationMode?: RuntimeValidationMode;
 }): Promise<void> {
   let generationRetryReasons = [...options.initialRetryReasons];
   const maxGenerationRepairs = options.runtime.maxGenerateRetries ?? 0;
@@ -3431,6 +3476,7 @@ async function continueGenerateFlow(options: {
       options.approvedPlan,
       generatedProject,
       options.validator,
+      runtimeValidationModeOption(options.runtimeValidationMode),
     );
     if (validation.reasons.length === 0) {
       await appendWorkflowLog("[host] 生成阶段交付物通过校验。");
@@ -3448,6 +3494,7 @@ async function continueGenerateFlow(options: {
         validator: options.validator,
         approvedPlan: options.approvedPlan,
         ...(options.skipValidation ? { skipValidation: true } : {}),
+        ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
       });
       return;
     }
@@ -3512,6 +3559,7 @@ async function continueGenerateFlow(options: {
       options.approvedPlan,
       repairedProject,
       options.validator,
+      runtimeValidationModeOption(options.runtimeValidationMode),
     );
     if (validation.reasons.length === 0) {
       await appendWorkflowLog("[host] 修复后的生成交付物通过校验。");
@@ -3529,6 +3577,7 @@ async function continueGenerateFlow(options: {
         validator: options.validator,
         approvedPlan: options.approvedPlan,
         ...(options.skipValidation ? { skipValidation: true } : {}),
+        ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
       });
       return;
     }
@@ -3550,6 +3599,7 @@ async function continuePlanRepairFlow(options: {
   validator: GeneratedAppValidator;
   initialRetryReasons: string[];
   skipValidation?: boolean;
+  runtimeValidationMode?: RuntimeValidationMode;
 }): Promise<void> {
   let approvedPlan: PlanSpec | null = null;
   let planRetryReasons = [...options.initialRetryReasons];
@@ -3626,6 +3676,7 @@ async function continuePlanRepairFlow(options: {
     approvedPlan,
     initialRetryReasons: [],
     ...(options.skipValidation ? { skipValidation: true } : {}),
+    ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
   });
 }
 
@@ -3635,6 +3686,7 @@ export async function validateSessionPhase(options: {
   cwd?: string;
   stdoutMode?: StdoutMode;
   skipValidation?: boolean;
+  runtimeValidationMode?: RuntimeValidationMode;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
 }): Promise<SessionValidationResult> {
@@ -3663,6 +3715,7 @@ export async function validateSessionPhase(options: {
             validator,
             initialRetryReasons: validation.reasons,
             ...(options.skipValidation ? { skipValidation: true } : {}),
+            ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
           });
         } finally {
           await closeWorkflowBoard();
@@ -3720,6 +3773,7 @@ export async function validateSessionPhase(options: {
         runtime,
         planValidation.planSpec,
         validator,
+        runtimeValidationModeOption(options.runtimeValidationMode),
       );
       reasons.push(...generationValidation.reasons);
       steps = generationValidation.steps;
@@ -3754,6 +3808,7 @@ export async function validateSessionPhase(options: {
           approvedPlan: planValidation.planSpec,
           initialRetryReasons: reasons,
           ...(options.skipValidation ? { skipValidation: true } : {}),
+          ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
         });
       } finally {
         await closeWorkflowBoard();
@@ -3794,6 +3849,7 @@ export async function validateSessionPhase(options: {
           validator,
           approvedPlan: planValidation.planSpec,
           ...(options.skipValidation ? { skipValidation: true } : {}),
+          ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
         });
       } finally {
         await closeWorkflowBoard();
@@ -3853,6 +3909,7 @@ export async function resumeSession(options: {
   cwd?: string;
   stdoutMode?: StdoutMode;
   skipValidation?: boolean;
+  runtimeValidationMode?: RuntimeValidationMode;
   generator?: TextGenerator;
   validator?: GeneratedAppValidator;
 }): Promise<SessionValidationResult> {
@@ -3886,6 +3943,7 @@ export async function resumeSession(options: {
             validator,
             initialRetryReasons: validation.reasons,
             ...(options.skipValidation ? { skipValidation: true } : {}),
+            ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
           });
         } finally {
           await closeWorkflowBoard();
@@ -3907,6 +3965,7 @@ export async function resumeSession(options: {
           approvedPlan: validation.planSpec,
           initialRetryReasons: [],
           ...(options.skipValidation ? { skipValidation: true } : {}),
+          ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
         });
       } finally {
         await closeWorkflowBoard();
@@ -3924,6 +3983,7 @@ export async function resumeSession(options: {
       ...(options.cwd ? { cwd: options.cwd } : {}),
       ...(options.stdoutMode ? { stdoutMode: options.stdoutMode } : {}),
       ...(options.skipValidation ? { skipValidation: true } : {}),
+      ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
       ...(options.generator ? { generator: options.generator } : {}),
       ...(options.validator ? { validator: options.validator } : {}),
     });
@@ -4591,6 +4651,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         approvedPlan,
         generatedProject,
         validator,
+        runtimeValidationModeOption(options.runtimeValidationMode),
       );
       if (validation.reasons.length === 0) {
         generationRetryReasons = [];
@@ -4659,6 +4720,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         approvedPlan,
         repairedProject,
         validator,
+        runtimeValidationModeOption(options.runtimeValidationMode),
       );
       if (validation.reasons.length === 0) {
         generationRetryReasons = [];
@@ -4690,6 +4752,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       validator,
       approvedPlan,
       ...(options.skipValidation ? { skipValidation: true } : {}),
+      ...(options.runtimeValidationMode ? { runtimeValidationMode: options.runtimeValidationMode } : {}),
     });
 
     const outputDirectory = workspace.outputDirectory;

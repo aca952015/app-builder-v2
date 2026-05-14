@@ -8,6 +8,7 @@ import { resolveWorkflowStdoutMode } from "./terminal-ui.js";
 import type {
   GenerateAppOptions,
   GeneratedAppValidator,
+  RuntimeValidationMode,
   SessionValidationResult,
   StdoutMode,
   TextGenerator,
@@ -111,14 +112,26 @@ function resolveValidationPhaseOption(
   return "runtimeValidation";
 }
 
+function normalizeRuntimeValidationMode(value: string | undefined): RuntimeValidationMode {
+  if (value === undefined || value === "non-interactive" || value === "noninteractive") {
+    return "non-interactive";
+  }
+
+  if (value === "interactive") {
+    return "interactive";
+  }
+
+  throw new Error('The --runtime-validation-mode option must be "non-interactive" or "interactive".');
+}
+
 function helpText(): string {
   return `Usage:
-  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--stdout <log|dashboard>]
-  app-builder generate --resume <session-id> [--skip-validation] [--runtimeValidation] [--stdout <log|dashboard>]
-  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--stdout <log|dashboard>]
-  app-builder -g --resume <session-id> [--skip-validation] [--runtimeValidation] [--stdout <log|dashboard>]
-  app-builder validate <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--stdout <log|dashboard>]
-  app-builder -v <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--stdout <log|dashboard>]
+  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
+  app-builder generate --resume <session-id> [--skip-validation] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
+  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
+  app-builder -g --resume <session-id> [--skip-validation] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
+  app-builder validate <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
+  app-builder -v <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive>] [--stdout <log|dashboard>]
 
 Environment:
   APP_BUILDER_API_KEY Required unless role-specific API keys or a custom generator are used
@@ -160,6 +173,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
         phase: { type: "string" },
         runtimeValidation: { type: "boolean" },
         "runtime-validation": { type: "boolean" },
+        "runtime-validation-mode": { type: "string" },
         stdout: { type: "string" },
       },
     });
@@ -172,12 +186,14 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     const stdoutModeValue = parsed.values.stdout;
     const stdoutMode = resolveWorkflowStdoutMode(stdoutModeValue);
     const phase = resolveValidationPhaseOption(parsed.values.phase, hasRuntimeValidationFlag(parsed.values));
+    const runtimeValidationMode = normalizeRuntimeValidationMode(parsed.values["runtime-validation-mode"]);
 
     logCliExecutionParameters(stdoutMode, stdout, {
       command: "validate",
       sessionId,
       phase,
       runtimeValidation: phase === "runtimeValidation",
+      runtimeValidationMode,
       model: resolveCliModelName(),
       stdout: stdoutMode,
       cwd,
@@ -190,6 +206,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
         : {}),
       stdoutMode,
       cwd,
+      runtimeValidationMode,
       ...(deps.generator ? { generator: deps.generator } : {}),
       ...(deps.validator ? { validator: deps.validator } : {}),
     });
@@ -218,6 +235,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       "skip-validation": { type: "boolean" },
       runtimeValidation: { type: "boolean" },
       "runtime-validation": { type: "boolean" },
+      "runtime-validation-mode": { type: "string" },
       resume: { type: "string" },
       stdout: { type: "string" },
     },
@@ -229,6 +247,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       : undefined;
   const stdoutMode: StdoutMode = resolveWorkflowStdoutMode(parsed.values.stdout);
   const runtimeValidationFlag = hasRuntimeValidationFlag(parsed.values);
+  const runtimeValidationMode = normalizeRuntimeValidationMode(parsed.values["runtime-validation-mode"]);
 
   if (parsed.values.resume !== undefined) {
     if (!resumeSessionId) {
@@ -248,6 +267,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       resume: resumeSessionId,
       skipValidation: parsed.values["skip-validation"] === true,
       runtimeValidation: runtimeValidationFlag,
+      runtimeValidationMode,
       model: resolveCliModelName(),
       stdout: stdoutMode,
       cwd,
@@ -259,6 +279,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
           phase: "runtimeValidation",
           stdoutMode,
           cwd,
+          runtimeValidationMode,
           ...(parsed.values["skip-validation"] === true ? { skipValidation: true } : {}),
           ...(deps.generator ? { generator: deps.generator } : {}),
           ...(deps.validator ? { validator: deps.validator } : {}),
@@ -267,6 +288,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
           sessionId: resumeSessionId,
           stdoutMode,
           cwd,
+          runtimeValidationMode,
           ...(parsed.values["skip-validation"] === true ? { skipValidation: true } : {}),
           ...(deps.generator ? { generator: deps.generator } : {}),
           ...(deps.validator ? { validator: deps.validator } : {}),
@@ -317,6 +339,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     force: parsed.values.force ?? false,
     templateId,
     skipValidation: parsed.values["skip-validation"] === true,
+    runtimeValidationMode,
     stdoutMode,
   };
 
@@ -344,6 +367,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     ...(resolvedDesignPath ? { design: resolvedDesignPath } : {}),
     force: options.force ?? false,
     skipValidation: options.skipValidation ?? false,
+    runtimeValidationMode,
     model: resolveCliModelName(),
     stdout: stdoutMode,
     cwd,

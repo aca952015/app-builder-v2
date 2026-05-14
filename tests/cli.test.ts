@@ -402,7 +402,7 @@ test("runCli generate accepts --skip-validation", async () => {
     const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
 
     await runCli(
-      ["generate", specPath, "--skip-validation", "--stdout", "log"],
+      ["generate", specPath, "--skip-validation", "--runtime-validation-mode", "interactive", "--stdout", "log"],
       {
         generator: new CliTestGenerator(),
         validator: new SuccessfulCliValidator(),
@@ -415,6 +415,7 @@ test("runCli generate accepts --skip-validation", async () => {
     assert.equal(stderrLines.length, 0);
     assert.match(stdoutLines.join("\n"), /- command: generate/);
     assert.match(stdoutLines.join("\n"), /- skipValidation: true/);
+    assert.match(stdoutLines.join("\n"), /- runtimeValidationMode: interactive/);
     assert.match(stdoutLines.join("\n"), /Generated Field Ops Planner/);
 
     const sessionId = await getOnlySessionId(tempRoot);
@@ -559,6 +560,7 @@ test("runCli validate accepts runtimeValidation flag and enters runtime validati
 
     assert.equal(stderrLines.length, 0);
     assert.match(stdoutLines.join("\n"), /- runtimeValidation: true/);
+    assert.match(stdoutLines.join("\n"), /- runtimeValidationMode: non-interactive/);
     assert.match(stdoutLines.join("\n"), /Phase: runtimeValidation/);
     assert.match(stdoutLines.join("\n"), /Validation steps:/);
     assert.match(stdoutLines.join("\n"), /Workflow: complete/);
@@ -793,7 +795,7 @@ test("runCli prints generate execution parameters before running", async () => {
     );
 
     assert.equal(stderrLines.length, 0);
-    assert.deepEqual(stdoutLines.slice(0, 10), [
+    assert.deepEqual(stdoutLines.slice(0, 11), [
       "CLI execution parameters:",
       "- command: generate",
       `- specPath: ${specPath}`,
@@ -801,6 +803,7 @@ test("runCli prints generate execution parameters before running", async () => {
       "- template: mini-app",
       "- force: true",
       "- skipValidation: false",
+      "- runtimeValidationMode: non-interactive",
       "- model: openai:gpt-4.1-mini",
       "- stdout: log",
       `- cwd: ${tempRoot}`,

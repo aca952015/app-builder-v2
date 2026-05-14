@@ -16,7 +16,9 @@ import {
   matchRuntimeInteractionTarget,
   parseDevServerRequestLine,
   runInteractiveRuntimeValidation,
+  runNonInteractiveRuntimeValidation,
   RuntimeInteractionCoverageTracker,
+  runtimeInteractionTargetToProbePath,
   type RuntimeInteractionValidationSession,
 } from "../src/lib/interactive-runtime-validation.js";
 import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
@@ -977,6 +979,36 @@ test("interactive runtime target matching supports page and API dynamic routes",
   assert.equal(matchRuntimeInteractionTarget("GET", "/_next/static/chunks/app.js", targets), null);
 });
 
+test("non-interactive runtime probes sample dynamic page and API routes", () => {
+  const planSpec = buildPlanSpec();
+  planSpec.pages.push({
+    name: "文件预览",
+    route: "/files/[...path]",
+    kind: "detail",
+    purpose: "预览嵌套文件路径。",
+  });
+  planSpec.apis.push({
+    name: "WorkOrderItem",
+    resourceName: "WorkOrder",
+    path: "/app/api/work-orders/[id]/route.ts",
+    methods: ["GET", "PATCH"],
+    requestShape: "工单 ID 或更新对象。",
+    responseShape: "单个工单对象。",
+  });
+
+  const targets = buildRuntimeInteractionTargets(planSpec);
+  const detailPage = targets.find((target) => target.label === "GET /work-orders/[id]");
+  const catchAllPage = targets.find((target) => target.label === "GET /files/[...path]");
+  const itemApi = targets.find((target) => target.label === "PATCH /api/work-orders/[id]");
+
+  assert.ok(detailPage);
+  assert.ok(catchAllPage);
+  assert.ok(itemApi);
+  assert.equal(runtimeInteractionTargetToProbePath(detailPage), "/work-orders/1");
+  assert.equal(runtimeInteractionTargetToProbePath(catchAllPage), "/files/sample/path");
+  assert.equal(runtimeInteractionTargetToProbePath(itemApi), "/api/work-orders/1");
+});
+
 test("interactive runtime coverage rejects API auth failures", () => {
   const tracker = new RuntimeInteractionCoverageTracker(buildRuntimeInteractionTargets(buildPlanSpec()));
 
@@ -999,6 +1031,93 @@ test("interactive runtime coverage rejects API auth failures", () => {
   assert.equal(summary.covered, 1);
   assert.equal(summary.total, 4);
   assert.deepEqual(summary.coveredTargets, ["GET /work-orders"]);
+});
+
+test("non-interactive runtime validation starts dev server and visits every page and API", async (context) => {
+  if (!await canListenOnLocalhost()) {
+    context.skip("local port binding is not available in this sandbox");
+    return;
+  }
+
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-non-interactive-dev-server-"));
+  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const serverPath = path.join(tempRoot, "server.mjs");
+  const devServerStep = {
+    name: "node dev server",
+    command: process.execPath,
+    args: ["server.mjs"],
+    kind: "dev-server" as const,
+  };
+
+  try {
+    await mkdir(deepagentsDirectory, { recursive: true });
+    await writeFile(
+      serverPath,
+      [
+        "import http from 'node:http';",
+        "const port = Number(process.env.PORT);",
+        "function send(req, res, status, body, contentType = 'text/plain') {",
+        "  console.log(`${req.method} ${req.url} ${status} in 1ms`);",
+        "  res.writeHead(status, { 'content-type': contentType });",
+        "  res.end(body);",
+        "}",
+        "const server = http.createServer((req, res) => {",
+        "  if (req.url === '/__app_builder_ready') { send(req, res, 200, 'ready'); return; }",
+        "  if (req.url?.startsWith('/work-orders/1')) { send(req, res, 404, 'dynamic page not seeded'); return; }",
+        "  if (req.url?.startsWith('/work-orders')) { send(req, res, 200, '<main>work orders</main>', 'text/html'); return; }",
+        "  if (req.url?.startsWith('/api/work-orders')) {",
+        "    const status = req.method === 'POST' ? 201 : 200;",
+        "    send(req, res, status, JSON.stringify({ ok: true, method: req.method }), 'application/json');",
+        "    return;",
+        "  }",
+        "  send(req, res, 404, 'missing');",
+        "});",
+        "server.listen(port, '127.0.0.1');",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const runtime = buildTestRuntime({
+      outputDirectory: tempRoot,
+      deepagentsDirectory,
+      deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
+      deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
+    });
+
+    const result = await runNonInteractiveRuntimeValidation({
+      runtime,
+      planSpec: buildPlanSpec(),
+      devServerStep,
+      readyTimeoutMs: 5_000,
+      requestTimeoutMs: 5_000,
+    });
+
+    const dynamicPageRecord = result.artifact.recentRequests.find((record) =>
+      record.source === "non-interactive-probe" && record.targetLabel === "GET /work-orders/[id]"
+    );
+    const artifact = await readFile(runtime.deepagentsRuntimeInteractionValidationPath, "utf8");
+    const log = await readFile(runtime.deepagentsRuntimeValidationLogPath, "utf8");
+
+    assert.deepEqual(result.reasons, []);
+    assert.equal(result.steps[0]?.ok, true);
+    assert.equal(result.artifact.valid, true);
+    assert.equal(result.artifact.validationMode, "non-interactive");
+    assert.equal(result.artifact.completionMode, "automated_probe");
+    assert.equal(result.artifact.coverage.covered, 4);
+    assert.equal(result.artifact.coverage.total, 4);
+    assert.equal(result.artifact.coverageSatisfied, true);
+    assert.equal(dynamicPageRecord?.status, 404);
+    assert.equal(dynamicPageRecord?.counted, true);
+    assert.match(artifact, /"validationMode": "non-interactive"/);
+    assert.match(artifact, /"completionMode": "automated_probe"/);
+    assert.match(log, /=== non-interactive runtime validation ===/);
+    assert.match(log, /\[non-interactive\] GET \/work-orders -> 200/);
+    assert.match(log, /\[non-interactive\] GET \/work-orders\/1 -> 404/);
+    assert.match(log, /\[non-interactive\] POST \/api\/work-orders -> 201/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("interactive runtime parses dev server stdout request lines and cross-origin failures", () => {
@@ -4195,6 +4314,8 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(generatePromptSnapshot, /implementedResources/);
     assert.match(generatePromptSnapshot, /Current stage: Generate Stage/);
     assert.match(generatePromptSnapshot, /template\.runtimeValidation/);
+    assert.match(generatePromptSnapshot, /默认运行验证模式是非交互式/);
+    assert.match(generatePromptSnapshot, /非交互式和交互式二选一运行/);
     assert.match(generatePromptSnapshot, /Host-Enforced Project Config Guard/);
     assert.match(generatePromptSnapshot, /projectConfigChanges` is absent or empty/);
     assert.match(generatePromptSnapshot, /explicitly forbidden to create, modify, delete, rewrite/);
@@ -4203,6 +4324,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(generateRepairPromptSnapshot, /生成修复阶段代理/);
     assert.match(generateRepairPromptSnapshot, /validationFailures/);
     assert.match(generateRepairPromptSnapshot, /runtimeValidationLog/);
+    assert.match(generateRepairPromptSnapshot, /非交互式或交互式运行验证/);
     assert.match(generateRepairPromptSnapshot, /Current stage: Generate Repair Stage/);
     assert.match(sourcePrdSnapshot, /# Field Ops Planner/);
     assert.match(analysisSnapshot, /# Stub 需求分析报告/);
@@ -4227,7 +4349,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.ok(metricNames.includes("plan.validate_artifacts"));
     assert.ok(metricNames.includes("generate.project"));
     assert.ok(metricNames.includes("generate.validate_artifacts"));
-    assert.ok(metricNames.includes("validation.disabled"));
+    assert.ok(metricNames.includes("validation.non_interactive_complete"));
     assert.ok(metricRecords.every((record) => (
       record.version === 1 &&
       record.sessionId === result.sessionId &&
@@ -6475,6 +6597,9 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /Prisma 配置、schema、seed、脚本/);
   assert.match(generatePromptSource, /schema、seed、脚本、认证\/会话和默认入口数据/);
   assert.match(generatePromptSource, /按输入里的 `template\.runtimeValidation` 执行运行验证/);
+  assert.match(generatePromptSource, /默认运行验证模式是非交互式/);
+  assert.match(generatePromptSource, /`planSpec\.pages` 的全部页面路由和 `planSpec\.apis` 的全部 API 方法/);
+  assert.match(generatePromptSource, /非交互式和交互式二选一运行/);
   assert.match(generatePromptSource, /把 `\/app-builder-report\.md` 改成 `\/app\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /页面实现必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
   assert.match(generatePromptSource, /所有承载业务数据的页面必须对接 `planSpec\.apis` 中定义的 Route Handlers/);
@@ -6506,6 +6631,7 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generateRepairPromptSource, /页面修复必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/generation-validation\.json`/);
   assert.match(generateRepairPromptSource, /`\/\.deepagents\/runtime-validation\.log`/);
+  assert.match(generateRepairPromptSource, /非交互式或交互式运行验证/);
   assert.match(generateRepairPromptSource, /持久化、鉴权或启动契约被局部改坏/);
   assert.match(generateRepairPromptSource, /Prisma 配置、schema、seed、脚本/);
   assert.match(generateRepairPromptSource, /schema、seed、脚本、认证\/会话和默认入口数据/);
@@ -6553,10 +6679,13 @@ test("mini-app prompts preserve PRD environment configuration through planSpec",
   assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
   assert.match(generatePromptSource, /最终合并和落盘由 host 负责/);
   assert.match(generatePromptSource, /不应仅因为环境变量合并而包含 `\.env\.example`/);
+  assert.match(generatePromptSource, /默认运行验证模式是非交互式/);
+  assert.match(generatePromptSource, /非交互式和交互式二选一运行/);
   assert.match(generateRepairPromptSource, /planSpec\.environmentVariables/);
   assert.match(generateRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);
   assert.match(generateRepairPromptSource, /不要直接修补根目录 `\/\.env\.example`/);
+  assert.match(generateRepairPromptSource, /非交互式或交互式运行验证/);
   assert.match(generateRepairPromptSource, /声明 locked key 或锁定变量冲突，这是计划规格问题/);
   assert.match(generateRepairPromptSource, /不要修改 `\.env`\/`\.env\.example` 或应用代码来绕过锁定/);
 });

@@ -81,7 +81,8 @@
 - 不要直接写入或修改根目录 `/.env`、`/.env.example`；对 `.env.example` 的新增环境变量只能通过已验证的 `planSpec.environmentVariables` 表达，最终合并和落盘由 host 负责。
 - 不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；这些 key 的最终值必须保持 starter 默认值。
 - 宿主会在生成阶段结束后按输入里的 `template.runtimeValidation` 执行运行验证；若 `copyEnvExample` 未禁用，还会先准备 `.env`。你生成的代码、脚本、Prisma 配置和环境文件必须让这些步骤连续通过。
-- 如果输入里的 `template.interactiveRuntimeValidation.enabled` 为 true，宿主还会在生成门禁通过后启动 dev server，并用本机默认浏览器打开真实 dev server URL；宿主会收集 dev server stdout/stderr 判断是否需要修复。页面和 API 必须能支撑真实用户点击、表单提交、列表/详情跳转和 API 调用，不能只做静态展示来绕过交互。
+- 默认运行验证模式是非交互式：宿主会启动 dev server，并自动访问 `planSpec.pages` 的全部页面路由和 `planSpec.apis` 的全部 API 方法，收集 HTTP 状态、响应体摘要和 dev server stdout/stderr 判断是否需要修复。
+- 如果用户显式选择交互式运行验证且 `template.interactiveRuntimeValidation.enabled` 为 true，宿主会改用交互式代理/浏览器验证；非交互式和交互式二选一运行，不会同时运行。页面和 API 必须能支撑真实用户点击、表单提交、列表/详情跳转和 API 调用，不能只做静态展示来绕过验证。
 - 不要生成依赖外部 CDN 的实现，不要使用 `eval()`、`new Function()`、`document.write()`。
 - 在整个阶段中，todo 是当前执行状态的唯一进度面板；任何返工、补写或完成都必须先反映到 todo。
 

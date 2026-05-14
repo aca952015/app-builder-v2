@@ -27,13 +27,14 @@ import {
 import type { PlanSpec } from "./plan-spec.js";
 import type {
   GenerationValidationStep,
+  RuntimeValidationMode,
   TemplateInteractiveRuntimeValidation,
   TemplateRuntimeValidationStep,
   TextGeneratorRuntime,
 } from "./types.js";
 
 type RuntimeInteractionTargetKind = "page" | "api";
-type RuntimeInteractionRequestSource = "proxy" | "dev-server-output";
+type RuntimeInteractionRequestSource = "proxy" | "dev-server-output" | "non-interactive-probe";
 
 export type RuntimeInteractionTarget = {
   id: string;
@@ -73,10 +74,11 @@ export type RuntimeInteractionCoverageSummary = {
 export type RuntimeInteractionValidationArtifact = {
   valid: boolean;
   reasons: string[];
+  validationMode?: RuntimeValidationMode;
   proxyUrl?: string;
   validationUrl?: string;
   manualCompleted?: boolean;
-  completionMode?: "manual_override" | "coverage_proven";
+  completionMode?: "manual_override" | "coverage_proven" | "automated_probe";
   coverageSatisfied: boolean;
   criticalUncoveredTargets: string[];
   implementationRequest?: RuntimeInteractionImplementationRequest;
@@ -183,6 +185,7 @@ export type RuntimeInteractionValidationSession = {
 
 const MAX_RECORDED_REQUESTS = 100;
 const REQUEST_POLL_INTERVAL_MS = 200;
+const DEFAULT_NON_INTERACTIVE_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_DEV_SERVER_OUTPUT_CHARS = 40_000;
 const MAX_RESPONSE_BODY_CAPTURE_BYTES = 32_768;
 const MAX_RESPONSE_BODY_SUMMARY_CHARS = 6_000;
@@ -919,14 +922,21 @@ export class RuntimeInteractionCoverageTracker {
 
   constructor(private readonly targets: RuntimeInteractionTarget[]) {}
 
-  record(input: RuntimeInteractionRecordInput): {
+  record(input: RuntimeInteractionRecordInput, options: { countNotFoundAsCovered?: boolean } = {}): {
     record: RuntimeInteractionRequestRecord;
     repairReason?: string;
   } {
     const rawPath = input.path;
     const pathname = normalizeRoutePath(input.path);
     const target = matchRuntimeInteractionTarget(input.method, pathname, this.targets);
-    const counted = Boolean(target && statusCountsForCoverage(input.status, target));
+    const counted = Boolean(target && (
+      statusCountsForCoverage(input.status, target) ||
+      (
+        options.countNotFoundAsCovered === true &&
+        input.status === 404 &&
+        !isApiAuthorizationFailure(target, input.status, pathname)
+      )
+    ));
     if (target && counted) {
       this.coveredTargetIds.add(target.id);
     }
@@ -1026,12 +1036,155 @@ export class RuntimeInteractionCoverageTracker {
   }
 }
 
+function hasDynamicRoutePattern(route: string): boolean {
+  return routeSegments(route).some((segment) => isDynamicSegment(segment) || isCatchAllSegment(segment));
+}
+
+function sampleDynamicRouteSegment(segment: string): string[] {
+  if (isCatchAllSegment(segment)) {
+    return ["sample", "path"];
+  }
+
+  const normalized = segment
+    .replace(/^\[/, "")
+    .replace(/\]$/, "")
+    .replace(/^:/, "")
+    .toLowerCase();
+  if (/(^|_|\b)(id|key|index|number)(_|$|\b)/.test(normalized)) {
+    return ["1"];
+  }
+  return ["sample"];
+}
+
+export function runtimeInteractionTargetToProbePath(target: RuntimeInteractionTarget): string {
+  const sampledSegments = routeSegments(target.path).flatMap((segment) => (
+    isDynamicSegment(segment) || isCatchAllSegment(segment)
+      ? sampleDynamicRouteSegment(segment)
+      : [segment]
+  ));
+  return sampledSegments.length === 0 ? "/" : `/${sampledSegments.join("/")}`;
+}
+
+function shouldAllowNotFoundProbeCoverage(target: RuntimeInteractionTarget): boolean {
+  return hasDynamicRoutePattern(target.path);
+}
+
+async function probeRuntimeInteractionTarget(options: {
+  devPort: number;
+  target: RuntimeInteractionTarget;
+  probePath: string;
+  devServerUrl: string;
+  devServerOutput: string;
+  requestTimeoutMs: number;
+}): Promise<RuntimeInteractionRecordInput> {
+  const startedAt = Date.now();
+  const method = options.target.method.toUpperCase();
+  const shouldSendJsonBody = method !== "GET" && method !== "HEAD";
+
+  return await new Promise<RuntimeInteractionRecordInput>((resolve) => {
+    const capturedChunks: Buffer[] = [];
+    let capturedBytes = 0;
+    let totalResponseBytes = 0;
+    let settled = false;
+    const settle = (record: RuntimeInteractionRecordInput) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(record);
+    };
+
+    const requestOptions = {
+      host: "127.0.0.1",
+      port: options.devPort,
+      method,
+      path: options.probePath,
+      headers: {
+        accept: "application/json, text/html;q=0.9, text/plain;q=0.8, */*;q=0.5",
+        "user-agent": "app-builder-runtime-validator/1.0",
+        "x-app-builder-runtime-validation": "non-interactive",
+        ...(shouldSendJsonBody
+          ? {
+              "content-type": "application/json; charset=utf-8",
+              "content-length": "2",
+            }
+          : {}),
+      },
+      timeout: options.requestTimeoutMs,
+    };
+
+    const req = httpRequest(requestOptions, (response) => {
+      response.on("data", (chunk: Buffer) => {
+        totalResponseBytes += chunk.length;
+        if (capturedBytes < MAX_RESPONSE_BODY_CAPTURE_BYTES) {
+          const remaining = MAX_RESPONSE_BODY_CAPTURE_BYTES - capturedBytes;
+          const capturedChunk = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+          capturedChunks.push(capturedChunk);
+          capturedBytes += capturedChunk.length;
+        }
+      });
+
+      response.once("end", () => {
+        const responseBodySummary = summarizeHttpResponseBody(capturedChunks, totalResponseBytes);
+        settle({
+          source: "non-interactive-probe",
+          method,
+          path: options.probePath,
+          durationMs: Date.now() - startedAt,
+          proxiedUrl: `${options.devServerUrl}${options.probePath}`,
+          devServerOutputContext: recentOutputLines(options.devServerOutput, 16),
+          ...(response.statusCode !== undefined ? { status: response.statusCode } : {}),
+          responseHeaders: summarizeResponseHeaders(response.headers),
+          ...(responseBodySummary ? { responseBodySummary } : {}),
+        });
+      });
+
+      response.once("error", (error) => {
+        const responseBodySummary = summarizeHttpResponseBody(capturedChunks, totalResponseBytes);
+        settle({
+          source: "non-interactive-probe",
+          method,
+          path: options.probePath,
+          status: 502,
+          durationMs: Date.now() - startedAt,
+          proxiedUrl: `${options.devServerUrl}${options.probePath}`,
+          errorSummary: `读取 dev server 响应失败：${errorSummary(error)}`,
+          devServerOutputContext: recentOutputLines(options.devServerOutput, 16),
+          ...(responseBodySummary ? { responseBodySummary } : {}),
+        });
+      });
+    });
+
+    req.once("timeout", () => {
+      req.destroy(new Error(`Request timed out for ${method} ${options.probePath}`));
+    });
+    req.once("error", (error) => {
+      settle({
+        source: "non-interactive-probe",
+        method,
+        path: options.probePath,
+        durationMs: Date.now() - startedAt,
+        proxiedUrl: `${options.devServerUrl}${options.probePath}`,
+        errorSummary: errorSummary(error),
+        devServerOutputContext: recentOutputLines(options.devServerOutput, 16),
+      });
+    });
+
+    if (shouldSendJsonBody) {
+      req.write("{}");
+    }
+    req.end();
+  });
+}
+
 function buildRuntimeInteractionArtifact(options: {
   valid: boolean;
   reasons: string[];
+  validationMode?: RuntimeValidationMode;
   proxyUrl?: string;
   validationUrl?: string;
   manualCompleted?: boolean;
+  completionMode?: RuntimeInteractionValidationArtifact["completionMode"];
   implementationRequest?: RuntimeInteractionImplementationRequest;
   devServerUrl?: string;
   browserOpenResult?: BrowserOpenResult;
@@ -1049,6 +1202,7 @@ function buildRuntimeInteractionArtifact(options: {
     recentRequests: options.tracker.getRecentRequests(),
     valid: options.valid,
     reasons: options.reasons,
+    ...(options.validationMode ? { validationMode: options.validationMode } : {}),
     startedAt: options.startedAt,
     coverageThreshold: options.config.coverageThreshold,
     idleTimeoutMs: options.config.idleTimeoutMs,
@@ -1068,6 +1222,8 @@ function buildRuntimeInteractionArtifact(options: {
   if (options.manualCompleted) {
     artifact.manualCompleted = true;
     artifact.completionMode = "manual_override";
+  } else if (options.completionMode) {
+    artifact.completionMode = options.completionMode;
   } else if (options.valid && artifact.coverageSatisfied) {
     artifact.completionMode = "coverage_proven";
   }
@@ -1618,6 +1774,281 @@ async function startDevServerProxy(options: {
   });
 
   return { server, proxyUrl };
+}
+
+export async function runNonInteractiveRuntimeValidation(options: {
+  runtime: TextGeneratorRuntime;
+  planSpec: PlanSpec;
+  devServerStep: TemplateRuntimeValidationStep;
+  readyTimeoutMs?: number;
+  requestTimeoutMs?: number;
+}): Promise<RuntimeInteractionValidationResult> {
+  const startedAt = new Date().toISOString();
+  const targets = buildRuntimeInteractionTargets(options.planSpec);
+  const tracker = new RuntimeInteractionCoverageTracker(targets);
+  const readyTimeoutMs = options.readyTimeoutMs ?? 90_000;
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_NON_INTERACTIVE_REQUEST_TIMEOUT_MS;
+  const devPort = await reserveFreePort();
+  const devServerUrl = `http://127.0.0.1:${devPort}`;
+  const config: TemplateInteractiveRuntimeValidation = {
+    enabled: false,
+    coverageThreshold: 1,
+    idleTimeoutMs: 0,
+    readyTimeoutMs,
+    devServerStep: options.devServerStep,
+  };
+
+  let output = "";
+  let child: ChildProcess | null = null;
+  let managedDevServer: ManagedDevServerProcess | null = null;
+  let devServerProcessCleanup: DevServerProcessCleanupResult | undefined;
+  let failureReason: string | null = null;
+  let failureRecord: RuntimeInteractionRequestRecord | undefined;
+  let stopping = false;
+  let pendingOutputLine = "";
+
+  const buildFailureChain = (): RuntimeInteractionFailureChain | undefined => {
+    if (!failureReason) {
+      return undefined;
+    }
+
+    return {
+      reason: failureReason,
+      devServerUrl,
+      ...(failureRecord ? { request: failureRecord } : {}),
+      recentRequests: tracker.getRecentRequests(),
+      recentDevServerOutput: recentOutputLines(output, 24),
+    };
+  };
+
+  const finish = async (valid: boolean, reasons: string[]) => {
+    stopping = true;
+    if (managedDevServer && !devServerProcessCleanup) {
+      devServerProcessCleanup = await terminateManagedDevServerProcess(managedDevServer);
+    } else if (child && !devServerProcessCleanup) {
+      devServerProcessCleanup = await terminateDevServerProcess(child);
+    }
+    child = null;
+    managedDevServer = null;
+
+    const failureChain = buildFailureChain();
+    const artifact = buildRuntimeInteractionArtifact({
+      valid,
+      reasons,
+      validationMode: "non-interactive",
+      ...(valid ? { completionMode: "automated_probe" } : {}),
+      devServerUrl,
+      devServerOutput: output,
+      ...(failureReason ? { detectedDevServerError: failureReason } : {}),
+      ...(devServerProcessCleanup ? { devServerProcessCleanup } : {}),
+      startedAt,
+      completedAt: new Date().toISOString(),
+      config,
+      tracker,
+      ...(failureChain ? { failureChain } : {}),
+    });
+    await writeRuntimeInteractionArtifact(options.runtime.deepagentsRuntimeInteractionValidationPath, artifact);
+    return artifact;
+  };
+
+  const recordDevServerOutput = (chunk: Buffer) => {
+    const text = chunk.toString("utf8");
+    const detectedOutputFailure = failureReason
+      ? undefined
+      : detectDevServerOutputFailure(`${output}${text}`) ?? detectDevServerOutputFailure(text);
+    output = appendBoundedDevServerOutput(output, text);
+    void fs.appendFile(options.runtime.deepagentsRuntimeValidationLogPath, text, "utf8");
+
+    const outputWithPending = `${pendingOutputLine}${text}`;
+    const outputLines = outputWithPending.split(/\r?\n/);
+    pendingOutputLine = outputLines.pop() ?? "";
+    for (const line of outputLines) {
+      const requestRecord = parseDevServerRequestLine(line);
+      if (!requestRecord) {
+        continue;
+      }
+      const recordResult = tracker.record(requestRecord);
+      if (!failureReason && recordResult.repairReason) {
+        failureReason = recordResult.repairReason;
+        failureRecord = recordResult.record;
+      }
+    }
+
+    if (!failureReason) {
+      failureReason = detectedOutputFailure ?? detectDevServerOutputFailure(output) ?? null;
+    }
+  };
+
+  await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+    "=== non-interactive runtime validation ===",
+    `$ PORT=${devPort} HOSTNAME=127.0.0.1 ${[options.devServerStep.command, ...options.devServerStep.args].join(" ")}`,
+    `[non-interactive] Planned targets: ${targets.map((target) => target.label).join(", ")}`,
+    "",
+  ]);
+
+  try {
+    await cleanupStaleNextDevServerBeforeStart({
+      outputDirectory: options.runtime.outputDirectory,
+      logPath: options.runtime.deepagentsRuntimeValidationLogPath,
+    });
+
+    try {
+      managedDevServer = await spawnDevServer({
+        step: options.devServerStep,
+        cwd: options.runtime.outputDirectory,
+        port: devPort,
+      });
+      child = managedDevServer.child;
+    } catch (error) {
+      const reason = `非交互式运行验证无法启动开发服务器：${errorSummary(error)}`;
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] ${reason}`,
+        "",
+      ]);
+      const artifact = await finish(false, [reason]);
+      return {
+        reasons: [reason],
+        steps: [{ name: options.devServerStep.name, ok: false, detail: reason }],
+        artifact,
+      };
+    }
+
+    child.stdout?.on("data", recordDevServerOutput);
+    child.stderr?.on("data", recordDevServerOutput);
+    child.once("exit", (exitCode, signal) => {
+      if (stopping) {
+        return;
+      }
+      failureReason = `开发服务器提前退出，exitCode=${exitCode ?? "null"} signal=${signal ?? "null"}。摘要：${summarizeCommandOutput(output)}`;
+    });
+
+    const readyTimeoutAt = Date.now() + readyTimeoutMs;
+    while (Date.now() < readyTimeoutAt) {
+      if (failureReason) {
+        const artifact = await finish(false, [failureReason]);
+        await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+          `[error] ${failureReason}`,
+          "",
+        ]);
+        return {
+          reasons: [`非交互式运行验证失败：${failureReason} 详见 .deepagents/runtime-validation.log。`],
+          steps: [{ name: options.devServerStep.name, ok: false, detail: failureReason }],
+          artifact,
+        };
+      }
+
+      if (await pingDevServer(devPort)) {
+        break;
+      }
+
+      await sleep(1_000);
+    }
+
+    if (!(await pingDevServer(devPort))) {
+      const reason = `非交互式运行验证等待开发服务器启动超时。摘要：${summarizeCommandOutput(output)}`;
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] ${reason}`,
+        "",
+      ]);
+      const artifact = await finish(false, [reason]);
+      return {
+        reasons: [reason],
+        steps: [{ name: options.devServerStep.name, ok: false, detail: reason }],
+        artifact,
+      };
+    }
+
+    await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+      `[non-interactive] Dev server ready at ${devServerUrl}.`,
+      "",
+    ]);
+
+    const reasons: string[] = [];
+    for (const target of targets) {
+      const probePath = runtimeInteractionTargetToProbePath(target);
+      const recordInput = await probeRuntimeInteractionTarget({
+        devPort,
+        target,
+        probePath,
+        devServerUrl,
+        devServerOutput: output,
+        requestTimeoutMs,
+      });
+      const recordResult = tracker.record(recordInput, {
+        countNotFoundAsCovered: shouldAllowNotFoundProbeCoverage(target),
+      });
+      const record = recordResult.record;
+      const status = record.status === undefined ? "ERR" : String(record.status);
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[non-interactive] ${record.method} ${probePath} -> ${status} (${target.label})`,
+        ...(record.responseBodySummary ? [`[non-interactive] response body: ${record.responseBodySummary}`] : []),
+        ...(record.errorSummary ? [`[non-interactive] error: ${record.errorSummary}`] : []),
+      ]);
+
+      const staticNotFoundReason =
+        record.status === 404 && !shouldAllowNotFoundProbeCoverage(target)
+          ? `非交互式运行验证请求返回 404：${record.method} ${probePath}（目标：${target.label}）`
+          : undefined;
+      const reason = recordResult.repairReason ?? staticNotFoundReason;
+      if (reason) {
+        reasons.push(reason);
+        if (!failureReason) {
+          failureReason = reason;
+          failureRecord = record;
+        }
+      }
+    }
+
+    const coverage = tracker.getSummary();
+    if (coverage.covered < coverage.total) {
+      reasons.push(
+        `非交互式运行验证覆盖不足：${coverage.covered}/${coverage.total}。未覆盖：${coverage.uncoveredTargets.join(", ") || "无"}`,
+      );
+    }
+
+    if (reasons.length > 0) {
+      const artifact = await finish(false, reasons);
+      await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        `[error] Non-interactive runtime validation failed. Covered ${coverage.covered}/${coverage.total}.`,
+        "",
+      ]);
+      return {
+        reasons: [`非交互式运行验证失败：${reasons.join(" | ")} 详见 .deepagents/runtime-validation.log。`],
+        steps: [{
+          name: options.devServerStep.name,
+          ok: false,
+          detail: `自动访问 ${coverage.covered}/${coverage.total} 个页面/API 目标后失败：${reasons.join(" | ")}`,
+        }],
+        artifact,
+      };
+    }
+
+    const artifact = await finish(true, []);
+    await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+      `[ok] Non-interactive runtime validation visited all ${coverage.total} page/API targets and detected no 5xx, API auth failure, proxy failure, or dev server error output.`,
+      "",
+    ]);
+    return {
+      reasons: [],
+      steps: [{
+        name: options.devServerStep.name,
+        ok: true,
+        detail: `非交互式运行验证已启动 dev server，并自动访问全部 ${coverage.total} 个页面/API 目标。`,
+      }],
+      artifact,
+    };
+  } finally {
+    child?.stdout?.off("data", recordDevServerOutput);
+    child?.stderr?.off("data", recordDevServerOutput);
+    if ((child || managedDevServer) && !devServerProcessCleanup) {
+      stopping = true;
+      if (managedDevServer) {
+        await terminateManagedDevServerProcess(managedDevServer);
+      } else if (child) {
+        await terminateDevServerProcess(child);
+      }
+    }
+  }
 }
 
 export async function runInteractiveRuntimeValidation(options: {

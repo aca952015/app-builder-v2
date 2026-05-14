@@ -124,6 +124,8 @@ export type TemplateInteractiveRuntimeValidation = {
   devServerStep?: TemplateRuntimeValidationStep;
 };
 
+export type RuntimeValidationMode = "non-interactive" | "interactive";
+
 export const TEMPLATE_PHASE_EFFORTS = ["low", "medium", "high", "max"] as const;
 
 export type TemplatePhaseEffort = typeof TEMPLATE_PHASE_EFFORTS[number];
@@ -143,7 +145,7 @@ export type TemplateRepairRetries = {
 };
 
 export type GeneratedAppValidator = {
-  validate(outputDirectory: string, runtime: TextGeneratorRuntime): Promise<{
+  validate(outputDirectory: string, runtime: TextGeneratorRuntime, planSpec?: PlanSpec): Promise<{
     reasons: string[];
     steps: GenerationValidationStep[];
   }>;
@@ -408,6 +410,7 @@ export type GenerateAppOptions = {
   templateId?: string;
   force?: boolean;
   skipValidation?: boolean;
+  runtimeValidationMode?: RuntimeValidationMode;
   stdoutMode?: StdoutMode;
   designPath?: string;
   generator?: TextGenerator;

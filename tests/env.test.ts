@@ -41,6 +41,7 @@ import {
   formatWorkflowStageLine,
   mergeRuntimeStatus,
   modelRoleForRuntimePhase,
+  normalizeWriteTodosToolCallArgs,
   renderArtifactStatus,
   formatElapsedTime,
   resolveDeepagentsStreamModes,
@@ -162,6 +163,44 @@ test("buildGenerationSubagents exposes subagents only for generation phases", ()
   const repairSubagents = buildGenerationSubagents("generateRepair", false);
   assert.equal(repairSubagents.length, 3);
   assert.equal("skills" in repairSubagents[0]!, false);
+
+  const middleware = [{ name: "compatibility" }];
+  const middlewareSubagents = buildGenerationSubagents("generate", false, "", middleware);
+  assert.equal(middlewareSubagents[0]?.middleware, middleware);
+});
+
+test("normalizeWriteTodosToolCallArgs accepts stringified and loose todo arrays", () => {
+  const malformedSessionTodos = [
+    '{"content": "Read existing files (globals.css, layout.tsx, page.tsx, types)", "status": "in_progress", "pending": "pending"}',
+    '{"content": "Update /app/globals.css with design system styles", "status": "pending", "pending"}',
+  ].join(", ");
+
+  assert.deepEqual(
+    normalizeWriteTodosToolCallArgs({
+      todos: `[${malformedSessionTodos}]`,
+    }),
+    {
+      todos: [
+        { content: "Read existing files (globals.css, layout.tsx, page.tsx, types)", status: "in_progress" },
+        { content: "Update /app/globals.css with design system styles", status: "pending" },
+      ],
+    },
+  );
+
+  assert.deepEqual(
+    normalizeWriteTodosToolCallArgs(JSON.stringify({
+      todos: [
+        { content: "分析需求", status: "completed" },
+        { content: "生成计划", status: "in_progress" },
+      ],
+    })),
+    {
+      todos: [
+        { content: "分析需求", status: "completed" },
+        { content: "生成计划", status: "in_progress" },
+      ],
+    },
+  );
 });
 
 test("resolveModelRoleConfigs rejects missing role API key coverage without a global key", () => {

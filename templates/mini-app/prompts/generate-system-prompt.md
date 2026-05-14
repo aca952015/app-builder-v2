@@ -73,4 +73,6 @@
 
 你生成的代码必须让这些步骤连续通过。若 `planSpec` 要求持久化，请确保 schema、seed、Prisma 配置和环境文件与 starter 基础设施保持一致。
 
-如果输入里的 `template.interactiveRuntimeValidation.enabled` 为 true，宿主还会在生成门禁通过后启动 dev server，并用本机默认浏览器打开真实 dev server URL；宿主会收集 dev server stdout/stderr 判断是否需要修复。页面必须支持真实用户操作触发 API，而不是只输出静态占位内容。
+默认运行验证模式是非交互式：宿主会启动 dev server，并自动访问 `planSpec.pages` 的全部页面路由和 `planSpec.apis` 的全部 API 方法，收集 HTTP 状态、响应体摘要和 dev server stdout/stderr 判断是否需要修复。
+
+如果用户显式选择交互式运行验证且 `template.interactiveRuntimeValidation.enabled` 为 true，宿主会改用交互式代理/浏览器验证；非交互式和交互式二选一运行，不会同时运行。页面必须支持真实用户操作触发 API，而不是只输出静态占位内容。

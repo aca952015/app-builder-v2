@@ -51,7 +51,7 @@ export type TodoBoardState = {
     proxyUrl?: string;
     validationUrl?: string;
     manualCompleted?: boolean;
-    completionMode?: "manual_override" | "coverage_proven";
+    completionMode?: "manual_override" | "coverage_proven" | "automated_probe";
     coverageSatisfied?: boolean;
     criticalUncoveredTargets?: string[];
     implementationRequest?: string;
@@ -640,6 +640,9 @@ function buildRuntimeInteractionLines(state: TodoBoardState): string[] {
   }
   if (interaction.completionMode === "coverage_proven") {
     lines.push("  完成方式：覆盖率证明通过");
+  }
+  if (interaction.completionMode === "automated_probe") {
+    lines.push("  完成方式：非交互式自动访问通过");
   }
   if (interaction.criticalUncoveredTargets && interaction.criticalUncoveredTargets.length > 0) {
     lines.push(`  关键未覆盖：${interaction.criticalUncoveredTargets.slice(0, 4).join(", ")}`);
