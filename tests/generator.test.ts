@@ -1058,18 +1058,27 @@ test("filterRedundantValidationDetailLines removes validation detail already pre
 test("routeToPageFileCandidates normalizes common dynamic route syntaxes to Next App Router paths", () => {
   assert.deepEqual(routeToPageFileCandidates("/workorders/:id"), [
     "app/workorders/[id]/page.tsx",
+    "app/(app)/workorders/[id]/page.tsx",
     "app/(admin)/workorders/[id]/page.tsx",
     "app/(full-width-pages)/workorders/[id]/page.tsx",
   ]);
   assert.deepEqual(routeToPageFileCandidates("/alarms/[source_Path]"), [
     "app/alarms/[source_Path]/page.tsx",
+    "app/(app)/alarms/[source_Path]/page.tsx",
     "app/(admin)/alarms/[source_Path]/page.tsx",
     "app/(full-width-pages)/alarms/[source_Path]/page.tsx",
   ]);
   assert.deepEqual(routeToPageFileCandidates("/files/:path+"), [
     "app/files/[...path]/page.tsx",
+    "app/(app)/files/[...path]/page.tsx",
     "app/(admin)/files/[...path]/page.tsx",
     "app/(full-width-pages)/files/[...path]/page.tsx",
+  ]);
+  assert.deepEqual(routeToPageFileCandidates("/"), [
+    "app/page.tsx",
+    "app/(app)/page.tsx",
+    "app/(admin)/page.tsx",
+    "app/(full-width-pages)/page.tsx",
   ]);
   assert.equal(routeToAdminPagePath("/alarms/:source_Path"), "app/(admin)/alarms/[source_Path]/page.tsx");
 });
@@ -1091,6 +1100,40 @@ test("interactive runtime target matching supports page and API dynamic routes",
   assert.equal(matchRuntimeInteractionTarget("GET", "/work-orders/123", targets)?.label, "GET /work-orders/[id]");
   assert.equal(matchRuntimeInteractionTarget("PATCH", "/api/work-orders/123", targets)?.label, "PATCH /api/work-orders/[id]");
   assert.equal(matchRuntimeInteractionTarget("GET", "/_next/static/chunks/app.js", targets), null);
+});
+
+test("static routes take priority over dynamic routes in runtime target matching", () => {
+  const planSpec = buildPlanSpec();
+  planSpec.pages.push(
+    { name: "EquipmentDetail", route: "/resource/equipment/[id]", kind: "detail", purpose: "详情" },
+    { name: "EquipmentMaintenance", route: "/resource/equipment/maintenance", kind: "list", purpose: "维护" },
+    { name: "EquipmentMaintenanceDetail", route: "/resource/equipment/maintenance/[id]", kind: "detail", purpose: "维护详情" },
+    { name: "AdminSectionDetail", route: "/admin/[section]/[id]", kind: "detail", purpose: "管理详情" },
+    { name: "TenantSettingsProfile", route: "/[tenant]/settings/profile", kind: "detail", purpose: "租户设置" },
+  );
+
+  const targets = buildRuntimeInteractionTargets(planSpec);
+
+  assert.equal(
+    matchRuntimeInteractionTarget("GET", "/resource/equipment/maintenance", targets)?.label,
+    "GET /resource/equipment/maintenance",
+    "static list route should match before dynamic [id]",
+  );
+  assert.equal(
+    matchRuntimeInteractionTarget("GET", "/resource/equipment/maintenance/1", targets)?.label,
+    "GET /resource/equipment/maintenance/[id]",
+    "dynamic route should still match its own path",
+  );
+  assert.equal(
+    matchRuntimeInteractionTarget("GET", "/resource/equipment/123", targets)?.label,
+    "GET /resource/equipment/[id]",
+    "dynamic route should match when no static route exists",
+  );
+  assert.equal(
+    matchRuntimeInteractionTarget("GET", "/admin/settings/profile", targets)?.label,
+    "GET /admin/[section]/[id]",
+    "earlier static segments should outrank later aggregate specificity",
+  );
 });
 
 test("non-interactive runtime probes sample dynamic page and API routes", () => {

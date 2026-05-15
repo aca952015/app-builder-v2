@@ -24,6 +24,13 @@ import {
   type DevServerProcessCleanupResult,
   type ManagedDevServerProcess,
 } from "./dev-server-process.js";
+import {
+  compareRoutePatternsBySpecificity,
+  hasDynamicRoutePattern,
+  normalizeRoutePath,
+  routePatternMatchesPath,
+  routePatternToSamplePath,
+} from "./app-router.js";
 import type { PlanSpec } from "./plan-spec.js";
 import type {
   GenerationValidationStep,
@@ -773,68 +780,6 @@ async function pingDevServer(port: number): Promise<boolean> {
   });
 }
 
-function normalizeRoutePath(route: string): string {
-  const withoutQuery = route.split("?")[0] ?? route;
-  const withLeadingSlash = withoutQuery.startsWith("/") ? withoutQuery : `/${withoutQuery}`;
-  const trimmed = withLeadingSlash.replace(/\/+$/g, "");
-  return trimmed === "" ? "/" : trimmed;
-}
-
-function routeSegments(route: string): string[] {
-  const normalized = normalizeRoutePath(route);
-  if (normalized === "/") {
-    return [];
-  }
-  return normalized.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
-}
-
-function isDynamicSegment(segment: string): boolean {
-  return (
-    (/^\[[^.[\]]+\]$/.test(segment) && !segment.startsWith("[...")) ||
-    (/^:[A-Za-z0-9_]+$/.test(segment))
-  );
-}
-
-function isCatchAllSegment(segment: string): boolean {
-  return (
-    /^\[\.\.\.[^.[\]]+\]$/.test(segment) ||
-    /^:[A-Za-z0-9_][A-Za-z0-9_]*[+*]$/.test(segment)
-  );
-}
-
-function matchSegments(pattern: string[], actual: string[]): boolean {
-  if (pattern.length === 0) {
-    return actual.length === 0;
-  }
-
-  const [patternHead, ...patternTail] = pattern;
-  if (!patternHead) {
-    return actual.length === 0;
-  }
-
-  if (isCatchAllSegment(patternHead)) {
-    if (patternHead.endsWith("*") && actual.length === 0) {
-      return matchSegments(patternTail, actual);
-    }
-    return actual.length > 0;
-  }
-
-  const [actualHead, ...actualTail] = actual;
-  if (!actualHead) {
-    return false;
-  }
-
-  if (isDynamicSegment(patternHead)) {
-    return matchSegments(patternTail, actualTail);
-  }
-
-  return patternHead === actualHead && matchSegments(patternTail, actualTail);
-}
-
-function routeMatches(pattern: string, actualPath: string): boolean {
-  return matchSegments(routeSegments(pattern), routeSegments(actualPath));
-}
-
 export function apiFilePathToHttpPath(apiFilePath: string): string {
   const normalized = apiFilePath.replace(/^\/+/, "");
   const withoutPrefix = normalized.replace(/^app\/api\//, "");
@@ -907,11 +852,15 @@ export function matchRuntimeInteractionTarget(
 ): RuntimeInteractionTarget | null {
   const normalizedMethod = method.toUpperCase();
   const normalizedPath = normalizeRoutePath(pathname);
-  const apiTargets = targets.filter((target) => target.kind === "api");
-  const pageTargets = targets.filter((target) => target.kind === "page");
+  const apiTargets = targets
+    .filter((target) => target.kind === "api")
+    .sort((a, b) => compareRoutePatternsBySpecificity(a.path, b.path));
+  const pageTargets = targets
+    .filter((target) => target.kind === "page")
+    .sort((a, b) => compareRoutePatternsBySpecificity(a.path, b.path));
 
   for (const target of apiTargets) {
-    if (target.method === normalizedMethod && routeMatches(target.path, normalizedPath)) {
+    if (target.method === normalizedMethod && routePatternMatchesPath(target.path, normalizedPath)) {
       return target;
     }
   }
@@ -921,7 +870,7 @@ export function matchRuntimeInteractionTarget(
   }
 
   for (const target of pageTargets) {
-    if (routeMatches(target.path, normalizedPath)) {
+    if (routePatternMatchesPath(target.path, normalizedPath)) {
       return target;
     }
   }
@@ -1066,33 +1015,8 @@ export class RuntimeInteractionCoverageTracker {
   }
 }
 
-function hasDynamicRoutePattern(route: string): boolean {
-  return routeSegments(route).some((segment) => isDynamicSegment(segment) || isCatchAllSegment(segment));
-}
-
-function sampleDynamicRouteSegment(segment: string): string[] {
-  if (isCatchAllSegment(segment)) {
-    return ["sample", "path"];
-  }
-
-  const normalized = segment
-    .replace(/^\[/, "")
-    .replace(/\]$/, "")
-    .replace(/^:/, "")
-    .toLowerCase();
-  if (/(^|_|\b)(id|key|index|number)(_|$|\b)/.test(normalized)) {
-    return ["1"];
-  }
-  return ["sample"];
-}
-
 export function runtimeInteractionTargetToProbePath(target: RuntimeInteractionTarget): string {
-  const sampledSegments = routeSegments(target.path).flatMap((segment) => (
-    isDynamicSegment(segment) || isCatchAllSegment(segment)
-      ? sampleDynamicRouteSegment(segment)
-      : [segment]
-  ));
-  return sampledSegments.length === 0 ? "/" : `/${sampledSegments.join("/")}`;
+  return routePatternToSamplePath(target.path);
 }
 
 function shouldAllowNotFoundProbeCoverage(target: RuntimeInteractionTarget): boolean {
