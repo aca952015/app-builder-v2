@@ -28,6 +28,7 @@ import {
 } from "../src/lib/interactive-runtime-validation.js";
 import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
 import { validatePlanSpec, type PlanSpec } from "../src/lib/plan-spec.js";
+import { validateInteractionContract, type InteractionContract } from "../src/lib/interaction-contract.js";
 import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
 import { buildPlanProjectPayload, buildPlanRepairPayload, runDeepAgentWithLogs } from "../src/lib/text-generator.js";
 import { closeWorkflowBoard } from "../src/lib/terminal-ui.js";
@@ -364,10 +365,18 @@ function uniqueApiPaths(planSpec: PlanSpec): string[] {
   return Array.from(new Set(planSpec.apis.map((api) => api.path)));
 }
 
+function buildEmptyInteractionContract(): InteractionContract {
+  return {
+    flows: [],
+    internalOperations: [],
+    externalOperations: [],
+  };
+}
+
 async function writeEmptyInteractionContract(runtime: TextGeneratorRuntime): Promise<void> {
   await writeFile(
     runtime.deepagentsInteractionContractPath,
-    `${JSON.stringify({ flows: [], internalOperations: [], externalOperations: [] }, null, 2)}\n`,
+    `${JSON.stringify(buildEmptyInteractionContract(), null, 2)}\n`,
     "utf8",
   );
 }
@@ -2598,7 +2607,7 @@ class SequencedRuntimeValidator implements GeneratedAppValidator {
 }
 
 class StubTextGenerator implements TextGenerator {
-  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
     const planSpec = buildPlanSpec();
 
     await writeFile(
@@ -2680,6 +2689,32 @@ class StubTextGenerator implements TextGenerator {
 
   async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
     throw new Error("generateRepairProject should not be called in StubTextGenerator");
+  }
+}
+
+class StructuredPlanSpecResultTextGenerator extends StubTextGenerator {
+  override async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
+    const planSpec = buildPlanSpec();
+    const interactionContract = buildEmptyInteractionContract();
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# Structured Plan Analysis\n\n使用结构化响应交付计划规格。\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# Structured Plan Spec\n\n结构化响应中的 planSpec 是权威来源。\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, "{ invalid stale plan spec\n", "utf8");
+    await writeFile(runtime.deepagentsInteractionContractPath, "{ invalid stale interaction contract\n", "utf8");
+
+    return {
+      summary: "Planner returned planSpec as structured response.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+        ".deepagents/interaction-contract.json",
+      ],
+      planSpecVersion: 1,
+      planSpec,
+      interactionContract,
+      notes: [],
+    };
   }
 }
 
@@ -5688,6 +5723,47 @@ test("generateApplication retries the plan phase until plan-spec.json is valid",
   }
 });
 
+test("generateApplication persists structured plan artifacts before plan validation", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-structured-plan-spec-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const generator = new StructuredPlanSpecResultTextGenerator();
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const persistedPlanSpecContents = await readFile(
+      path.join(result.outputDirectory, ".deepagents/plan-spec.json"),
+      "utf8",
+    );
+    const persistedPlanSpec = JSON.parse(persistedPlanSpecContents) as PlanSpec;
+    const validation = validatePlanSpec(persistedPlanSpec);
+    const persistedInteractionContractContents = await readFile(
+      path.join(result.outputDirectory, ".deepagents/interaction-contract.json"),
+      "utf8",
+    );
+    const persistedInteractionContract = JSON.parse(persistedInteractionContractContents) as InteractionContract;
+    const interactionValidation = validateInteractionContract(persistedInteractionContract);
+    const planValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/plan-validation.json"),
+      "utf8",
+    );
+
+    assert.equal(validation.success, true);
+    assert.equal(interactionValidation.success, true);
+    assert.equal(persistedPlanSpec.appName, "Field Ops Planner");
+    assert.doesNotMatch(persistedPlanSpecContents, /invalid stale plan spec/);
+    assert.doesNotMatch(persistedInteractionContractContents, /invalid stale interaction contract/);
+    assert.match(planValidation, /"valid": true/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication normalizes common plan-spec consistency errors before invoking plan repair", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-normalize-plan-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -6969,7 +7045,8 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planPromptSource, /`sourcePrdMarkdown` 为主事实来源/);
   assert.match(planPromptSource, /只有在 `sourcePrdMarkdown` 缺失、截断或明显不可用时，才允许读取 `artifacts\.sourcePrd`/);
   assert.match(planPromptSource, /严禁对同一文件、同一区间做重复读取循环/);
-  assert.match(planPromptSource, /对当前尚不存在的 `artifacts\.analysis`、`artifacts\.generatedSpec`、`artifacts\.planSpec`，应直接创建/);
+  assert.match(planPromptSource, /对当前尚不存在的 `artifacts\.analysis`、`artifacts\.generatedSpec`，应直接创建/);
+  assert.match(planPromptSource, /最终结构化响应必须包含 `planSpec` 字段/);
   assert.match(planPromptSource, /`\/\.deepagents\/prd-analysis\.md`/);
   assert.match(planPromptSource, /`hardConstraints\.planSpecSchemaValidation`/);
   assert.match(planPromptSource, /`hardConstraints\.environmentVariablePolicyValidation`/);

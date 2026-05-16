@@ -4,7 +4,7 @@
 
 ## 阶段边界
 
-- 当前只允许执行：读取现有计划产物、定位校验失败项、局部修补分析稿/详细 spec/plan-spec。
+- 当前只允许执行：读取现有计划产物、定位校验失败项、局部修补分析稿/详细 spec，并在最终结构化响应中返回修补后的 `planSpec` 和 `interactionContract`。
 - 当前禁止执行：重跑完整需求分析、推翻已正确的模型定义、写应用源码。
 - 当前禁止执行：调用任何子代理、委派给其他代理、调用 `task` 之类的代理分发工具，或把当前修补工作外包给并行代理。
 - 宿主已经给出本轮校验失败原因；你必须围绕这些失败项工作。
@@ -22,6 +22,7 @@
   - `artifacts.analysis` = `/.deepagents/prd-analysis.md`
   - `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
   - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
+  - `artifacts.interactionContract` = `/.deepagents/interaction-contract.json`
   - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
 - `hardConstraints.planSpecSchemaValidation`
 - `hardConstraints.referenceUsageValidation`
@@ -47,17 +48,18 @@
 - `artifacts.analysis`
 - `artifacts.generatedSpec`
 - `artifacts.planSpec`
+- `artifacts.interactionContract`
 - `artifacts.planValidation`
 
-你必须先读取这些现有文件，再开始修补。
+你必须先读取这些现有文件，再开始修补。修补后的计划规格必须放在最终结构化响应的 `planSpec` 字段中；修补后的交互契约必须放在最终结构化响应的 `interactionContract` 字段中。不要直接用文件写入工具覆盖 `artifacts.planSpec` 或 `artifacts.interactionContract`，host 会从结构化响应统一落盘。
 
 ## 修补规则
 
 - 以 `validationFailures` 和 `artifacts.planValidation` 中的失败项为唯一修补目标。
 - 只补齐缺失或错误部分，不得整轮重写已经正确的内容。
 - 如需修改现有文件，必须先读再改。
-- 若某项失败来自资源/API/页面映射不完整，优先最小化补全 JSON 结构，再同步 Markdown 文档一致性。
-- 若某个资源实际上只作为嵌套数据间接使用，不应强行补出专有 page/API；应在 `artifacts.planSpec.resources[*].usage` 中显式标为 `indirect`，并同步文档说明。
+- 若某项失败来自资源/API/页面映射不完整，优先最小化补全最终结构化响应中的 `planSpec` 对象，再同步 Markdown 文档一致性。
+- 若某个资源实际上只作为嵌套数据间接使用，不应强行补出专有 page/API；应在最终结构化响应的 `planSpec.resources[*].usage` 中显式标为 `indirect`，并同步文档说明。
 - 如果失败项或现有 PRD 镜像涉及外部 API、第三方服务、SDK、协议或文档链接等参考资料，必须补入 `planSpec.references`，并同步 `artifacts.generatedSpec` 的 `References` 章节。
 - 如果失败项或现有 PRD 镜像涉及“环境配置”、`.env.example`、API Key、Host、Token、Secret、Base URL 等配置要求，且变量名不在 `template.environmentPolicy.lockedKeys` / `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 中，必须补入 `planSpec.environmentVariables`。
 - `template.environmentPolicy.lockedKeys` 和 `hardConstraints.environmentVariablePolicyValidation.lockedKeys` 的优先级高于 PRD 环境变量覆盖请求。
@@ -73,22 +75,24 @@
 - `references` 不属于宿主强制验收项，不要为了引用资料额外制造 `acceptanceChecks`。
 - `hardConstraints.planSpecSchemaValidation` 是阻断性硬约束。
 - `hardConstraints.environmentVariablePolicyValidation` 是阻断性硬约束：`planSpec.environmentVariables[*].name` 不得包含其中的 locked key。
-- `hardConstraints.referenceUsageValidation` 是阻断性硬约束：如果有已下载本地资料，必须读取对应 `localPath` 文件后再修补 `artifacts.generatedSpec`、`artifacts.planSpec` 和 `artifacts.interactionContract`。
-- 在 `artifacts.planSpec` 重新成为合法 JSON 且通过 `hardConstraints.planSpecSchemaValidation.schema` 校验前，不允许结束修补或返回最终结构化响应。
+- `hardConstraints.interactionContractValidation` 是阻断性硬约束：最终结构化响应中的 `interactionContract` 必须通过其 schema 校验，顶层包含 `flows`、`internalOperations`、`externalOperations` 三个数组。
+- `hardConstraints.referenceUsageValidation` 是阻断性硬约束：如果有已下载本地资料，必须读取对应 `localPath` 文件后再修补 `artifacts.generatedSpec`、最终结构化响应中的 `planSpec` 和 `interactionContract`。
+- 在最终结构化响应中的 `planSpec` 重新成为合法 JSON 对象且通过 `hardConstraints.planSpecSchemaValidation.schema` 校验前，不允许结束修补或返回最终结构化响应。
 - 可选字符串字段无值时必须省略，不能写成空字符串 `""`；必填字符串字段必须提供非空字符串。
 - `acceptanceChecks.target` 必须严格遵守宿主规则：
   - `resource` 类型填资源名
   - `page` 类型填页面路由
   - `api` 类型填 API 文件路径
   - `flow` 类型填流程名
-- 修补完成后，保留当前工作目录中的既有产物路径和整体结构。
+- 修补完成后，保留当前工作目录中的既有产物路径和整体结构；`artifacts.planSpec` 与 `artifacts.interactionContract` 的最终内容由 host 根据结构化响应覆盖写入。
 
 ## 完成条件
 
 只有在以下条件同时满足时才返回：
 
 - 已针对所有失败项完成修补
-- `artifacts.analysis`、`artifacts.generatedSpec`、`artifacts.planSpec` 仍然一致
+- `artifacts.analysis`、`artifacts.generatedSpec` 与最终结构化响应中的 `planSpec` 仍然一致
+- 最终结构化响应中的 `interactionContract` 与修补后的 `planSpec` 仍然一致
 - 最终只返回结构化响应
 
 ## 最终响应
@@ -96,5 +100,7 @@
 - 最终只能返回结构化响应。
 - 不要输出 `<think>`、思维链、自然语言总结、Markdown 代码块，或任何包裹在结构化响应之外的文本。
 - 如果已经完成落盘，必须立刻返回结构化响应；不要先输出“Returning structured response:”之类的说明文字。
-- `artifactsWritten` 必须按实际落盘顺序列出本轮修补过的计划阶段文件相对路径。
+- `artifactsWritten` 必须按实际落盘顺序列出本轮修补过的计划阶段文件相对路径，并包含 `.deepagents/plan-spec.json` 与 `.deepagents/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件。
 - `planSpecVersion` 固定写 `1`。
+- 最终结构化响应必须包含修补后的 `planSpec` 字段。
+- 最终结构化响应必须包含修补后的 `interactionContract` 字段。

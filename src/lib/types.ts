@@ -1,4 +1,5 @@
 import type { PlanSpec } from "./plan-spec.js";
+import type { InteractionContract } from "./interaction-contract.js";
 import type { ModelRoleConfigMap } from "./model-config.js";
 
 export type ParsedSection = {
@@ -232,6 +233,8 @@ export type PlanResult = {
   summary: string;
   artifactsWritten: string[];
   planSpecVersion: number;
+  planSpec?: PlanSpec;
+  interactionContract?: InteractionContract;
   notes: string[];
 };
 

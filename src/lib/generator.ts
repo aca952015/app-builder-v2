@@ -12,6 +12,7 @@ import {
   type ManagedDevServerProcess,
 } from "./dev-server-process.js";
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
+import { validateInteractionContract } from "./interaction-contract.js";
 import { routeToPageFileCandidates } from "./app-router.js";
 import { parseDotEnv } from "./env.js";
 import {
@@ -2086,6 +2087,34 @@ async function writePlanValidationResult(
   await fs.writeFile(validationPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+async function persistStructuredPlanSpecFromResult(
+  runtime: TextGeneratorRuntime,
+  result: PlanResult,
+): Promise<void> {
+  if (!result.planSpec) {
+    return;
+  }
+
+  await fs.writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(result.planSpec, null, 2)}\n`, "utf8");
+  await appendWorkflowLog("[host] 已从计划阶段结构化响应写入 plan-spec.json。");
+}
+
+async function persistStructuredInteractionContractFromResult(
+  runtime: TextGeneratorRuntime,
+  result: PlanResult,
+): Promise<void> {
+  if (!result.interactionContract) {
+    return;
+  }
+
+  await fs.writeFile(
+    runtime.deepagentsInteractionContractPath,
+    `${JSON.stringify(result.interactionContract, null, 2)}\n`,
+    "utf8",
+  );
+  await appendWorkflowLog("[host] 已从计划阶段结构化响应写入 interaction-contract.json。");
+}
+
 async function normalizePersistedPlanSpec(runtime: TextGeneratorRuntime, planSpec: PlanSpec): Promise<PlanSpec> {
   const normalized = normalizePlanSpecForHostValidation(planSpec);
   if (normalized.notes.length === 0) {
@@ -2159,6 +2188,7 @@ async function synthesizeRecoveredPlanResult(
       runtime.deepagentsAnalysisPath,
       runtime.deepagentsDetailedSpecPath,
       runtime.deepagentsPlanSpecPath,
+      runtime.deepagentsInteractionContractPath,
     ].map(async (filePath) => {
       const contents = await readIfExists(filePath);
       if (!contents || contents.trim().length === 0) {
@@ -2391,8 +2421,9 @@ async function collectPersistedPlanValidation(runtime: TextGeneratorRuntime): Pr
   } else {
     try {
       const parsed = JSON.parse(interactionContractContents);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        reasons.push("计划阶段未完成：artifacts.interactionContract 必须是 JSON 对象。");
+      const validation = validateInteractionContract(parsed);
+      if (!validation.success) {
+        reasons.push(...validation.issues.map((issue) => `计划阶段未完成：artifacts.interactionContract 校验失败：${issue}`));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2418,6 +2449,8 @@ async function validatePlanArtifacts(runtime: TextGeneratorRuntime, result: Plan
       attempt: runtime.planAttempt ?? 1,
     },
     async () => {
+      await persistStructuredPlanSpecFromResult(runtime, result);
+      await persistStructuredInteractionContractFromResult(runtime, result);
       const validation = await collectPersistedPlanValidation(runtime);
       const reasons = [...validation.reasons];
       const { planSpec } = validation;

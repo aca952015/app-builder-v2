@@ -7,6 +7,7 @@ import { createMiddleware, toolStrategy } from "langchain";
 import { z } from "zod";
 
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
+import { interactionContractSchema } from "./interaction-contract.js";
 import { createOpenAICompatibleModel } from "./deepseek-openai.js";
 import {
   DEFAULT_MODEL_NAME,
@@ -66,6 +67,11 @@ const planResultSchema = z.object({
   artifactsWritten: z.array(z.string()).default([]),
   planSpecVersion: z.number().int().default(1),
   notes: z.array(z.string()).default([]),
+});
+
+const planDeliveryResultSchema = planResultSchema.extend({
+  planSpec: planSpecSchema,
+  interactionContract: interactionContractSchema,
 });
 
 const generatedProjectSchema = z.object({
@@ -142,21 +148,21 @@ const PRD_ASSEMBLY_SYSTEM_PROMPT = [
   "",
   "- 必须基于 PRD 分析稿和已转换本地参考资料共同组装最终计划产物。",
   "- 不要重做完整 PRD 分析；除非发现明显缺口，否则不要覆盖 `artifacts.analysis`。",
-  "- 如果存在 `retrievalStatus=downloaded` 的外部 API、第三方服务或文档 reference，必须先读取其 `localPath` 文件，再写入 `artifacts.generatedSpec`、`artifacts.planSpec`、`artifacts.interactionContract`。",
+  "- 如果存在 `retrievalStatus=downloaded` 的外部 API、第三方服务或文档 reference，必须先读取其 `localPath` 文件，再组装 `artifacts.generatedSpec`、结构化响应 `planSpec`、结构化响应 `interactionContract`。",
   "- 不要凭模型记忆或远程 URL 猜测 API endpoint、认证、参数、响应字段、错误码或限制信息。",
   "- 不要修改应用源码目录。",
   "",
   "## Required Artifacts",
   "",
   "1. `artifacts.generatedSpec`：面向人类审阅的详细中文实施 spec，包含 References 章节。",
-  "2. `artifacts.planSpec`：合法 JSON，必须满足输入的 `planSpecSchema`。",
-  "3. `artifacts.interactionContract`：关键交互、内部操作和外部操作契约。",
+  "2. 结构化响应字段 `planSpec`：合法对象，必须满足输入的 `planSpecSchema`；host 会将它写入 `artifacts.planSpec`。",
+  "3. 结构化响应字段 `interactionContract`：关键交互、内部操作和外部操作契约；host 会将它写入 `artifacts.interactionContract`。",
   "",
   "## Completion",
   "",
-  "- 自检 `artifacts.planSpec` 满足 schema，且 reference localPath 已同步到 generatedSpec 与 planSpec.references。",
-  "- 返回结构化结果：`summary`、`artifactsWritten`、`planSpecVersion: 1`、`notes`。",
-  "- `artifactsWritten` 按实际落盘顺序列出本阶段写入的计划产物。",
+  "- 自检结构化响应中的 `planSpec` 和 `interactionContract` 满足 schema，且 reference localPath 已同步到 generatedSpec 与 planSpec.references。",
+  "- 返回结构化结果：`summary`、`artifactsWritten`、`planSpecVersion: 1`、`planSpec`、`interactionContract`、`notes`。",
+  "- `artifactsWritten` 按实际落盘顺序列出本阶段写入的计划产物，并包含 `.deepagents/plan-spec.json` 与 `.deepagents/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件。",
 ].join("\n");
 
 const SANDBOX_ALPHA_WARNING =
@@ -397,11 +403,11 @@ export function buildPlanSpecHardConstraints(
       mustValidateBeforeResponse: true,
       schema: z.toJSONSchema(planSpecSchema),
       rules: [
-        "artifacts.planSpec 必须是合法 JSON。",
-        "artifacts.planSpec 必须通过这里提供的 schema 校验后，才允许结束当前阶段并返回结构化响应。",
+        "最终结构化响应中的 planSpec 必须是合法 JSON 对象。",
+        "最终结构化响应中的 planSpec 必须通过这里提供的 schema 校验后，才允许结束当前阶段并返回结构化响应。",
         "可选字符串字段如果没有值，必须省略，不能写成空字符串。",
         "必填字符串字段必须提供非空字符串。",
-        "只有当 PRD 分析明确要求项目配置变更时，才允许在 artifacts.planSpec.projectConfigChanges 中声明对应配置文件、原因和 PRD 证据。",
+        "只有当 PRD 分析明确要求项目配置变更时，才允许在 planSpec.projectConfigChanges 中声明对应配置文件、原因和 PRD 证据。",
       ],
     },
     environmentVariablePolicyValidation: {
@@ -415,8 +421,8 @@ export function buildPlanSpecHardConstraints(
       rules: lockedKeys.length > 0
         ? [
             `当前模板锁定的 .env.example 变量为：${lockedKeys.join(", ")}。`,
-            "artifacts.planSpec.environmentVariables[*].name 不得包含上述 lockedKeys 中的任何 key。",
-            "如果 PRD 要求覆盖 locked key，计划阶段必须省略该变量，并在 artifacts.planSpec.assumptions 或 artifacts.generatedSpec 中说明使用 starter 默认值；不得尝试覆盖。",
+            "planSpec.environmentVariables[*].name 不得包含上述 lockedKeys 中的任何 key。",
+            "如果 PRD 要求覆盖 locked key，计划阶段必须省略该变量，并在 planSpec.assumptions 或 artifacts.generatedSpec 中说明使用 starter 默认值；不得尝试覆盖。",
             "template.environmentPolicy.lockedKeys 的优先级高于 PRD 中的环境变量覆盖请求。",
           ]
         : [
@@ -429,11 +435,12 @@ export function buildPlanSpecHardConstraints(
       blocking: true,
       required: true,
       mustValidateBeforeResponse: true,
+      schema: z.toJSONSchema(interactionContractSchema),
       rules: [
-        "artifacts.interactionContract 必须是合法 JSON 对象。",
+        "最终结构化响应中的 interactionContract 必须是合法 JSON 对象；host 会将它写入 artifacts.interactionContract。",
+        "interactionContract 必须包含 flows、internalOperations、externalOperations 三个数组；没有对应操作时写空数组。",
         "必须覆盖关键用户流程的触发控件、fallback 触发、loading/empty/error 状态。",
         "如果包含外部 API 或第三方服务，必须写明 endpoint path、认证来源、参数格式/顺序、响应字段和 reference provenance。",
-        "如果没有关键交互或外部操作，也必须写入空数组结构，不能省略该 artifact。",
       ],
     },
     referenceUsageValidation: {
@@ -443,10 +450,10 @@ export function buildPlanSpecHardConstraints(
       required: true,
       mustValidateBeforeResponse: true,
       rules: [
-        "如果输入 externalReferences/localReferences/referenceManifest 中存在 retrievalStatus=downloaded 的外部 API、第三方服务或文档资料，必须先读取其 localPath 指向的本地文件，再组装 artifacts.generatedSpec、artifacts.planSpec 和 artifacts.interactionContract。",
+        "如果输入 externalReferences/localReferences/referenceManifest 中存在 retrievalStatus=downloaded 的外部 API、第三方服务或文档资料，必须先读取其 localPath 指向的本地文件，再组装 artifacts.generatedSpec、结构化响应 planSpec 和 interactionContract。",
         "外部 API endpoint、认证方式、参数格式/顺序、响应字段、错误码和限制信息必须优先来自已下载本地资料，不能凭模型记忆或远程 URL 猜测。",
         "artifacts.generatedSpec 的 References 章节必须在远程 URL 旁写出同一个 localPath，并说明关键 API/认证/参数/响应字段来自该本地文件。",
-        "artifacts.planSpec.references[*] 对应已下载资料时必须填写 localPath、retrievedAt、contentType、retrievalStatus；不得只保留远程 URL。",
+        "planSpec.references[*] 对应已下载资料时必须填写 localPath、retrievedAt、contentType、retrievalStatus；不得只保留远程 URL。",
       ],
     },
   };
@@ -2824,7 +2831,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       return await this.runPhase(runtime, {
         systemPrompt: PRD_ASSEMBLY_SYSTEM_PROMPT,
         promptSnapshotPath: path.join(path.dirname(runtime.deepagentsPlanPromptSnapshotPath), "prd-assembly-system-prompt.md"),
-        responseSchema: planResultSchema,
+        responseSchema: planDeliveryResultSchema,
         stage: "plan",
         runtimePhase: "plan",
         timeoutLabel: "deepagents PRD assembly",
@@ -2852,7 +2859,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       return await this.runPhase(runtime, {
         promptPath: planPromptPath,
         promptSnapshotPath: runtime.deepagentsPlanPromptSnapshotPath,
-        responseSchema: planResultSchema,
+        responseSchema: planDeliveryResultSchema,
         stage: "plan",
         timeoutLabel: "deepagents planning",
         payload: buildPlanProjectPayload(spec, runtime),
@@ -2872,7 +2879,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       return await this.runPhase(runtime, {
         promptPath: planRepairPromptPath,
         promptSnapshotPath: runtime.deepagentsPlanRepairPromptSnapshotPath,
-        responseSchema: planResultSchema,
+        responseSchema: planDeliveryResultSchema,
         stage: "plan_repair",
         timeoutLabel: "deepagents plan repair",
         payload: buildPlanRepairPayload(runtime),
