@@ -18,15 +18,28 @@ Analyze a `.out/<sessionId>/` generation session and produce a structured report
 ## Usage
 
 ```bash
-node .codex/skills/session-analyzer/analyze.mjs <session-id-prefix>
+node scripts/analyze-metrics.mjs <session-id-prefix>
 ```
 
 Example:
 ```bash
-node .codex/skills/session-analyzer/analyze.mjs ef1dd18d
+node scripts/analyze-metrics.mjs ef1dd18d
 ```
 
-The script auto-resolves the full UUID directory under `.out/`.
+The skill entry remains available as a compatibility wrapper:
+
+```bash
+node .codex/skills/session-analyzer/analyze.mjs <session-id-prefix>
+```
+
+The script auto-resolves the full UUID directory under `.out/`. It also supports
+cross-session summaries and machine-readable output:
+
+```bash
+node scripts/analyze-metrics.mjs --all
+node scripts/analyze-metrics.mjs --all --json
+node scripts/analyze-metrics.mjs <session-id-prefix> --json
+```
 
 ## Output
 
