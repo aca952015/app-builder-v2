@@ -1,8 +1,7 @@
+import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 
 type RouteSegmentKind = "static" | "dynamic" | "catch-all" | "optional-catch-all";
-
-const PAGE_ROUTE_GROUPS = [undefined, "(app)", "(admin)", "(full-width-pages)"] as const;
 
 function normalizeRouteSegment(segment: string): string {
   if (
@@ -55,20 +54,84 @@ function normalizeRouteSegments(route: string): string[] {
   return splitRoutePath(route).map(normalizeRouteSegment);
 }
 
-function routeToPageFilePath(segments: string[], group: typeof PAGE_ROUTE_GROUPS[number]): string {
+export function normalizeRoutePattern(route: string): string {
+  const segments = normalizeRouteSegments(route);
+  return segments.length === 0 ? "/" : `/${segments.join("/")}`;
+}
+
+function routeToPageFilePath(segments: string[], group?: string): string {
   return group
     ? path.posix.join("app", group, ...segments, "page.tsx")
     : path.posix.join("app", ...segments, "page.tsx");
 }
 
-export function routeToPageFileCandidates(route: string): string[] {
-  const normalizedSegments = normalizeRouteSegments(route);
-  return PAGE_ROUTE_GROUPS.map((group) => routeToPageFilePath(normalizedSegments, group));
-}
-
 export function routeToAdminPagePath(route: string): string {
   const normalizedSegments = normalizeRouteSegments(route);
   return routeToPageFilePath(normalizedSegments, "(admin)");
+}
+
+function normalizeRelativeFilePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/g, "");
+}
+
+function isRouteGroupSegment(segment: string): boolean {
+  return segment.startsWith("(") && segment.endsWith(")") && segment.length > 2;
+}
+
+export function pageFilePathToRoutePattern(relativePath: string): string | null {
+  const normalizedPath = normalizeRelativeFilePath(relativePath);
+  const segments = normalizedPath.split("/").filter((segment) => segment.length > 0);
+  const firstSegment = segments[0];
+  const lastSegment = segments.at(-1);
+
+  if (firstSegment !== "app" || lastSegment !== "page.tsx") {
+    return null;
+  }
+
+  const routeSegments = segments
+    .slice(1, -1)
+    .filter((segment) => !isRouteGroupSegment(segment))
+    .map(normalizeRouteSegment);
+
+  return routeSegments.length === 0 ? "/" : `/${routeSegments.join("/")}`;
+}
+
+export async function collectPageRoutePatterns(outputDirectory: string): Promise<Set<string>> {
+  const appDirectory = path.join(outputDirectory, "app");
+  const routePatterns = new Set<string>();
+
+  async function visit(currentDirectory: string): Promise<void> {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(currentDirectory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+
+    for (const entry of entries) {
+      const absolutePath = path.join(currentDirectory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(absolutePath);
+        continue;
+      }
+
+      if (!entry.isFile() || entry.name !== "page.tsx") {
+        continue;
+      }
+
+      const relativePath = path.relative(outputDirectory, absolutePath).split(path.sep).join("/");
+      const routePattern = pageFilePathToRoutePattern(relativePath);
+      if (routePattern) {
+        routePatterns.add(routePattern);
+      }
+    }
+  }
+
+  await visit(appDirectory);
+  return routePatterns;
 }
 
 function routeSegmentKind(segment: string): RouteSegmentKind {

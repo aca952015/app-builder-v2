@@ -58,6 +58,20 @@ export function isPidRunning(pid: number): boolean {
   }
 }
 
+export function resolveWindowsCommandScriptSpawn(
+  command: string,
+  args: string[],
+): { command: string; args: string[] } {
+  if (process.platform !== "win32" || !/\.(?:bat|cmd)$/i.test(command)) {
+    return { command, args };
+  }
+
+  return {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/s", "/c", "call", command, ...args],
+  };
+}
+
 export function spawnManagedDevServerProcess(options: {
   command: string;
   args: string[];
@@ -65,7 +79,8 @@ export function spawnManagedDevServerProcess(options: {
   env?: NodeJS.ProcessEnv;
 }): ManagedDevServerProcess {
   const useProcessGroup = process.platform !== "win32";
-  const child = spawn(options.command, options.args, {
+  const spawnCommand = resolveWindowsCommandScriptSpawn(options.command, options.args);
+  const child = spawn(spawnCommand.command, spawnCommand.args, {
     cwd: options.cwd,
     env: options.env,
     detached: useProcessGroup,
@@ -169,18 +184,6 @@ function signalProcessGroup(
   }
 }
 
-async function runTaskkill(pid: number, force: boolean, errors: string[]): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const args = ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
-    const child = spawn("taskkill", args, { stdio: "ignore" });
-    child.once("error", (error) => {
-      errors.push(`Failed to run taskkill for PID ${pid}: ${signalErrorSummary(error)}`);
-      resolve();
-    });
-    child.once("exit", () => resolve());
-  });
-}
-
 async function signalProcessTree(options: {
   pid: number;
   signal: NodeJS.Signals;
@@ -189,8 +192,7 @@ async function signalProcessTree(options: {
   errors: string[];
 }): Promise<number[]> {
   if (process.platform === "win32") {
-    await runTaskkill(options.pid, options.signal === "SIGKILL", options.errors);
-    options.signaledPids.add(options.pid);
+    signalPid(options.pid, options.signal, options.signaledPids, options.errors);
     return [options.pid];
   }
 

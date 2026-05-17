@@ -5,7 +5,7 @@ import { promises as fs } from "node:fs";
 import { Box, Text, render, renderToString, type Instance } from "ink";
 
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
-import { routeToPageFileCandidates } from "./app-router.js";
+import { collectPageRoutePatterns, normalizeRoutePattern } from "./app-router.js";
 import type { RuntimeStatus, RuntimeUsageSummary, StdoutMode } from "./types.js";
 
 export type WorkflowStage = "计划阶段" | "生成阶段" | "运行验证阶段" | "完成阶段";
@@ -299,11 +299,10 @@ async function monitorArtifactItems(state: TodoBoardState): Promise<ArtifactItem
     }
 
     if (artifact.label.startsWith("app/** 页面与布局") && planSpec) {
+      const pageRoutePatterns = await collectPageRoutePatterns(state.outputDirectory);
       let completed = 0;
       for (const page of planSpec.pages) {
-        const candidates = routeToPageFileCandidates(page.route);
-        const found = await countExistingFiles(state.outputDirectory, candidates);
-        if (found > 0) {
+        if (pageRoutePatterns.has(normalizeRoutePattern(page.route))) {
           completed += 1;
         }
       }

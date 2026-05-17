@@ -23,6 +23,8 @@ export function buildSessionPolicyDocument(): string {
     "  - `artifacts.runtimeInteractionValidation` = `/.deepagents/runtime-interaction-validation.json`",
     "  - `artifacts.errorLog` = `/.deepagents/error.log`",
     "- Input `artifacts.*` values are the only source of truth. Do not infer, rename, shorten, or relocate them.",
+    "- Host-materialized JSON, validation, runtime, config, prompt snapshot, and source mirror artifacts are read-only to model file tools. Never create, edit, overwrite, delete, relocate, or repair them with `write_file` or `edit_file`; return structured response fields or let the host update them.",
+    "- This write-protection does not apply to `artifacts.analysis` or `artifacts.generatedSpec`, which plan stages must write as Markdown planning artifacts.",
     "- Use `write_todos` before substantive work and keep todo state updated until the stage is complete.",
     "",
     "## Plan Rules",

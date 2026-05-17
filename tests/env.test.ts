@@ -201,6 +201,20 @@ test("normalizeWriteTodosToolCallArgs accepts stringified and loose todo arrays"
       ],
     },
   );
+  assert.deepEqual(
+    normalizeWriteTodosToolCallArgs({
+      todos: [
+        { content: "Create Account page", status: "pending" },
+        { content: "Create Role page" },
+      ],
+    }),
+    {
+      todos: [
+        { content: "Create Account page", status: "pending" },
+        { content: "Create Role page", status: "pending" },
+      ],
+    },
+  );
 });
 
 test("resolveModelRoleConfigs rejects missing role API key coverage without a global key", () => {
@@ -311,6 +325,47 @@ test("resolveModelReasoningEffort maps template max to model xhigh", () => {
   assert.equal(resolveModelReasoningEffort("low"), "low");
   assert.equal(resolveModelReasoningEffort("high"), "high");
   assert.equal(resolveModelReasoningEffort("max"), "xhigh");
+});
+
+test("openai-compatible streaming ignores closed stream controller callback errors", async () => {
+  const model = createOpenAICompatibleModel({
+    modelName: "openai:test-model",
+    apiKey: "test-key",
+  }) as unknown as {
+    completions: {
+      completionWithRetry: unknown;
+      _streamResponseChunks: (
+        messages: unknown[],
+        options: Record<string, unknown>,
+        runManager: { handleLLMNewToken: () => Promise<void> },
+      ) => AsyncIterable<{ text?: string }>;
+    };
+  };
+  model.completions.completionWithRetry = async () => (async function* () {
+    yield {
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", content: "hello" },
+        },
+      ],
+    };
+  })();
+  const closedControllerError = new TypeError("Invalid state: Controller is already closed") as TypeError & {
+    code: string;
+  };
+  closedControllerError.code = "ERR_INVALID_STATE";
+
+  const chunks: string[] = [];
+  for await (const chunk of model.completions._streamResponseChunks([], {}, {
+    handleLLMNewToken: async () => {
+      throw closedControllerError;
+    },
+  })) {
+    chunks.push(chunk.text ?? "");
+  }
+
+  assert.deepEqual(chunks, ["hello"]);
 });
 
 test("sanitizeOpenAICompatibleCompletionsParams removes forced tool choice", () => {

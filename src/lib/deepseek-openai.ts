@@ -55,6 +55,10 @@ type ToolChoiceParams = {
   tool_choice?: unknown;
 };
 type ModelReasoningEffort = "low" | "medium" | "high" | "xhigh";
+type NewTokenIndices = {
+  prompt: number;
+  completion: number;
+};
 
 type OpenAICompatibleModelFields = BaseChatOpenAIFields & ChatOpenAIFields;
 type ReasoningMessage = BaseMessage & {
@@ -116,6 +120,73 @@ function asReasoningMessage(message: BaseMessage): ReasoningMessage {
 function getMessageType(message: BaseMessage): string | undefined {
   const getType = (message as { _getType?: () => string })._getType;
   return typeof getType === "function" ? getType.call(message) : undefined;
+}
+
+function collectErrorMessages(error: unknown, seen = new Set<unknown>()): string[] {
+  if (!error || seen.has(error)) {
+    return [];
+  }
+  seen.add(error);
+
+  if (typeof error === "string") {
+    return [error];
+  }
+
+  if (error instanceof Error) {
+    const code = (error as { code?: unknown }).code;
+    return [
+      error.message,
+      ...(typeof code === "string" ? [code] : []),
+      ...collectErrorMessages(error.cause, seen),
+    ].filter(Boolean);
+  }
+
+  if (typeof error !== "object") {
+    return [];
+  }
+
+  const record = error as { message?: unknown; code?: unknown; cause?: unknown; error?: unknown; errors?: unknown };
+  return [
+    ...(typeof record.message === "string" ? [record.message] : []),
+    ...(typeof record.code === "string" ? [record.code] : []),
+    ...collectErrorMessages(record.cause ?? record.error, seen),
+    ...(Array.isArray(record.errors) ? record.errors.flatMap((item) => collectErrorMessages(item, seen)) : []),
+  ];
+}
+
+function isClosedStreamControllerError(error: unknown): boolean {
+  return collectErrorMessages(error).some((message) =>
+    /\bERR_INVALID_STATE\b/i.test(message) ||
+    /Controller is already closed/i.test(message) ||
+    /Invalid state/i.test(message)
+  );
+}
+
+async function handleLLMNewTokenSafely(
+  runManager: GenerateArgs[2] | undefined,
+  token: string,
+  newTokenIndices: NewTokenIndices,
+  generationChunk: StreamChunk,
+): Promise<void> {
+  if (!runManager) {
+    return;
+  }
+
+  try {
+    await runManager.handleLLMNewToken(
+      token,
+      newTokenIndices,
+      undefined,
+      undefined,
+      undefined,
+      { chunk: generationChunk },
+    );
+  } catch (error) {
+    if (isClosedStreamControllerError(error)) {
+      return;
+    }
+    throw error;
+  }
 }
 
 function isUserLikeMessage(message: BaseMessage): boolean {
@@ -456,15 +527,13 @@ class OpenAICompatibleReasoningContentChatOpenAICompletions<
         text: chunk.content,
         generationInfo,
       });
-      yield generationChunk;
-      await runManager?.handleLLMNewToken(
+      await handleLLMNewTokenSafely(
+        runManager,
         generationChunk.text ?? "",
         newTokenIndices,
-        undefined,
-        undefined,
-        undefined,
-        { chunk: generationChunk },
+        generationChunk,
       );
+      yield generationChunk;
     }
 
     if (usage) {
@@ -504,15 +573,13 @@ class OpenAICompatibleReasoningContentChatOpenAICompletions<
         }),
         text: "",
       });
-      yield generationChunk;
-      await runManager?.handleLLMNewToken(
+      await handleLLMNewTokenSafely(
+        runManager,
         generationChunk.text ?? "",
         { prompt: 0, completion: 0 },
-        undefined,
-        undefined,
-        undefined,
-        { chunk: generationChunk },
+        generationChunk,
       );
+      yield generationChunk;
     }
 
     if (options.signal?.aborted) {

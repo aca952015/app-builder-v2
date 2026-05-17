@@ -7,13 +7,14 @@ import { promises as fs } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import {
+  resolveWindowsCommandScriptSpawn,
   spawnManagedDevServerProcess,
   terminateManagedDevServerProcess,
   type ManagedDevServerProcess,
 } from "./dev-server-process.js";
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { validateInteractionContract } from "./interaction-contract.js";
-import { routeToPageFileCandidates } from "./app-router.js";
+import { collectPageRoutePatterns, normalizeRoutePattern } from "./app-router.js";
 import { parseDotEnv } from "./env.js";
 import {
   parseSanitizedModelRoleConfigs,
@@ -466,8 +467,9 @@ async function spawnValidationCommand(options: {
     ...options.env,
   };
   const resolvedCommand = await resolveSpawnCommand(options.command, combinedEnv);
+  const spawnCommand = resolveWindowsCommandScriptSpawn(resolvedCommand, options.args);
 
-  return spawn(resolvedCommand, options.args, {
+  return spawn(spawnCommand.command, spawnCommand.args, {
     cwd: options.cwd,
     env: combinedEnv,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1445,19 +1447,12 @@ async function collectGeneratedCoverage(
 }> {
   const uniquePageRoutes = uniqueValues(planSpec.pages.map((page) => page.route));
   const uniqueApiPaths = uniqueValues(planSpec.apis.map((api) => api.path));
+  const generatedPageRoutes = await collectPageRoutePatterns(outputDirectory);
   const pageExistsByRoute = new Map<string, boolean>();
   const apiExistsByPath = new Map<string, boolean>();
 
   for (const route of uniquePageRoutes) {
-    const candidates = routeToPageFileCandidates(route);
-    let exists = false;
-    for (const candidate of candidates) {
-      if (await pathExists(path.join(outputDirectory, normalizeRelativePath(candidate)))) {
-        exists = true;
-        break;
-      }
-    }
-    pageExistsByRoute.set(route, exists);
+    pageExistsByRoute.set(route, generatedPageRoutes.has(normalizeRoutePattern(route)));
   }
 
   for (const apiPath of uniqueApiPaths) {
@@ -2481,12 +2476,18 @@ function getRuntimeValidationForRuntime(runtime: TextGeneratorRuntime): Template
   return runtime.templateRuntimeValidation ?? defaultTemplateRuntimeValidation();
 }
 
-function resolveRuntimeValidationMode(mode?: RuntimeValidationMode): RuntimeValidationMode {
-  return mode ?? "non-interactive";
+function resolveRuntimeValidationMode(
+  mode?: RuntimeValidationMode,
+  runtime?: TextGeneratorRuntime,
+): RuntimeValidationMode {
+  return mode ?? (runtime?.templateInteractiveRuntimeValidation.enabled ? "interactive" : "non-interactive");
 }
 
-function shouldSkipRuntimeDevServerStepsForMode(mode?: RuntimeValidationMode): boolean {
-  return resolveRuntimeValidationMode(mode) !== "non-interactive";
+function shouldSkipRuntimeDevServerStepsForMode(
+  mode?: RuntimeValidationMode,
+  runtime?: TextGeneratorRuntime,
+): boolean {
+  return resolveRuntimeValidationMode(mode, runtime) !== "non-interactive";
 }
 
 function runtimeValidationModeOption(mode?: RuntimeValidationMode): { runtimeValidationMode?: RuntimeValidationMode } {
@@ -2560,7 +2561,7 @@ async function collectPersistedGeneratedValidation(
   if (reasons.length === 0) {
     const skipRuntimeDevServerSteps =
       options.skipRuntimeDevServerSteps === true ||
-      shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode);
+      shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode, runtime);
     const validationRuntime = skipRuntimeDevServerSteps
       ? createRuntimeWithoutDevServerValidation(runtime)
       : runtime;
@@ -2609,8 +2610,8 @@ async function validateGeneratedArtifacts(
       metadata: {
         skipRuntimeDevServerSteps:
           options.skipRuntimeDevServerSteps === true ||
-          shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode),
-        runtimeValidationMode: resolveRuntimeValidationMode(options.runtimeValidationMode),
+          shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode, runtime),
+        runtimeValidationMode: resolveRuntimeValidationMode(options.runtimeValidationMode, runtime),
       },
     },
     async () => {
@@ -2652,7 +2653,7 @@ async function validateGeneratedArtifacts(
       if (reasons.length === 0) {
         const skipRuntimeDevServerSteps =
           options.skipRuntimeDevServerSteps === true ||
-          shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode);
+          shouldSkipRuntimeDevServerStepsForMode(options.runtimeValidationMode, runtime);
         const validationRuntime = skipRuntimeDevServerSteps
           ? createRuntimeWithoutDevServerValidation(runtime)
           : runtime;
@@ -3233,7 +3234,7 @@ async function completeAfterGenerateValidation(options: {
     return;
   }
 
-  const runtimeValidationMode = resolveRuntimeValidationMode(options.runtimeValidationMode);
+  const runtimeValidationMode = resolveRuntimeValidationMode(options.runtimeValidationMode, options.runtime);
   if (runtimeValidationMode === "non-interactive") {
     await measureRuntimeStep(
       options.runtime,

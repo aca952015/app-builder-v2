@@ -2365,6 +2365,7 @@ export async function runSmokeRuntimeValidation(options: {
     if (reasons.length > 0) {
       const artifact = await finish(false, reasons);
       await appendRuntimeValidationLog(options.runtime.deepagentsRuntimeValidationLogPath, [
+        ...reasons.map((reason) => `[error] ${reason}`),
         `[error] Smoke runtime validation failed. Covered ${coverage.covered}/${coverage.total}.`,
         "",
       ]);

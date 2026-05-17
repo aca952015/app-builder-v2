@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { inspect } from "node:util";
 
-import { createMiddleware, toolStrategy } from "langchain";
+import { createMiddleware, ToolMessage, toolStrategy } from "langchain";
 import { z } from "zod";
 
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
@@ -87,6 +87,130 @@ const referenceMarkdownConversionSchema = z.object({
   markdown: z.string().min(1),
   notes: z.array(z.string()).default([]),
 });
+
+export const HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS = [
+  "/.deepagents/AGENTS.md",
+  "/.deepagents/source-prd.md",
+  "/.deepagents/plan-spec.json",
+  "/.deepagents/interaction-contract.json",
+  "/.deepagents/plan-validation.json",
+  "/.deepagents/generation-validation.json",
+  "/.deepagents/runtime-validation.log",
+  "/.deepagents/runtime-interaction-validation.json",
+  "/.deepagents/error.log",
+  "/.deepagents/config.json",
+  "/.deepagents/plan-system-prompt.md",
+  "/.deepagents/plan-repair-system-prompt.md",
+  "/.deepagents/generate-system-prompt.md",
+  "/.deepagents/generate-repair-system-prompt.md",
+  "/.deepagents/references/reference-manifest.json",
+] as const;
+
+type DeepagentsFilesystemPermission = {
+  operations: readonly ("read" | "write")[];
+  paths: string[];
+  mode: "deny";
+};
+
+export function buildHostManagedArtifactPermissions(): DeepagentsFilesystemPermission[] {
+  return [{
+    operations: ["write"],
+    paths: [...HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS],
+    mode: "deny",
+  }];
+}
+
+const HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATH_SET = new Set<string>(
+  HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS,
+);
+
+function normalizeDeepagentsVirtualPath(filePath: string): string {
+  const slashPath = filePath.trim().replace(/\\/g, "/");
+  if (!slashPath.startsWith("/")) {
+    return slashPath;
+  }
+  const normalized = path.posix.normalize(slashPath);
+  return normalized.length > 1 && normalized.endsWith("/")
+    ? normalized.slice(0, -1)
+    : normalized;
+}
+
+export function isHostManagedWriteProtectedArtifactPath(filePath: string): boolean {
+  return HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATH_SET.has(normalizeDeepagentsVirtualPath(filePath));
+}
+
+function extractToolCallFilePath(toolCall: unknown): string | null {
+  if (!toolCall || typeof toolCall !== "object") {
+    return null;
+  }
+
+  const record = toolCall as Record<string, unknown>;
+  const args = parseToolInput(record.args) ?? parseToolInput(record.input);
+  const filePath = args?.file_path ?? args?.path;
+  return typeof filePath === "string" && filePath.trim()
+    ? normalizeDeepagentsVirtualPath(filePath)
+    : null;
+}
+
+function extractHostManagedPermissionDeniedPath(error: unknown): string | null {
+  for (const message of collectErrorMessages(error)) {
+    const match = message.match(/permission denied for write on (\S+)/i);
+    if (!match?.[1]) {
+      continue;
+    }
+    const deniedPath = normalizeDeepagentsVirtualPath(match[1]);
+    if (isHostManagedWriteProtectedArtifactPath(deniedPath)) {
+      return deniedPath;
+    }
+  }
+  return null;
+}
+
+function buildBlockedHostManagedArtifactToolMessage(
+  toolName: string,
+  toolCallId: string | undefined,
+  targetPath: string,
+): ToolMessage {
+  return new ToolMessage({
+    name: toolName,
+    tool_call_id: toolCallId ?? "host-managed-artifact-write-guard",
+    status: "error",
+    content: [
+      `Error: host-managed artifact write blocked for ${targetPath}.`,
+      "Do not write or edit this file with filesystem tools.",
+      "Return the corresponding structured response fields instead; app-builder will materialize the artifact.",
+    ].join(" "),
+  });
+}
+
+export function createHostManagedArtifactWriteGuardMiddleware(): unknown {
+  return createMiddleware({
+    name: "hostManagedArtifactWriteGuardMiddleware",
+    wrapToolCall: async (request, handler) => {
+      const toolCall = request.toolCall as { id?: string; name?: string };
+      const toolName = typeof toolCall.name === "string" ? toolCall.name : "filesystem";
+      const targetPath = extractToolCallFilePath(toolCall);
+
+      if (
+        (toolName === "write_file" || toolName === "edit_file") &&
+        targetPath &&
+        isHostManagedWriteProtectedArtifactPath(targetPath)
+      ) {
+        return buildBlockedHostManagedArtifactToolMessage(toolName, toolCall.id, targetPath);
+      }
+
+      try {
+        return await handler(request);
+      } catch (error) {
+        const deniedPath = extractHostManagedPermissionDeniedPath(error);
+        if (deniedPath) {
+          return buildBlockedHostManagedArtifactToolMessage(toolName, toolCall.id, deniedPath);
+        }
+        throw error;
+      }
+    },
+  });
+}
 
 const REFERENCE_MARKDOWN_CONVERSION_SYSTEM_PROMPT = [
   "# API Reference Markdown Conversion",
@@ -1110,8 +1234,8 @@ function normalizeTodoItemCandidate(value: unknown): TodoItem | null {
   }
 
   const record = value as Record<string, unknown>;
-  return typeof record.content === "string" && isTodoStatus(record.status)
-    ? { content: record.content, status: record.status }
+  return typeof record.content === "string"
+    ? { content: record.content, status: isTodoStatus(record.status) ? record.status : "pending" }
     : null;
 }
 
@@ -1131,13 +1255,13 @@ function extractLooseTodoList(value: string): TodoItem[] | null {
     const itemText = match[0];
     const contentMatch = itemText.match(/"content"\s*:\s*"((?:\\.|[^"\\])*)"/);
     const statusMatch = itemText.match(/"status"\s*:\s*"(pending|in_progress|completed)"/);
-    if (!contentMatch?.[1] || !statusMatch?.[1]) {
+    if (!contentMatch?.[1]) {
       continue;
     }
 
     todos.push({
       content: decodeJsonStringFragment(contentMatch[1]),
-      status: statusMatch[1] as TodoStatus,
+      status: (statusMatch?.[1] as TodoStatus | undefined) ?? "pending",
     });
   }
 
@@ -2675,9 +2799,11 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       model: resolvedModel,
       responseFormat: toolStrategy(options.responseSchema),
       systemPrompt,
+      permissions: buildHostManagedArtifactPermissions(),
     };
+    const hostManagedArtifactWriteGuardMiddleware = createHostManagedArtifactWriteGuardMiddleware();
     const writeTodosCompatibilityMiddleware = createWriteTodosCompatibilityMiddleware();
-    agentOptions.middleware = [writeTodosCompatibilityMiddleware];
+    agentOptions.middleware = [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware];
 
     const hasTemplateSkills = await pathExists(skillsDirectory);
     if (hasTemplateSkills) {
@@ -2688,11 +2814,11 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       runtimePhase,
       hasTemplateSkills,
       projectConfigGuardPrompt,
-      [writeTodosCompatibilityMiddleware],
+      [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware],
     );
     const generalPurposeSubagent = buildGeneralPurposeCompatibilitySubagent(
       deepagents as Record<string, unknown>,
-      [writeTodosCompatibilityMiddleware],
+      [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware],
       hasTemplateSkills,
     );
     const subagents = [
@@ -2744,12 +2870,14 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       const createDeepAgent = deepagents.createDeepAgent;
       const modelConfig = runtime.modelRoles?.plan ?? this.modelRoles.plan;
       const resolvedModel = await resolveModel(modelConfig, runtime.templatePhases.plan?.effort);
+      const hostManagedArtifactWriteGuardMiddleware = createHostManagedArtifactWriteGuardMiddleware();
       const writeTodosCompatibilityMiddleware = createWriteTodosCompatibilityMiddleware();
       const agentOptions: any = {
         model: resolvedModel,
-        middleware: [writeTodosCompatibilityMiddleware],
+        middleware: [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware],
         responseFormat: toolStrategy(referenceMarkdownConversionSchema),
         systemPrompt: REFERENCE_MARKDOWN_CONVERSION_SYSTEM_PROMPT,
+        permissions: buildHostManagedArtifactPermissions(),
         backend: new deepagents.FilesystemBackend({
           rootDir: runtime.outputDirectory,
           virtualMode: true,
@@ -2757,7 +2885,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       };
       const generalPurposeSubagent = buildGeneralPurposeCompatibilitySubagent(
         deepagents as Record<string, unknown>,
-        [writeTodosCompatibilityMiddleware],
+        [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware],
         false,
       );
       if (generalPurposeSubagent) {

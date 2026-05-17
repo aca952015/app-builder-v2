@@ -7,7 +7,11 @@ import { connect as connectNet, createServer as createNetServer } from "node:net
 import os from "node:os";
 import path from "node:path";
 
-import { routeToAdminPagePath, routeToPageFileCandidates } from "../src/lib/app-router.js";
+import {
+  collectPageRoutePatterns,
+  pageFilePathToRoutePattern,
+  routeToAdminPagePath,
+} from "../src/lib/app-router.js";
 import {
   apiFilePathToHttpPath,
   buildRuntimeInteractionTargets,
@@ -30,7 +34,16 @@ import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
 import { validatePlanSpec, type PlanSpec } from "../src/lib/plan-spec.js";
 import { validateInteractionContract, type InteractionContract } from "../src/lib/interaction-contract.js";
 import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
-import { buildPlanProjectPayload, buildPlanRepairPayload, runDeepAgentWithLogs } from "../src/lib/text-generator.js";
+import { buildSessionPolicyDocument } from "../src/lib/session-policy.js";
+import {
+  buildHostManagedArtifactPermissions,
+  buildPlanProjectPayload,
+  buildPlanRepairPayload,
+  createHostManagedArtifactWriteGuardMiddleware,
+  HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS,
+  isHostManagedWriteProtectedArtifactPath,
+  runDeepAgentWithLogs,
+} from "../src/lib/text-generator.js";
 import { closeWorkflowBoard } from "../src/lib/terminal-ui.js";
 import { copyStarterScaffold, loadTemplatePack } from "../src/lib/template-pack.js";
 import {
@@ -356,6 +369,86 @@ function buildColonRoutePlanSpec(): PlanSpec {
         description: "必须覆盖查看详情流程。",
         type: "flow",
         target: "查看详情",
+      },
+    ],
+  };
+}
+
+function buildPlantRouteGroupPlanSpec(): PlanSpec {
+  return {
+    version: 1,
+    appName: "Plant Tracker",
+    summary: "Track plants and maintenance work.",
+    resources: [
+      {
+        name: "Plant",
+        pluralName: "Plants",
+        routeSegment: "plants",
+        description: "A plant record.",
+        fields: [
+          { name: "name", label: "Name", type: "string", required: true, source: "prd" },
+          { name: "status", label: "Status", type: "string", required: true, source: "prd" },
+        ],
+        relations: [],
+      },
+    ],
+    pages: [
+      {
+        name: "Plant list",
+        route: "/plants",
+        kind: "list",
+        resourceName: "Plant",
+        purpose: "List plants.",
+      },
+      {
+        name: "Plant edit",
+        route: "/plants/[id]/edit",
+        kind: "edit",
+        resourceName: "Plant",
+        purpose: "Edit a plant.",
+      },
+    ],
+    apis: [
+      {
+        name: "PlantCollection",
+        resourceName: "Plant",
+        path: "/app/api/plants/route.ts",
+        methods: ["GET", "POST"],
+        requestShape: "Plant query or create payload.",
+        responseShape: "Plant list or created plant.",
+      },
+    ],
+    flows: [
+      {
+        name: "Maintain plants",
+        steps: ["Open plant list", "Open edit page", "Save plant changes"],
+      },
+    ],
+    assumptions: ["Authentication is out of scope for this regression."],
+    acceptanceChecks: [
+      {
+        id: "page-plant-list",
+        description: "Plant list page exists.",
+        type: "page",
+        target: "/plants",
+      },
+      {
+        id: "page-plant-edit",
+        description: "Plant edit page exists.",
+        type: "page",
+        target: "/plants/[id]/edit",
+      },
+      {
+        id: "api-plants",
+        description: "Plant API exists.",
+        type: "api",
+        target: "/app/api/plants/route.ts",
+      },
+      {
+        id: "flow-maintain-plants",
+        description: "Plant maintenance flow exists.",
+        type: "flow",
+        target: "Maintain plants",
       },
     ],
   };
@@ -1064,32 +1157,56 @@ test("filterRedundantValidationDetailLines removes validation detail already pre
   );
 });
 
-test("routeToPageFileCandidates normalizes common dynamic route syntaxes to Next App Router paths", () => {
-  assert.deepEqual(routeToPageFileCandidates("/workorders/:id"), [
-    "app/workorders/[id]/page.tsx",
-    "app/(app)/workorders/[id]/page.tsx",
-    "app/(admin)/workorders/[id]/page.tsx",
-    "app/(full-width-pages)/workorders/[id]/page.tsx",
-  ]);
-  assert.deepEqual(routeToPageFileCandidates("/alarms/[source_Path]"), [
-    "app/alarms/[source_Path]/page.tsx",
-    "app/(app)/alarms/[source_Path]/page.tsx",
-    "app/(admin)/alarms/[source_Path]/page.tsx",
-    "app/(full-width-pages)/alarms/[source_Path]/page.tsx",
-  ]);
-  assert.deepEqual(routeToPageFileCandidates("/files/:path+"), [
-    "app/files/[...path]/page.tsx",
-    "app/(app)/files/[...path]/page.tsx",
-    "app/(admin)/files/[...path]/page.tsx",
-    "app/(full-width-pages)/files/[...path]/page.tsx",
-  ]);
-  assert.deepEqual(routeToPageFileCandidates("/"), [
-    "app/page.tsx",
-    "app/(app)/page.tsx",
-    "app/(admin)/page.tsx",
-    "app/(full-width-pages)/page.tsx",
-  ]);
+test("pageFilePathToRoutePattern maps App Router page files to public route patterns", () => {
+  assert.equal(pageFilePathToRoutePattern("app/(main)/plants/page.tsx"), "/plants");
+  assert.equal(pageFilePathToRoutePattern("app/(main)/plants/[id]/edit/page.tsx"), "/plants/[id]/edit");
+  assert.equal(pageFilePathToRoutePattern("app/admin/plants/page.tsx"), "/admin/plants");
+  assert.equal(pageFilePathToRoutePattern("app/workorders/[id]/page.tsx"), "/workorders/[id]");
+  assert.equal(pageFilePathToRoutePattern("app/files/[...path]/page.tsx"), "/files/[...path]");
+  assert.equal(pageFilePathToRoutePattern("app/page.tsx"), "/");
+  assert.equal(pageFilePathToRoutePattern("pages/plants/page.tsx"), null);
   assert.equal(routeToAdminPagePath("/alarms/:source_Path"), "app/(admin)/alarms/[source_Path]/page.tsx");
+});
+
+test("collectPageRoutePatterns follows Next route group URL semantics", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-route-groups-"));
+
+  try {
+    const outputDirectory = path.join(tempRoot, "output");
+    const pagePaths = [
+      "app/(main)/plants/page.tsx",
+      "app/(main)/plants/[id]/edit/page.tsx",
+      "app/admin/plants/page.tsx",
+    ];
+
+    for (const pagePath of pagePaths) {
+      const absolutePath = path.join(outputDirectory, pagePath);
+      await mkdir(path.dirname(absolutePath), { recursive: true });
+      await writeFile(absolutePath, "export default function Page() { return null; }\n", "utf8");
+    }
+
+    const routes = await collectPageRoutePatterns(outputDirectory);
+
+    assert.equal(routes.has("/plants"), true);
+    assert.equal(routes.has("/plants/[id]/edit"), true);
+    assert.equal(routes.has("/admin/plants"), true);
+    assert.equal(
+      pageFilePathToRoutePattern("app/admin/plants/page.tsx") === "/plants",
+      false,
+      "plain admin path keeps admin as a public URL segment",
+    );
+
+    const adminOnlyDirectory = path.join(tempRoot, "admin-only");
+    const adminOnlyPage = path.join(adminOnlyDirectory, "app/admin/plants/page.tsx");
+    await mkdir(path.dirname(adminOnlyPage), { recursive: true });
+    await writeFile(adminOnlyPage, "export default function Page() { return null; }\n", "utf8");
+
+    const adminOnlyRoutes = await collectPageRoutePatterns(adminOnlyDirectory);
+    assert.equal(adminOnlyRoutes.has("/plants"), false);
+    assert.equal(adminOnlyRoutes.has("/admin/plants"), true);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("interactive runtime target matching supports page and API dynamic routes", () => {
@@ -2495,6 +2612,7 @@ async function writeImplementedProjectFiles(options: {
   outputDirectory: string;
   planSpec: PlanSpec;
   reportContents: string;
+  pagePathForRoute?: (route: string) => string;
   extraFiles?: Array<{ path: string; contents: string }>;
 }): Promise<void> {
   await writeFile(path.join(options.outputDirectory, "app-builder-report.md"), options.reportContents, "utf8");
@@ -2506,8 +2624,9 @@ async function writeImplementedProjectFiles(options: {
     await writeFile(absolutePath, "export async function GET() { return Response.json([]); }\n", "utf8");
   }
 
+  const pagePathForRoute = options.pagePathForRoute ?? routeToAdminPagePath;
   for (const page of options.planSpec.pages) {
-    const relativePath = routeToAdminPagePath(page.route);
+    const relativePath = pagePathForRoute(page.route);
     const absolutePath = path.join(options.outputDirectory, relativePath);
     await mkdir(path.dirname(absolutePath), { recursive: true });
     await writeFile(absolutePath, "export default function Page() { return null; }\n", "utf8");
@@ -2518,6 +2637,10 @@ async function writeImplementedProjectFiles(options: {
     await mkdir(path.dirname(absolutePath), { recursive: true });
     await writeFile(absolutePath, file.contents, "utf8");
   }
+}
+
+function routeToMainPagePath(route: string): string {
+  return routeToAdminPagePath(route).replace("app/(admin)/", "app/(main)/");
 }
 
 class SuccessfulRuntimeValidator implements GeneratedAppValidator {
@@ -3525,6 +3648,58 @@ class ColonRouteTextGenerator implements TextGenerator {
 
   async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
     throw new Error("generateRepairProject should not be called in ColonRouteTextGenerator");
+  }
+}
+
+class MainRouteGroupTextGenerator implements TextGenerator {
+  async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
+    const planSpec = buildPlantRouteGroupPlanSpec();
+
+    await writeFile(runtime.deepagentsAnalysisPath, "# Main Route Group Analysis\n", "utf8");
+    await writeFile(runtime.deepagentsDetailedSpecPath, "# Main Route Group Spec\n", "utf8");
+    await writeFile(runtime.deepagentsPlanSpecPath, `${JSON.stringify(planSpec, null, 2)}\n`, "utf8");
+    await writeEmptyInteractionContract(runtime);
+
+    return {
+      summary: "Wrote plan artifacts for pages under an arbitrary route group.",
+      artifactsWritten: [
+        ".deepagents/prd-analysis.md",
+        ".deepagents/generated-spec.md",
+        ".deepagents/plan-spec.json",
+      ],
+      planSpecVersion: 1,
+      notes: [],
+    };
+  }
+
+  async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime) {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Main Route Group Report\n\nGenerated under app/(main).\n",
+      pagePathForRoute: routeToMainPagePath,
+    });
+
+    return {
+      summary: "Generated pages under app/(main).",
+      filesWritten: [
+        "app-builder-report.md",
+        ...uniqueApiPaths(planSpec).map((apiPath) => apiPath.replace(/^\/+/, "")),
+        ...planSpec.pages.map((page) => routeToMainPagePath(page.route)),
+      ],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+
+  async planRepairProject(_runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("planRepairProject should not be called in MainRouteGroupTextGenerator");
+  }
+
+  async generateRepairProject(_planSpec: PlanSpec, _runtime: TextGeneratorRuntime): Promise<never> {
+    throw new Error("generateRepairProject should not be called in MainRouteGroupTextGenerator");
   }
 }
 
@@ -6264,6 +6439,32 @@ test("generateApplication accepts colon-style page routes when files are written
   }
 });
 
+test("generateApplication accepts plan pages written under arbitrary App Router route groups", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-main-route-group-pages-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+
+  try {
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      templateId: "mini-app",
+      generator: new MainRouteGroupTextGenerator(),
+      validator: new SuccessfulRuntimeValidator(),
+      runtimeValidationMode: "non-interactive",
+    });
+
+    const generationValidation = await readFile(
+      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      "utf8",
+    );
+
+    assert.match(generationValidation, /"valid": true/);
+    assert.doesNotMatch(generationValidation, /\/plants/);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication allows API-only support resources during plan validation", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-api-only-resource-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -6987,6 +7188,96 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
   assert.equal(payload.hardConstraints.referenceUsageValidation.artifactPath, "/.deepagents/references/reference-manifest.json");
   assert.equal(payload.hardConstraints.referenceUsageValidation.blocking, true);
   assert.match(payload.hardConstraints.referenceUsageValidation.rules.join("\n"), /不能凭模型记忆/);
+});
+
+test("host policy and DeepAgents permissions block model writes to host-materialized artifacts", () => {
+  const policy = buildSessionPolicyDocument();
+  const permissions = buildHostManagedArtifactPermissions();
+  const protectedPaths: string[] = [...HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS];
+
+  assert.match(policy, /Host-materialized JSON, validation, runtime, config, prompt snapshot, and source mirror artifacts are read-only to model file tools/);
+  assert.match(policy, /This write-protection does not apply to `artifacts\.analysis` or `artifacts\.generatedSpec`/);
+  assert.equal(permissions.length, 1);
+  assert.deepEqual(permissions[0]?.operations, ["write"]);
+  assert.equal(permissions[0]?.mode, "deny");
+  assert.deepEqual(permissions[0]?.paths, protectedPaths);
+  assert.ok(protectedPaths.includes("/.deepagents/plan-spec.json"));
+  assert.ok(protectedPaths.includes("/.deepagents/interaction-contract.json"));
+  assert.ok(protectedPaths.includes("/.deepagents/plan-validation.json"));
+  assert.equal(protectedPaths.includes("/.deepagents/prd-analysis.md"), false);
+  assert.equal(protectedPaths.includes("/.deepagents/generated-spec.md"), false);
+});
+
+test("host-managed artifact write guard soft-blocks protected file writes", async () => {
+  const middleware = createHostManagedArtifactWriteGuardMiddleware() as {
+    wrapToolCall: (
+      request: unknown,
+      handler: (request: unknown) => Promise<unknown>,
+    ) => Promise<unknown>;
+  };
+  let handlerCalled = false;
+
+  const result = await middleware.wrapToolCall(
+    {
+      toolCall: {
+        id: "call-plan-spec",
+        name: "write_file",
+        args: {
+          file_path: "/.deepagents/plan-spec.json",
+          content: "{}",
+        },
+      },
+      tool: undefined,
+      state: { messages: [] },
+      runtime: {},
+    },
+    async () => {
+      handlerCalled = true;
+      throw new Error("handler should not be called for protected host artifacts");
+    },
+  ) as { content?: unknown; name?: string; status?: string; tool_call_id?: string };
+
+  assert.equal(handlerCalled, false);
+  assert.equal(result.name, "write_file");
+  assert.equal(result.status, "error");
+  assert.equal(result.tool_call_id, "call-plan-spec");
+  assert.match(String(result.content), /host-managed artifact write blocked/);
+  assert.equal(isHostManagedWriteProtectedArtifactPath("/.deepagents/plan-spec.json"), true);
+  assert.equal(isHostManagedWriteProtectedArtifactPath("/.deepagents/prd-analysis.md"), false);
+});
+
+test("host-managed artifact write guard allows model-owned planning markdown writes", async () => {
+  const middleware = createHostManagedArtifactWriteGuardMiddleware() as {
+    wrapToolCall: (
+      request: unknown,
+      handler: (request: unknown) => Promise<unknown>,
+    ) => Promise<unknown>;
+  };
+  const expected = { content: "ok", name: "write_file", tool_call_id: "call-analysis" };
+  let handlerCalled = false;
+
+  const result = await middleware.wrapToolCall(
+    {
+      toolCall: {
+        id: "call-analysis",
+        name: "write_file",
+        args: {
+          file_path: "/.deepagents/prd-analysis.md",
+          content: "# Analysis\n",
+        },
+      },
+      tool: undefined,
+      state: { messages: [] },
+      runtime: {},
+    },
+    async () => {
+      handlerCalled = true;
+      return expected;
+    },
+  );
+
+  assert.equal(handlerCalled, true);
+  assert.equal(result, expected);
 });
 
 test("mini-app prompts require interaction contract traceability", async () => {
