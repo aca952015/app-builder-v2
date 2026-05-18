@@ -94,8 +94,94 @@ test("resolveModelRoleConfigs falls back to global model, base URL, and API key"
 
   for (const role of ["plan", "generate", "repair"] as const) {
     assert.equal(configs[role].modelName, "openai:gpt-5.4-mini");
+    assert.equal(configs[role].protocol, "openai");
     assert.equal(configs[role].baseURL, "https://proxy.example/v1");
+    assert.equal(configs[role].userAgent, undefined);
     assert.equal(configs[role].apiKey, "global-key");
+  }
+});
+
+test("resolveModelRoleConfigs applies global protocol to every role", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_PROTOCOL: "anthropic",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].protocol, "anthropic");
+  }
+});
+
+test("resolveModelRoleConfigs applies role-specific protocol overrides with global fallback", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_PROTOCOL: "openai",
+    APP_BUILDER_PLAN_PROTOCOL: "anthropic",
+    APP_BUILDER_GENERATE_PROTOCOL: "openai",
+    APP_BUILDER_REPAIR_PROTOCOL: "anthropic",
+  });
+
+  assert.equal(configs.plan.protocol, "anthropic");
+  assert.equal(configs.generate.protocol, "openai");
+  assert.equal(configs.repair.protocol, "anthropic");
+});
+
+test("resolveModelRoleConfigs rejects invalid protocol values", () => {
+  assert.throws(
+    () =>
+      resolveModelRoleConfigs({
+        APP_BUILDER_API_KEY: "global-key",
+        APP_BUILDER_PLAN_PROTOCOL: "claude",
+      }),
+    /APP_BUILDER_PLAN_PROTOCOL must be one of: openai, anthropic/,
+  );
+});
+
+test("resolveModelRoleConfigs applies global user agent to every role", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_USER_AGENT: "  app-builder-test/1.0  ",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].userAgent, "app-builder-test/1.0");
+  }
+});
+
+test("resolveModelRoleConfigs applies role-specific user agent overrides with global fallback", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_USER_AGENT: "global-agent/1.0",
+    APP_BUILDER_PLAN_USER_AGENT: "  plan-agent/1.0  ",
+    APP_BUILDER_GENERATE_USER_AGENT: "generate-agent/1.0",
+    APP_BUILDER_REPAIR_USER_AGENT: "repair-agent/1.0",
+  });
+
+  assert.equal(configs.plan.userAgent, "plan-agent/1.0");
+  assert.equal(configs.generate.userAgent, "generate-agent/1.0");
+  assert.equal(configs.repair.userAgent, "repair-agent/1.0");
+});
+
+test("resolveModelRoleConfigs falls back to global user agent for roles without an override", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_USER_AGENT: "global-agent/1.0",
+    APP_BUILDER_PLAN_USER_AGENT: "plan-agent/1.0",
+  });
+
+  assert.equal(configs.plan.userAgent, "plan-agent/1.0");
+  assert.equal(configs.generate.userAgent, "global-agent/1.0");
+  assert.equal(configs.repair.userAgent, "global-agent/1.0");
+});
+
+test("resolveModelRoleConfigs ignores empty user agent values", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_USER_AGENT: "   ",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].userAgent, undefined);
   }
 });
 
@@ -105,8 +191,11 @@ test("resolveModelRoleConfigs defaults model names when only a global key is pre
   });
 
   assert.equal(configs.plan.modelName, DEFAULT_MODEL_NAME);
+  assert.equal(configs.plan.protocol, "openai");
   assert.equal(configs.generate.modelName, DEFAULT_MODEL_NAME);
+  assert.equal(configs.generate.protocol, "openai");
   assert.equal(configs.repair.modelName, DEFAULT_MODEL_NAME);
+  assert.equal(configs.repair.protocol, "openai");
 });
 
 test("resolveModelRoleConfigs applies role-specific model, base URL, and API key overrides", () => {
@@ -117,6 +206,9 @@ test("resolveModelRoleConfigs applies role-specific model, base URL, and API key
     APP_BUILDER_PLAN_MODEL: "openai:plan-model",
     APP_BUILDER_GENERATE_MODEL: "openai:generate-model",
     APP_BUILDER_REPAIR_MODEL: "openai:repair-model",
+    APP_BUILDER_PLAN_PROTOCOL: "anthropic",
+    APP_BUILDER_GENERATE_PROTOCOL: "openai",
+    APP_BUILDER_REPAIR_PROTOCOL: "anthropic",
     APP_BUILDER_PLAN_BASE_URL: "https://plan.example/v1",
     APP_BUILDER_GENERATE_BASE_URL: "https://generate.example/v1",
     APP_BUILDER_REPAIR_BASE_URL: "https://repair.example/v1",
@@ -128,6 +220,9 @@ test("resolveModelRoleConfigs applies role-specific model, base URL, and API key
   assert.equal(configs.plan.modelName, "openai:plan-model");
   assert.equal(configs.generate.modelName, "openai:generate-model");
   assert.equal(configs.repair.modelName, "openai:repair-model");
+  assert.equal(configs.plan.protocol, "anthropic");
+  assert.equal(configs.generate.protocol, "openai");
+  assert.equal(configs.repair.protocol, "anthropic");
   assert.equal(configs.plan.baseURL, "https://plan.example/v1");
   assert.equal(configs.generate.baseURL, "https://generate.example/v1");
   assert.equal(configs.repair.baseURL, "https://repair.example/v1");
@@ -238,20 +333,25 @@ test("resolveModelRoleConfigs can merge persisted model metadata with current se
         plan: {
           role: "plan",
           modelName: "openai:persisted-plan",
+          protocol: "anthropic",
           baseURL: "https://persisted-plan.example/v1",
         },
         repair: {
           role: "repair",
           modelName: "openai:persisted-repair",
+          protocol: "openai",
         },
       },
     },
   );
 
   assert.equal(configs.plan.modelName, "openai:persisted-plan");
+  assert.equal(configs.plan.protocol, "anthropic");
   assert.equal(configs.plan.baseURL, "https://persisted-plan.example/v1");
   assert.equal(configs.generate.modelName, "openai:legacy-model");
+  assert.equal(configs.generate.protocol, "openai");
   assert.equal(configs.repair.modelName, "openai:persisted-repair");
+  assert.equal(configs.repair.protocol, "openai");
   assert.equal(configs.repair.apiKey, "runtime-key");
 });
 
@@ -260,7 +360,9 @@ test("sanitizeModelRoleConfigs strips API keys", () => {
     resolveModelRoleConfigs({
       APP_BUILDER_API_KEY: "global-secret",
       APP_BUILDER_MODEL: "openai:gpt-5.4-mini",
+      APP_BUILDER_PROTOCOL: "anthropic",
       APP_BUILDER_BASE_URL: "https://proxy.example/v1",
+      APP_BUILDER_USER_AGENT: "app-builder-test/1.0",
     }),
   );
   const serialized = JSON.stringify(sanitized);
@@ -268,6 +370,8 @@ test("sanitizeModelRoleConfigs strips API keys", () => {
   assert.equal("apiKey" in sanitized.plan, false);
   assert.equal("apiKey" in sanitized.generate, false);
   assert.equal("apiKey" in sanitized.repair, false);
+  assert.equal(sanitized.plan.protocol, "anthropic");
+  assert.equal(sanitized.plan.userAgent, "app-builder-test/1.0");
   assert.doesNotMatch(serialized, /global-secret/);
   assert.match(serialized, /openai:gpt-5\.4-mini/);
 });
@@ -319,6 +423,24 @@ test("createOpenAICompatibleModel enables reasoning_content compat for every pro
 
   assert.match(openaiModel.completions?.constructor?.name ?? "", /ReasoningContent/);
   assert.match(compatibleProviderModel.completions?.constructor?.name ?? "", /ReasoningContent/);
+});
+
+test("createOpenAICompatibleModel preserves base URL when setting user agent header", () => {
+  const model = createOpenAICompatibleModel({
+    modelName: "openai:test-model",
+    baseURL: "https://proxy.example/v1",
+    userAgent: "app-builder-test/1.0",
+    apiKey: "test-key",
+  }) as unknown as {
+    identifyingParams: () => {
+      baseURL?: string;
+      defaultHeaders?: Record<string, string>;
+    };
+  };
+
+  const identifyingParams = model.identifyingParams();
+  assert.equal(identifyingParams.baseURL, "https://proxy.example/v1");
+  assert.equal(identifyingParams.defaultHeaders?.["User-Agent"], "app-builder-test/1.0");
 });
 
 test("resolveModelReasoningEffort maps template max to model xhigh", () => {

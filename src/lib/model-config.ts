@@ -4,14 +4,24 @@ export const GLOBAL_API_KEY_ENV = "APP_BUILDER_API_KEY";
 
 export const GLOBAL_BASE_URL_ENV = "APP_BUILDER_BASE_URL";
 
+export const GLOBAL_USER_AGENT_ENV = "APP_BUILDER_USER_AGENT";
+
+export const GLOBAL_PROTOCOL_ENV = "APP_BUILDER_PROTOCOL";
+
 export const MODEL_ROLES = ["plan", "generate", "repair"] as const;
 
 export type ModelRole = typeof MODEL_ROLES[number];
 
+export const MODEL_PROTOCOLS = ["openai", "anthropic"] as const;
+
+export type ModelProtocol = typeof MODEL_PROTOCOLS[number];
+
 export type ModelRoleConfig = {
   role: ModelRole;
   modelName: string;
+  protocol: ModelProtocol;
   baseURL?: string;
+  userAgent?: string;
   apiKey?: string;
 };
 
@@ -37,12 +47,32 @@ function readEnvValue(env: EnvSource, key: string): string | undefined {
   return trimOptional(env[key]);
 }
 
+function parseModelProtocol(value: string | undefined, source: string): ModelProtocol | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  if (value === "openai" || value === "anthropic") {
+    return value;
+  }
+
+  throw new Error(`${source} must be one of: ${MODEL_PROTOCOLS.join(", ")}.`);
+}
+
 function roleEnvPrefix(role: ModelRole): string {
   return `APP_BUILDER_${role.toUpperCase()}`;
 }
 
 function roleApiKeyEnvName(role: ModelRole): string {
   return `${roleEnvPrefix(role)}_API_KEY`;
+}
+
+function roleUserAgentEnvName(role: ModelRole): string {
+  return `${roleEnvPrefix(role)}_USER_AGENT`;
+}
+
+function roleProtocolEnvName(role: ModelRole): string {
+  return `${roleEnvPrefix(role)}_PROTOCOL`;
 }
 
 function buildModelRoleConfig(
@@ -61,14 +91,27 @@ function buildModelRoleConfig(
     readEnvValue(env, `${roleEnvPrefix(role)}_BASE_URL`) ??
     readEnvValue(env, GLOBAL_BASE_URL_ENV) ??
     trimOptional(persisted?.baseURL);
+  const userAgent = readEnvValue(env, roleUserAgentEnvName(role)) ?? readEnvValue(env, GLOBAL_USER_AGENT_ENV);
   const apiKey = readEnvValue(env, roleApiKeyEnvName(role)) ?? readEnvValue(env, GLOBAL_API_KEY_ENV);
+  const roleProtocolValue = readEnvValue(env, roleProtocolEnvName(role));
+  const globalProtocolValue = readEnvValue(env, GLOBAL_PROTOCOL_ENV);
+  const protocol =
+    parseModelProtocol(roleProtocolValue, roleProtocolEnvName(role)) ??
+    parseModelProtocol(globalProtocolValue, GLOBAL_PROTOCOL_ENV) ??
+    persisted?.protocol ??
+    "openai";
   const config: ModelRoleConfig = {
     role,
     modelName,
+    protocol,
   };
 
   if (baseURL) {
     config.baseURL = baseURL;
+  }
+
+  if (userAgent) {
+    config.userAgent = userAgent;
   }
 
   if (apiKey) {
@@ -119,10 +162,15 @@ function sanitizeModelRoleConfig(config: ModelRoleConfig): SanitizedModelRoleCon
   const sanitized: SanitizedModelRoleConfig = {
     role: config.role,
     modelName: config.modelName,
+    protocol: config.protocol,
   };
 
   if (config.baseURL) {
     sanitized.baseURL = config.baseURL;
+  }
+
+  if (config.userAgent) {
+    sanitized.userAgent = config.userAgent;
   }
 
   return sanitized;
@@ -160,12 +208,18 @@ export function parseSanitizedModelRoleConfigs(value: unknown): Partial<Sanitize
     }
 
     const baseURL = readStringField(candidateRecord, ["baseURL", "baseUrl"]);
+    const userAgent = readStringField(candidateRecord, ["userAgent"]);
+    const protocol = parseModelProtocol(readStringField(candidateRecord, ["protocol"]), `models.${role}.protocol`);
     const sanitized: SanitizedModelRoleConfig = {
       role,
       modelName,
+      protocol: protocol ?? "openai",
     };
     if (baseURL) {
       sanitized.baseURL = baseURL;
+    }
+    if (userAgent) {
+      sanitized.userAgent = userAgent;
     }
     result[role] = sanitized;
   }

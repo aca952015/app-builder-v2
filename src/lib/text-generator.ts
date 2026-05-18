@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { inspect } from "node:util";
 
+import { ChatAnthropic } from "@langchain/anthropic";
 import { createMiddleware, ToolMessage, toolStrategy } from "langchain";
 import { z } from "zod";
 
@@ -12,6 +13,7 @@ import { createOpenAICompatibleModel } from "./deepseek-openai.js";
 import {
   DEFAULT_MODEL_NAME,
   resolveModelRoleConfigs,
+  type ModelProtocol,
   type ModelRole,
   type ModelRoleConfig,
   type ModelRoleConfigMap,
@@ -2627,11 +2629,28 @@ function extractStructuredResponse<T>(result: unknown, schema: z.ZodType<T>): T 
   return parsed.success ? parsed.data : null;
 }
 
+function normalizeProtocolModelName(modelName: string, protocol: ModelProtocol): string {
+  const prefix = `${protocol}:`;
+  return modelName.startsWith(prefix) ? modelName.slice(prefix.length) : modelName;
+}
+
 async function resolveModel(config: ModelRoleConfig, effort?: TemplatePhaseEffort) {
+  if (config.protocol === "anthropic") {
+    return new ChatAnthropic({
+      model: normalizeProtocolModelName(config.modelName, config.protocol),
+      temperature: 0,
+      ...(effort ? { outputConfig: { effort } } : {}),
+      ...(config.baseURL ? { anthropicApiUrl: config.baseURL } : {}),
+      ...(config.userAgent ? { clientOptions: { defaultHeaders: { "User-Agent": config.userAgent } } } : {}),
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    });
+  }
+
   return createOpenAICompatibleModel({
-    modelName: config.modelName,
+    modelName: normalizeProtocolModelName(config.modelName, config.protocol),
     ...(effort ? { effort } : {}),
     ...(config.baseURL ? { baseURL: config.baseURL } : {}),
+    ...(config.userAgent ? { userAgent: config.userAgent } : {}),
     ...(config.apiKey ? { apiKey: config.apiKey } : {}),
   });
 }

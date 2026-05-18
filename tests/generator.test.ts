@@ -6908,6 +6908,8 @@ test("generateApplication persists sanitized role model metadata", async () => {
   const envKeys = [
     "APP_BUILDER_API_KEY",
     "APP_BUILDER_BASE_URL",
+    "APP_BUILDER_USER_AGENT",
+    "APP_BUILDER_PROTOCOL",
     "APP_BUILDER_MODEL",
     "APP_BUILDER_PLAN_MODEL",
     "APP_BUILDER_GENERATE_MODEL",
@@ -6915,6 +6917,9 @@ test("generateApplication persists sanitized role model metadata", async () => {
     "APP_BUILDER_PLAN_BASE_URL",
     "APP_BUILDER_GENERATE_BASE_URL",
     "APP_BUILDER_REPAIR_BASE_URL",
+    "APP_BUILDER_PLAN_PROTOCOL",
+    "APP_BUILDER_GENERATE_PROTOCOL",
+    "APP_BUILDER_REPAIR_PROTOCOL",
     "APP_BUILDER_PLAN_API_KEY",
     "APP_BUILDER_GENERATE_API_KEY",
     "APP_BUILDER_REPAIR_API_KEY",
@@ -6924,6 +6929,8 @@ test("generateApplication persists sanitized role model metadata", async () => {
   try {
     process.env.APP_BUILDER_API_KEY = "global-secret";
     process.env.APP_BUILDER_BASE_URL = "https://global.example/v1";
+    process.env.APP_BUILDER_USER_AGENT = "app-builder-test/1.0";
+    process.env.APP_BUILDER_PROTOCOL = "openai";
     process.env.APP_BUILDER_MODEL = "openai:global-model";
     process.env.APP_BUILDER_PLAN_MODEL = "openai:plan-model";
     process.env.APP_BUILDER_GENERATE_MODEL = "openai:generate-model";
@@ -6931,6 +6938,9 @@ test("generateApplication persists sanitized role model metadata", async () => {
     process.env.APP_BUILDER_PLAN_BASE_URL = "https://plan.example/v1";
     process.env.APP_BUILDER_GENERATE_BASE_URL = "https://generate.example/v1";
     process.env.APP_BUILDER_REPAIR_BASE_URL = "https://repair.example/v1";
+    process.env.APP_BUILDER_PLAN_PROTOCOL = "anthropic";
+    process.env.APP_BUILDER_GENERATE_PROTOCOL = "openai";
+    process.env.APP_BUILDER_REPAIR_PROTOCOL = "anthropic";
     process.env.APP_BUILDER_PLAN_API_KEY = "plan-secret";
     process.env.APP_BUILDER_GENERATE_API_KEY = "generate-secret";
     process.env.APP_BUILDER_REPAIR_API_KEY = "repair-secret";
@@ -6946,9 +6956,9 @@ test("generateApplication persists sanitized role model metadata", async () => {
     const config = JSON.parse(configRaw) as {
       model?: string;
       models?: {
-        plan?: { modelName?: string; baseURL?: string; apiKey?: string };
-        generate?: { modelName?: string; baseURL?: string; apiKey?: string };
-        repair?: { modelName?: string; baseURL?: string; apiKey?: string };
+        plan?: { modelName?: string; protocol?: string; baseURL?: string; userAgent?: string; apiKey?: string };
+        generate?: { modelName?: string; protocol?: string; baseURL?: string; userAgent?: string; apiKey?: string };
+        repair?: { modelName?: string; protocol?: string; baseURL?: string; userAgent?: string; apiKey?: string };
       };
     };
 
@@ -6956,9 +6966,15 @@ test("generateApplication persists sanitized role model metadata", async () => {
     assert.equal(config.models?.plan?.modelName, "openai:plan-model");
     assert.equal(config.models?.generate?.modelName, "openai:generate-model");
     assert.equal(config.models?.repair?.modelName, "openai:repair-model");
+    assert.equal(config.models?.plan?.protocol, "anthropic");
+    assert.equal(config.models?.generate?.protocol, "openai");
+    assert.equal(config.models?.repair?.protocol, "anthropic");
     assert.equal(config.models?.plan?.baseURL, "https://plan.example/v1");
     assert.equal(config.models?.generate?.baseURL, "https://generate.example/v1");
     assert.equal(config.models?.repair?.baseURL, "https://repair.example/v1");
+    assert.equal(config.models?.plan?.userAgent, "app-builder-test/1.0");
+    assert.equal(config.models?.generate?.userAgent, "app-builder-test/1.0");
+    assert.equal(config.models?.repair?.userAgent, "app-builder-test/1.0");
     assert.equal(config.models?.plan?.apiKey, undefined);
     assert.doesNotMatch(configRaw, /global-secret|plan-secret|generate-secret|repair-secret/);
   } finally {

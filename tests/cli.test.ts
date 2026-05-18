@@ -1033,6 +1033,7 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
   const envKeys = [
     "APP_BUILDER_API_KEY",
     "APP_BUILDER_BASE_URL",
+    "APP_BUILDER_PROTOCOL",
     "APP_BUILDER_MODEL",
     "APP_BUILDER_PLAN_MODEL",
     "APP_BUILDER_GENERATE_MODEL",
@@ -1040,6 +1041,9 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     "APP_BUILDER_PLAN_BASE_URL",
     "APP_BUILDER_GENERATE_BASE_URL",
     "APP_BUILDER_REPAIR_BASE_URL",
+    "APP_BUILDER_PLAN_PROTOCOL",
+    "APP_BUILDER_GENERATE_PROTOCOL",
+    "APP_BUILDER_REPAIR_PROTOCOL",
   ] as const;
   const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
 
@@ -1048,6 +1052,7 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
   try {
     process.env.APP_BUILDER_API_KEY = "secret-for-initial-run";
     process.env.APP_BUILDER_BASE_URL = "https://global.example/v1";
+    process.env.APP_BUILDER_PROTOCOL = "openai";
     process.env.APP_BUILDER_MODEL = "openai:global-model";
     process.env.APP_BUILDER_PLAN_MODEL = "openai:plan-resume-model";
     process.env.APP_BUILDER_GENERATE_MODEL = "openai:generate-resume-model";
@@ -1055,6 +1060,9 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     process.env.APP_BUILDER_PLAN_BASE_URL = "https://plan-resume.example/v1";
     process.env.APP_BUILDER_GENERATE_BASE_URL = "https://generate-resume.example/v1";
     process.env.APP_BUILDER_REPAIR_BASE_URL = "https://repair-resume.example/v1";
+    process.env.APP_BUILDER_PLAN_PROTOCOL = "anthropic";
+    process.env.APP_BUILDER_GENERATE_PROTOCOL = "openai";
+    process.env.APP_BUILDER_REPAIR_PROTOCOL = "anthropic";
 
     const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
     const result = await generateApplication({
@@ -1082,6 +1090,9 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.modelName, "openai:plan-resume-model");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.modelName, "openai:generate-resume-model");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.modelName, "openai:repair-resume-model");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.protocol, "anthropic");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.protocol, "openai");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.protocol, "anthropic");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.baseURL, "https://plan-resume.example/v1");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.baseURL, "https://generate-resume.example/v1");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.baseURL, "https://repair-resume.example/v1");

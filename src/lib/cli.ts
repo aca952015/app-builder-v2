@@ -140,9 +140,13 @@ function helpText(): string {
 Environment:
   APP_BUILDER_API_KEY Required unless role-specific API keys or a custom generator are used
   APP_BUILDER_BASE_URL Optional API base URL fallback for all model roles
+  APP_BUILDER_USER_AGENT Optional truthful User-Agent header fallback for all model roles
+  APP_BUILDER_PROTOCOL Optional model protocol fallback for all roles: openai or anthropic
   APP_BUILDER_MODEL Optional model fallback for all roles
   APP_BUILDER_PLAN_MODEL / APP_BUILDER_GENERATE_MODEL / APP_BUILDER_REPAIR_MODEL Optional role model overrides
   APP_BUILDER_PLAN_BASE_URL / APP_BUILDER_GENERATE_BASE_URL / APP_BUILDER_REPAIR_BASE_URL Optional role base URLs
+  APP_BUILDER_PLAN_USER_AGENT / APP_BUILDER_GENERATE_USER_AGENT / APP_BUILDER_REPAIR_USER_AGENT Optional role User-Agent headers
+  APP_BUILDER_PLAN_PROTOCOL / APP_BUILDER_GENERATE_PROTOCOL / APP_BUILDER_REPAIR_PROTOCOL Optional role protocols
   APP_BUILDER_PLAN_API_KEY / APP_BUILDER_GENERATE_API_KEY / APP_BUILDER_REPAIR_API_KEY Optional role API keys
   APP_BUILDER_STREAM_MODES Optional comma-separated deepagents stream modes
   APP_BUILDER_STDOUT  Optional TTY stdout renderer override: dashboard or log

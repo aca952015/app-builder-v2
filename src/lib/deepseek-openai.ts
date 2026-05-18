@@ -615,14 +615,19 @@ export function createOpenAICompatibleModel(options: {
   modelName: string;
   effort?: TemplatePhaseEffort;
   baseURL?: string;
+  userAgent?: string;
   apiKey?: string;
 }) {
   const model = normalizeOpenAICompatibleModelName(options.modelName);
+  const configuration = {
+    ...(options.baseURL ? { baseURL: options.baseURL } : {}),
+    ...(options.userAgent ? { defaultHeaders: { "User-Agent": options.userAgent } } : {}),
+  };
   const fields: OpenAICompatibleModelFields = {
     model,
     temperature: 0,
     ...(options.effort ? { reasoning: { effort: resolveModelReasoningEffort(options.effort) } } : {}),
-    ...(options.baseURL ? { configuration: { baseURL: options.baseURL } } : {}),
+    ...(Object.keys(configuration).length > 0 ? { configuration } : {}),
     ...(options.apiKey ? { apiKey: options.apiKey } : {}),
   };
 
