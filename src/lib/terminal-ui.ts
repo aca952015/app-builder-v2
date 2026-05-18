@@ -27,6 +27,7 @@ export type ArtifactItem = {
 export type AgentWorkStatus = {
   name: string;
   status: AgentWorkStatusValue;
+  userAgent?: string | undefined;
   workCount?: number | undefined;
   activeInstanceCount?: number | undefined;
 };
@@ -564,6 +565,7 @@ function normalizeAgentStatuses(agentStatuses?: AgentWorkStatus[]): AgentWorkSta
     normalized.push({
       name,
       status: agent.status === "working" || agent.status === "done" ? agent.status : "idle",
+      ...(agent.userAgent?.trim() ? { userAgent: agent.userAgent.trim() } : {}),
       ...(isFiniteNumber(agent.workCount) && agent.workCount > 0
         ? { workCount: Math.round(agent.workCount) }
         : {}),
@@ -596,13 +598,17 @@ function formatAgentStatusValue(agent: AgentWorkStatus): string {
   return workCount === 1 ? "worked 1 time" : `worked ${workCount} times`;
 }
 
+function formatAgentStatusLabel(agent: AgentWorkStatus): string {
+  return agent.userAgent ? `${agent.name}(${agent.userAgent})` : agent.name;
+}
+
 function buildAgentStatusLine(state: TodoBoardState): string | null {
   const agentStatuses = normalizeAgentStatuses(state.agentStatuses);
   if (agentStatuses.length === 0) {
     return null;
   }
 
-  return agentStatuses.map((agent) => `${agent.name}: ${formatAgentStatusValue(agent)}`).join(" | ");
+  return agentStatuses.map((agent) => `${formatAgentStatusLabel(agent)}: ${formatAgentStatusValue(agent)}`).join(" | ");
 }
 
 function formatPercent(value: number): string {
@@ -1265,7 +1271,7 @@ function createAgentStatusElement(state: TodoBoardState): React.ReactNode | null
             key: `agent-status-label-${index}`,
             color: "gray",
           },
-          `${agent.name}: `,
+          `${formatAgentStatusLabel(agent)}: `,
         ),
         agent.status === "working"
           ? React.createElement(AnimatedGradientText, {

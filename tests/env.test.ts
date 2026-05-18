@@ -1298,7 +1298,7 @@ test("renderTodoBoardToString renders agent statuses below runtime status bar", 
       phase: "generate",
     },
     agentStatuses: [
-      { name: "leader", status: "working" },
+      { name: "leader", status: "working", userAgent: "app-builder-test/1.0" },
       { name: "frontend-implementer", status: "working", activeInstanceCount: 2 },
       { name: "backend-implementer", status: "done" },
       { name: "qa-implementer", status: "working" },
@@ -1309,10 +1309,10 @@ test("renderTodoBoardToString renders agent statuses below runtime status bar", 
   assert.match(output, /subagents: 3/);
   assert.match(
     output,
-    /leader: working \| frontend-implementer: 2 instances working \| backend-implementer: worked 1 time \| qa-implementer: 1 instance working/,
+    /leader\(app-builder-test\/1\.0\): working \| frontend-implementer: 2 instances working \| backend-implementer: worked 1 time \|[\s\S]*qa-implementer: 1 instance working/,
   );
   assert.ok(
-    output.indexOf("leader: working") > output.indexOf("phase: generate"),
+    output.indexOf("leader(app-builder-test/1.0): working") > output.indexOf("phase: generate"),
     "agent status row should render below the runtime status bar",
   );
 });

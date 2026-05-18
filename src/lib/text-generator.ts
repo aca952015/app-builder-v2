@@ -1886,7 +1886,7 @@ function getStreamProgressSummary(trace: DeepAgentsTraceState): StreamProgressSu
   };
 }
 
-function buildDefaultAgentStatuses(runtimePhase: RuntimeStatusPhase): AgentWorkStatus[] {
+function buildDefaultAgentStatuses(runtimePhase: RuntimeStatusPhase, leaderUserAgent?: string): AgentWorkStatus[] {
   const subagentNames = buildGenerationSubagents(runtimePhase, false)
     .map((subagent) => typeof subagent.name === "string" ? subagent.name : null)
     .filter((name): name is string => Boolean(name));
@@ -1894,6 +1894,7 @@ function buildDefaultAgentStatuses(runtimePhase: RuntimeStatusPhase): AgentWorkS
   return ["leader", ...subagentNames].map((name, index) => ({
     name,
     status: index === 0 ? "working" : "idle",
+    ...(index === 0 && leaderUserAgent ? { userAgent: leaderUserAgent } : {}),
   }));
 }
 
@@ -2457,6 +2458,7 @@ export async function runDeepAgentWithLogs(
   runtimePhase: RuntimeStatusPhase,
   timeoutLabel: string,
   fallbackModelName?: string,
+  leaderUserAgent?: string,
 ): Promise<unknown> {
   const workflowStage = runtimePhaseToWorkflowStage(runtimePhase);
   const trace: DeepAgentsTraceState = {
@@ -2470,7 +2472,7 @@ export async function runDeepAgentWithLogs(
       phase: runtimePhase,
       fallbackModelName,
     }),
-    agentStatuses: buildDefaultAgentStatuses(runtimePhase),
+    agentStatuses: buildDefaultAgentStatuses(runtimePhase, leaderUserAgent),
     seenRuntimeUsageSignatures: new Set(),
     modelOutputStarted: false,
     receivedOutputTokens: 0,
@@ -2870,6 +2872,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       runtimePhase,
       options.timeoutLabel,
       modelConfig.modelName,
+      modelConfig.userAgent,
     );
 
     const structured = extractStructuredResponse(result, options.responseSchema);
