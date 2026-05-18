@@ -7,14 +7,22 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  type ChatGenerationChunkLike,
+  StableAnthropicToolCallChatModel,
+  createAnthropicToolCallStreamState,
+  flushAnthropicToolCallStreamState,
+  stabilizeAnthropicToolCallGenerationChunk,
+} from "../src/lib/anthropic-tool-stream.js";
+import {
   createOpenAICompatibleModel,
   convertMessagesToOpenAICompatibleCompletionsMessageParams,
   normalizeOpenAICompatibleModelName,
   resolveModelReasoningEffort,
   sanitizeOpenAICompatibleCompletionsParams,
-} from "../src/lib/deepseek-openai.js";
+} from "../src/lib/openai-compatible.js";
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
+  DEFAULT_MODEL_MAX_TOKENS,
   DEFAULT_MODEL_NAME,
   resolveModelRoleConfigs,
   sanitizeModelRoleConfigs,
@@ -63,8 +71,19 @@ async function loadLangChainCoreMessages() {
   });
   return import(pathToFileURL(messagesPath).href) as Promise<{
     AIMessage: new (fields: unknown) => unknown;
+    AIMessageChunk: new (fields: unknown) => unknown;
     HumanMessage: new (content: unknown) => unknown;
     ToolMessage: new (fields: unknown) => unknown;
+  }>;
+}
+
+async function loadLangChainCoreOutputs() {
+  const openAiPackagePath = require.resolve("@langchain/openai/package.json");
+  const outputsPath = require.resolve("@langchain/core/outputs", {
+    paths: [path.dirname(openAiPackagePath)],
+  });
+  return import(pathToFileURL(outputsPath).href) as Promise<{
+    ChatGenerationChunk: new (fields: { text: string; message: unknown }) => unknown;
   }>;
 }
 
@@ -97,6 +116,8 @@ test("resolveModelRoleConfigs falls back to global model, base URL, and API key"
     assert.equal(configs[role].protocol, "openai");
     assert.equal(configs[role].baseURL, "https://proxy.example/v1");
     assert.equal(configs[role].userAgent, undefined);
+    assert.equal(configs[role].maxInputTokens, undefined);
+    assert.equal(configs[role].maxTokens, DEFAULT_MODEL_MAX_TOKENS);
     assert.equal(configs[role].apiKey, "global-key");
   }
 });
@@ -134,6 +155,76 @@ test("resolveModelRoleConfigs rejects invalid protocol values", () => {
         APP_BUILDER_PLAN_PROTOCOL: "claude",
       }),
     /APP_BUILDER_PLAN_PROTOCOL must be one of: openai, anthropic/,
+  );
+});
+
+test("resolveModelRoleConfigs applies global max tokens to every role", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_MAX_TOKENS: "  16384  ",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].maxTokens, 16384);
+  }
+});
+
+test("resolveModelRoleConfigs applies global max input tokens to every role", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_MAX_INPUT_TOKENS: "  131072  ",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].maxInputTokens, 131072);
+  }
+});
+
+test("resolveModelRoleConfigs applies role-specific max input token overrides with global fallback", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_MAX_INPUT_TOKENS: "65536",
+    APP_BUILDER_PLAN_MAX_INPUT_TOKENS: "262144",
+    APP_BUILDER_GENERATE_MAX_INPUT_TOKENS: "131072",
+  });
+
+  assert.equal(configs.plan.maxInputTokens, 262144);
+  assert.equal(configs.generate.maxInputTokens, 131072);
+  assert.equal(configs.repair.maxInputTokens, 65536);
+});
+
+test("resolveModelRoleConfigs rejects invalid max input token values", () => {
+  assert.throws(
+    () =>
+      resolveModelRoleConfigs({
+        APP_BUILDER_API_KEY: "global-key",
+        APP_BUILDER_PLAN_MAX_INPUT_TOKENS: "large",
+      }),
+    /APP_BUILDER_PLAN_MAX_INPUT_TOKENS must be a positive integer/,
+  );
+});
+
+test("resolveModelRoleConfigs applies role-specific max token overrides with global fallback", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_MAX_TOKENS: "8192",
+    APP_BUILDER_PLAN_MAX_TOKENS: "32768",
+    APP_BUILDER_GENERATE_MAX_TOKENS: "16384",
+  });
+
+  assert.equal(configs.plan.maxTokens, 32768);
+  assert.equal(configs.generate.maxTokens, 16384);
+  assert.equal(configs.repair.maxTokens, 8192);
+});
+
+test("resolveModelRoleConfigs rejects invalid max token values", () => {
+  assert.throws(
+    () =>
+      resolveModelRoleConfigs({
+        APP_BUILDER_API_KEY: "global-key",
+        APP_BUILDER_PLAN_MAX_TOKENS: "4096.5",
+      }),
+    /APP_BUILDER_PLAN_MAX_TOKENS must be a positive integer/,
   );
 });
 
@@ -192,10 +283,13 @@ test("resolveModelRoleConfigs defaults model names when only a global key is pre
 
   assert.equal(configs.plan.modelName, DEFAULT_MODEL_NAME);
   assert.equal(configs.plan.protocol, "openai");
+  assert.equal(configs.plan.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
   assert.equal(configs.generate.modelName, DEFAULT_MODEL_NAME);
   assert.equal(configs.generate.protocol, "openai");
+  assert.equal(configs.generate.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
   assert.equal(configs.repair.modelName, DEFAULT_MODEL_NAME);
   assert.equal(configs.repair.protocol, "openai");
+  assert.equal(configs.repair.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
 });
 
 test("resolveModelRoleConfigs applies role-specific model, base URL, and API key overrides", () => {
@@ -212,6 +306,9 @@ test("resolveModelRoleConfigs applies role-specific model, base URL, and API key
     APP_BUILDER_PLAN_BASE_URL: "https://plan.example/v1",
     APP_BUILDER_GENERATE_BASE_URL: "https://generate.example/v1",
     APP_BUILDER_REPAIR_BASE_URL: "https://repair.example/v1",
+    APP_BUILDER_PLAN_MAX_TOKENS: "32768",
+    APP_BUILDER_GENERATE_MAX_TOKENS: "16384",
+    APP_BUILDER_REPAIR_MAX_TOKENS: "8192",
     APP_BUILDER_PLAN_API_KEY: "plan-key",
     APP_BUILDER_GENERATE_API_KEY: "generate-key",
     APP_BUILDER_REPAIR_API_KEY: "repair-key",
@@ -226,6 +323,9 @@ test("resolveModelRoleConfigs applies role-specific model, base URL, and API key
   assert.equal(configs.plan.baseURL, "https://plan.example/v1");
   assert.equal(configs.generate.baseURL, "https://generate.example/v1");
   assert.equal(configs.repair.baseURL, "https://repair.example/v1");
+  assert.equal(configs.plan.maxTokens, 32768);
+  assert.equal(configs.generate.maxTokens, 16384);
+  assert.equal(configs.repair.maxTokens, 8192);
   assert.equal(configs.plan.apiKey, "plan-key");
   assert.equal(configs.generate.apiKey, "generate-key");
   assert.equal(configs.repair.apiKey, "repair-key");
@@ -335,6 +435,8 @@ test("resolveModelRoleConfigs can merge persisted model metadata with current se
           modelName: "openai:persisted-plan",
           protocol: "anthropic",
           baseURL: "https://persisted-plan.example/v1",
+          maxInputTokens: 131072,
+          maxTokens: 24576,
         },
         repair: {
           role: "repair",
@@ -348,10 +450,15 @@ test("resolveModelRoleConfigs can merge persisted model metadata with current se
   assert.equal(configs.plan.modelName, "openai:persisted-plan");
   assert.equal(configs.plan.protocol, "anthropic");
   assert.equal(configs.plan.baseURL, "https://persisted-plan.example/v1");
+  assert.equal(configs.plan.maxInputTokens, 131072);
+  assert.equal(configs.plan.maxTokens, 24576);
   assert.equal(configs.generate.modelName, "openai:legacy-model");
   assert.equal(configs.generate.protocol, "openai");
+  assert.equal(configs.generate.maxInputTokens, undefined);
+  assert.equal(configs.generate.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
   assert.equal(configs.repair.modelName, "openai:persisted-repair");
   assert.equal(configs.repair.protocol, "openai");
+  assert.equal(configs.repair.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
   assert.equal(configs.repair.apiKey, "runtime-key");
 });
 
@@ -363,6 +470,8 @@ test("sanitizeModelRoleConfigs strips API keys", () => {
       APP_BUILDER_PROTOCOL: "anthropic",
       APP_BUILDER_BASE_URL: "https://proxy.example/v1",
       APP_BUILDER_USER_AGENT: "app-builder-test/1.0",
+      APP_BUILDER_MAX_INPUT_TOKENS: "131072",
+      APP_BUILDER_MAX_TOKENS: "32768",
     }),
   );
   const serialized = JSON.stringify(sanitized);
@@ -372,6 +481,8 @@ test("sanitizeModelRoleConfigs strips API keys", () => {
   assert.equal("apiKey" in sanitized.repair, false);
   assert.equal(sanitized.plan.protocol, "anthropic");
   assert.equal(sanitized.plan.userAgent, "app-builder-test/1.0");
+  assert.equal(sanitized.plan.maxInputTokens, 131072);
+  assert.equal(sanitized.plan.maxTokens, 32768);
   assert.doesNotMatch(serialized, /global-secret/);
   assert.match(serialized, /openai:gpt-5\.4-mini/);
 });
@@ -430,17 +541,142 @@ test("createOpenAICompatibleModel preserves base URL when setting user agent hea
     modelName: "openai:test-model",
     baseURL: "https://proxy.example/v1",
     userAgent: "app-builder-test/1.0",
+    maxTokens: 16384,
     apiKey: "test-key",
   }) as unknown as {
     identifyingParams: () => {
       baseURL?: string;
       defaultHeaders?: Record<string, string>;
+      max_tokens?: number;
     };
   };
 
   const identifyingParams = model.identifyingParams();
   assert.equal(identifyingParams.baseURL, "https://proxy.example/v1");
   assert.equal(identifyingParams.defaultHeaders?.["User-Agent"], "app-builder-test/1.0");
+  assert.equal(identifyingParams.max_tokens, 16384);
+});
+
+test("StableAnthropicToolCallChatModel applies configured max tokens", () => {
+  const model = new StableAnthropicToolCallChatModel({
+    model: "kimi-k2",
+    maxTokens: 16384,
+    apiKey: "test-key",
+  }) as unknown as {
+    identifyingParams: () => {
+      max_tokens?: number;
+    };
+  };
+
+  assert.equal(model.identifyingParams().max_tokens, 16384);
+});
+
+test("anthropic tool stream stabilizer suppresses partial tool arg chunks until complete JSON", async () => {
+  const { AIMessageChunk } = await loadLangChainCoreMessages();
+  const { ChatGenerationChunk } = await loadLangChainCoreOutputs();
+  const createAnthropicGenerationChunk = (fields: unknown): ChatGenerationChunkLike => new ChatGenerationChunk({
+    text: "",
+    message: new AIMessageChunk(fields),
+  }) as ChatGenerationChunkLike;
+  const state = createAnthropicToolCallStreamState();
+
+  const partialOutputs = [
+    stabilizeAnthropicToolCallGenerationChunk(
+      createAnthropicGenerationChunk({
+        id: "msg_1",
+        content: [{ index: 0, type: "tool_use", id: "tool_1", name: "read_file", input: "" }],
+        response_metadata: { model_provider: "anthropic" },
+        tool_call_chunks: [{ id: "tool_1", index: 0, name: "read_file", args: "" }],
+      }),
+      state,
+    ),
+    stabilizeAnthropicToolCallGenerationChunk(
+      createAnthropicGenerationChunk({
+        content: [{ index: 0, type: "input_json_delta", input: "{\"" }],
+        response_metadata: { model_provider: "anthropic" },
+        tool_call_chunks: [{ index: 0, args: "{\"" }],
+      }),
+      state,
+    ),
+    stabilizeAnthropicToolCallGenerationChunk(
+      createAnthropicGenerationChunk({
+        content: [{ index: 0, type: "input_json_delta", input: "file_path" }],
+        response_metadata: { model_provider: "anthropic" },
+        tool_call_chunks: [{ index: 0, args: "file_path" }],
+      }),
+      state,
+    ),
+    stabilizeAnthropicToolCallGenerationChunk(
+      createAnthropicGenerationChunk({
+        content: [{ index: 0, type: "input_json_delta", input: "\":\"README.md\"}" }],
+        response_metadata: { model_provider: "anthropic" },
+        tool_call_chunks: [{ index: 0, args: "\":\"README.md\"}" }],
+      }),
+      state,
+    ),
+  ].flat();
+
+  assert.equal(partialOutputs.length, 0);
+
+  const flushed = flushAnthropicToolCallStreamState(state);
+  assert.equal(flushed.length, 1);
+
+  const message = flushed[0]?.message as { invalid_tool_calls?: unknown[]; tool_calls?: unknown[] };
+  assert.deepEqual(message.invalid_tool_calls, []);
+  assert.deepEqual(message.tool_calls, [
+    {
+      name: "read_file",
+      args: { file_path: "README.md" },
+      id: "tool_1",
+      type: "tool_call",
+    },
+  ]);
+});
+
+test("anthropic tool stream stabilizer drops incomplete final tool args without invalid calls", async () => {
+  const { AIMessageChunk } = await loadLangChainCoreMessages();
+  const { ChatGenerationChunk } = await loadLangChainCoreOutputs();
+  const createAnthropicGenerationChunk = (fields: unknown): ChatGenerationChunkLike => new ChatGenerationChunk({
+    text: "",
+    message: new AIMessageChunk(fields),
+  }) as ChatGenerationChunkLike;
+  const state = createAnthropicToolCallStreamState();
+
+  stabilizeAnthropicToolCallGenerationChunk(
+    createAnthropicGenerationChunk({
+      id: "msg_1",
+      content: [{ index: 0, type: "tool_use", id: "tool_1", name: "read_file", input: "" }],
+      response_metadata: { model_provider: "anthropic" },
+      tool_call_chunks: [{ id: "tool_1", index: 0, name: "read_file", args: "" }],
+    }),
+    state,
+  );
+  stabilizeAnthropicToolCallGenerationChunk(
+    createAnthropicGenerationChunk({
+      content: [{ index: 0, type: "input_json_delta", input: "{\"file" }],
+      response_metadata: { model_provider: "anthropic" },
+      tool_call_chunks: [{ index: 0, args: "{\"file" }],
+    }),
+    state,
+  );
+
+  assert.deepEqual(flushAnthropicToolCallStreamState(state), []);
+});
+
+test("anthropic tool stream stabilizer leaves non-tool chunks unchanged", async () => {
+  const { AIMessageChunk } = await loadLangChainCoreMessages();
+  const { ChatGenerationChunk } = await loadLangChainCoreOutputs();
+  const createAnthropicGenerationChunk = (fields: unknown): ChatGenerationChunkLike => new ChatGenerationChunk({
+    text: "",
+    message: new AIMessageChunk(fields),
+  }) as ChatGenerationChunkLike;
+  const state = createAnthropicToolCallStreamState();
+  const chunk = createAnthropicGenerationChunk({
+    content: "hello",
+    response_metadata: { model_provider: "anthropic" },
+  });
+
+  assert.deepEqual(stabilizeAnthropicToolCallGenerationChunk(chunk, state), [chunk]);
 });
 
 test("resolveModelReasoningEffort maps template max to model xhigh", () => {
@@ -917,6 +1153,24 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.match(output, /reasoning 120/);
   assert.match(output, /cache 256/);
   assert.match(output, /context used: 900 \| phase: plan/);
+});
+
+test("renderTodoBoardToString shows configured context window size", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "计划阶段",
+    todos: createStepItemsForLifecycle("计划阶段", "generating"),
+    artifacts: createArtifactItemsForStage("计划阶段", "generating"),
+    narrative: "正在分析 PRD。",
+    runtimeStatus: {
+      modelName: "gpt-5.4",
+      effort: "high",
+      phase: "plan",
+      contextWindowUsedTokens: 41_600,
+      contextWindowTokens: 131_072,
+    },
+  }, 180));
+
+  assert.match(output, /context used: 41K\/128K \| phase: plan/);
 });
 
 test("renderTodoBoardToString preserves animated thinking action text", () => {
@@ -1788,14 +2042,18 @@ test("buildRuntimeStatus reports the active role model name", () => {
     },
     modelRoles: resolveModelRoleConfigs({
       APP_BUILDER_API_KEY: "global-key",
+      APP_BUILDER_MAX_INPUT_TOKENS: "65536",
       APP_BUILDER_PLAN_MODEL: "openai:plan-model",
       APP_BUILDER_GENERATE_MODEL: "openai:generate-model",
       APP_BUILDER_REPAIR_MODEL: "openai:repair-model",
+      APP_BUILDER_PLAN_MAX_INPUT_TOKENS: "131072",
     }),
   };
 
   assert.equal(buildRuntimeStatus({ runtime, phase: "plan" }).modelName, "openai:plan-model");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "plan" }).contextWindowTokens, 131072);
   assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).modelName, "openai:generate-model");
+  assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).contextWindowTokens, 65536);
   assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).modelName, "openai:repair-model");
   assert.equal(buildRuntimeStatus({ runtime, phase: "generate_repair" }).modelName, "openai:repair-model");
 });

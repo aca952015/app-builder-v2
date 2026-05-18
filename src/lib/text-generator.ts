@@ -3,13 +3,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { inspect } from "node:util";
 
-import { ChatAnthropic } from "@langchain/anthropic";
 import { createMiddleware, ToolMessage, toolStrategy } from "langchain";
 import { z } from "zod";
 
+import { StableAnthropicToolCallChatModel } from "./anthropic-tool-stream.js";
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
 import { interactionContractSchema } from "./interaction-contract.js";
-import { createOpenAICompatibleModel } from "./deepseek-openai.js";
+import { createOpenAICompatibleModel } from "./openai-compatible.js";
 import {
   DEFAULT_MODEL_NAME,
   resolveModelRoleConfigs,
@@ -989,6 +989,7 @@ export function buildRuntimeStatus(options: {
   const usage = hasRuntimeUsageSummary(options.usage) ? options.usage : undefined;
   const modelRole = modelRoleForRuntimePhase(options.phase);
   const roleModelName = modelRole ? options.runtime.modelRoles?.[modelRole]?.modelName : undefined;
+  const contextWindowTokens = modelRole ? options.runtime.modelRoles?.[modelRole]?.maxInputTokens : undefined;
   const attempt = resolveRuntimeStatusAttempt(options.runtime, options.phase);
   const subagentCount = resolveRuntimeSubagentCount(options.phase);
 
@@ -999,6 +1000,7 @@ export function buildRuntimeStatus(options: {
     phase: options.phase,
     ...(attempt ? { attempt } : {}),
     ...(subagentCount ? { subagentCount } : {}),
+    ...(contextWindowTokens ? { contextWindowTokens } : {}),
     ...(usage ? { usage } : {}),
   };
 }
@@ -1017,6 +1019,7 @@ export function mergeRuntimeStatus(current: RuntimeStatus, patch: Partial<Runtim
             : patch.contextWindowUsedTokens,
         }
       : {}),
+    ...(isFiniteNumber(patch.contextWindowTokens) ? { contextWindowTokens: patch.contextWindowTokens } : {}),
     ...(patch.sessionId ? { sessionId: patch.sessionId } : {}),
     ...(patch.phase ? { phase: patch.phase } : {}),
     ...(isFiniteNumber(patch.subagentCount) && patch.subagentCount >= 0
@@ -2638,9 +2641,10 @@ function normalizeProtocolModelName(modelName: string, protocol: ModelProtocol):
 
 async function resolveModel(config: ModelRoleConfig, effort?: TemplatePhaseEffort) {
   if (config.protocol === "anthropic") {
-    return new ChatAnthropic({
+    return new StableAnthropicToolCallChatModel({
       model: normalizeProtocolModelName(config.modelName, config.protocol),
       temperature: 0,
+      ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
       ...(effort ? { outputConfig: { effort } } : {}),
       ...(config.baseURL ? { anthropicApiUrl: config.baseURL } : {}),
       ...(config.userAgent ? { clientOptions: { defaultHeaders: { "User-Agent": config.userAgent } } } : {}),
@@ -2653,6 +2657,7 @@ async function resolveModel(config: ModelRoleConfig, effort?: TemplatePhaseEffor
     ...(effort ? { effort } : {}),
     ...(config.baseURL ? { baseURL: config.baseURL } : {}),
     ...(config.userAgent ? { userAgent: config.userAgent } : {}),
+    ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
     ...(config.apiKey ? { apiKey: config.apiKey } : {}),
   });
 }

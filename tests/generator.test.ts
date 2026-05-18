@@ -3125,10 +3125,12 @@ class SplitPlanReferenceTextGenerator implements TextGenerator {
   assemblyStartedAt = 0;
   assemblyObservedLocalReferences: TextGeneratorRuntime["localReferences"];
   assemblyObservedAnalysis = "";
+  analysisObservedSourceMarkdownLength = 0;
   planProjectCalled = false;
 
   async analyzePrd(spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
     this.analysisStartedAt = Date.now();
+    this.analysisObservedSourceMarkdownLength = spec.sourceMarkdown.length;
     await new Promise((resolve) => setTimeout(resolve, 80));
     await writeFile(
       runtime.deepagentsAnalysisPath,
@@ -5307,6 +5309,65 @@ test("generateApplication runs reference conversion in parallel with PRD analysi
   }
 });
 
+test("generateApplication keeps long PRD analysis as a single full-input model call", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-long-prd-single-analysis-"));
+  const specPath = path.join(tempRoot, "long-prd.md");
+  const generator = new SplitPlanReferenceTextGenerator();
+  const repeatedSections = Array.from({ length: 140 }, (_, index) => [
+    `## Operations Area ${index + 1}`,
+    "",
+    `Role: dispatcher ${index + 1}.`,
+    `Screen: operations dashboard ${index + 1}.`,
+    `Flow: review incoming work orders, assign crews, capture status, and audit exceptions ${index + 1}.`,
+    `Business rule: every assignment must keep region, skill, priority, SLA, and safety constraints visible ${index + 1}.`,
+    `Entity: WorkOrder${index + 1} fields include title, region, priority, dueDate, status, owner, notes, and auditTrail.`,
+    "",
+  ].join("\n")).join("\n");
+
+  try {
+    await writeFile(
+      specPath,
+      [
+        "# Large Operations Console",
+        "",
+        "Build an operations planning system for dispatch leaders.",
+        "",
+        repeatedSections,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator,
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const analysis = await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8");
+    const metricRecords = (await readFile(path.join(result.outputDirectory, ".deepagents/metrics.jsonl"), "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { name?: string });
+    const metricNames = metricRecords.map((record) => record.name);
+
+    assert.equal(generator.planProjectCalled, false);
+    assert.ok(generator.analysisObservedSourceMarkdownLength > repeatedSections.length);
+    assert.equal(metricNames.filter((name) => name === "plan.prd_analysis").length, 1);
+    assert.equal(metricNames.includes("plan.prd_analysis_chunk"), false);
+    assert.equal(metricNames.includes("plan.prd_analysis_merge"), false);
+    assert.match(analysis, /# Parallel PRD Analysis/);
+    assert.doesNotMatch(analysis, /Host assembled this analysis from/);
+    await assert.rejects(
+      access(path.join(result.outputDirectory, ".deepagents/prd-analysis-chunks")),
+      /ENOENT/,
+    );
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication retries split PRD analysis when structured response is missing before artifacts exist", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-prd-analysis-retry-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -6910,6 +6971,8 @@ test("generateApplication persists sanitized role model metadata", async () => {
     "APP_BUILDER_BASE_URL",
     "APP_BUILDER_USER_AGENT",
     "APP_BUILDER_PROTOCOL",
+    "APP_BUILDER_MAX_INPUT_TOKENS",
+    "APP_BUILDER_MAX_TOKENS",
     "APP_BUILDER_MODEL",
     "APP_BUILDER_PLAN_MODEL",
     "APP_BUILDER_GENERATE_MODEL",
@@ -6920,6 +6983,12 @@ test("generateApplication persists sanitized role model metadata", async () => {
     "APP_BUILDER_PLAN_PROTOCOL",
     "APP_BUILDER_GENERATE_PROTOCOL",
     "APP_BUILDER_REPAIR_PROTOCOL",
+    "APP_BUILDER_PLAN_MAX_INPUT_TOKENS",
+    "APP_BUILDER_GENERATE_MAX_INPUT_TOKENS",
+    "APP_BUILDER_REPAIR_MAX_INPUT_TOKENS",
+    "APP_BUILDER_PLAN_MAX_TOKENS",
+    "APP_BUILDER_GENERATE_MAX_TOKENS",
+    "APP_BUILDER_REPAIR_MAX_TOKENS",
     "APP_BUILDER_PLAN_API_KEY",
     "APP_BUILDER_GENERATE_API_KEY",
     "APP_BUILDER_REPAIR_API_KEY",
@@ -6931,6 +7000,8 @@ test("generateApplication persists sanitized role model metadata", async () => {
     process.env.APP_BUILDER_BASE_URL = "https://global.example/v1";
     process.env.APP_BUILDER_USER_AGENT = "app-builder-test/1.0";
     process.env.APP_BUILDER_PROTOCOL = "openai";
+    process.env.APP_BUILDER_MAX_INPUT_TOKENS = "65536";
+    process.env.APP_BUILDER_MAX_TOKENS = "8192";
     process.env.APP_BUILDER_MODEL = "openai:global-model";
     process.env.APP_BUILDER_PLAN_MODEL = "openai:plan-model";
     process.env.APP_BUILDER_GENERATE_MODEL = "openai:generate-model";
@@ -6941,6 +7012,12 @@ test("generateApplication persists sanitized role model metadata", async () => {
     process.env.APP_BUILDER_PLAN_PROTOCOL = "anthropic";
     process.env.APP_BUILDER_GENERATE_PROTOCOL = "openai";
     process.env.APP_BUILDER_REPAIR_PROTOCOL = "anthropic";
+    process.env.APP_BUILDER_PLAN_MAX_INPUT_TOKENS = "262144";
+    process.env.APP_BUILDER_GENERATE_MAX_INPUT_TOKENS = "131072";
+    process.env.APP_BUILDER_REPAIR_MAX_INPUT_TOKENS = "196608";
+    process.env.APP_BUILDER_PLAN_MAX_TOKENS = "32768";
+    process.env.APP_BUILDER_GENERATE_MAX_TOKENS = "16384";
+    process.env.APP_BUILDER_REPAIR_MAX_TOKENS = "24576";
     process.env.APP_BUILDER_PLAN_API_KEY = "plan-secret";
     process.env.APP_BUILDER_GENERATE_API_KEY = "generate-secret";
     process.env.APP_BUILDER_REPAIR_API_KEY = "repair-secret";
@@ -6956,9 +7033,33 @@ test("generateApplication persists sanitized role model metadata", async () => {
     const config = JSON.parse(configRaw) as {
       model?: string;
       models?: {
-        plan?: { modelName?: string; protocol?: string; baseURL?: string; userAgent?: string; apiKey?: string };
-        generate?: { modelName?: string; protocol?: string; baseURL?: string; userAgent?: string; apiKey?: string };
-        repair?: { modelName?: string; protocol?: string; baseURL?: string; userAgent?: string; apiKey?: string };
+        plan?: {
+          modelName?: string;
+          protocol?: string;
+          baseURL?: string;
+          userAgent?: string;
+          maxInputTokens?: number;
+          maxTokens?: number;
+          apiKey?: string;
+        };
+        generate?: {
+          modelName?: string;
+          protocol?: string;
+          baseURL?: string;
+          userAgent?: string;
+          maxInputTokens?: number;
+          maxTokens?: number;
+          apiKey?: string;
+        };
+        repair?: {
+          modelName?: string;
+          protocol?: string;
+          baseURL?: string;
+          userAgent?: string;
+          maxInputTokens?: number;
+          maxTokens?: number;
+          apiKey?: string;
+        };
       };
     };
 
@@ -6975,6 +7076,12 @@ test("generateApplication persists sanitized role model metadata", async () => {
     assert.equal(config.models?.plan?.userAgent, "app-builder-test/1.0");
     assert.equal(config.models?.generate?.userAgent, "app-builder-test/1.0");
     assert.equal(config.models?.repair?.userAgent, "app-builder-test/1.0");
+    assert.equal(config.models?.plan?.maxInputTokens, 262144);
+    assert.equal(config.models?.generate?.maxInputTokens, 131072);
+    assert.equal(config.models?.repair?.maxInputTokens, 196608);
+    assert.equal(config.models?.plan?.maxTokens, 32768);
+    assert.equal(config.models?.generate?.maxTokens, 16384);
+    assert.equal(config.models?.repair?.maxTokens, 24576);
     assert.equal(config.models?.plan?.apiKey, undefined);
     assert.doesNotMatch(configRaw, /global-secret|plan-secret|generate-secret|repair-secret/);
   } finally {

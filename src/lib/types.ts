@@ -176,6 +176,7 @@ export type RuntimeStatus = {
   effort?: TemplatePhaseEffort | undefined;
   usage?: RuntimeUsageSummary | undefined;
   contextWindowUsedTokens?: number | undefined;
+  contextWindowTokens?: number | undefined;
   sessionId?: string | undefined;
   phase?: RuntimeStatusPhase | undefined;
   attempt?: number | undefined;

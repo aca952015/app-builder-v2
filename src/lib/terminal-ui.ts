@@ -516,9 +516,14 @@ function formatContextUsedValue(runtimeStatus?: RuntimeStatus): string {
 }
 
 function formatContextWindowUsedValue(runtimeStatus?: RuntimeStatus): string {
-  return isFiniteNumber(runtimeStatus?.contextWindowUsedTokens)
+  const used = isFiniteNumber(runtimeStatus?.contextWindowUsedTokens)
     ? formatTokenCount(runtimeStatus.contextWindowUsedTokens)
     : "n/a";
+  const configured = isFiniteNumber(runtimeStatus?.contextWindowTokens)
+    ? formatTokenCount(runtimeStatus.contextWindowTokens)
+    : undefined;
+
+  return configured ? `${used}/${configured}` : used;
 }
 
 function resolveSubagentCountForStatusBar(state: TodoBoardState): number | undefined {

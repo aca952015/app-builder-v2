@@ -616,6 +616,7 @@ export function createOpenAICompatibleModel(options: {
   effort?: TemplatePhaseEffort;
   baseURL?: string;
   userAgent?: string;
+  maxTokens?: number;
   apiKey?: string;
 }) {
   const model = normalizeOpenAICompatibleModelName(options.modelName);
@@ -626,14 +627,32 @@ export function createOpenAICompatibleModel(options: {
   const fields: OpenAICompatibleModelFields = {
     model,
     temperature: 0,
+    ...(options.maxTokens ? { maxTokens: options.maxTokens } : {}),
     ...(options.effort ? { reasoning: { effort: resolveModelReasoningEffort(options.effort) } } : {}),
     ...(Object.keys(configuration).length > 0 ? { configuration } : {}),
     ...(options.apiKey ? { apiKey: options.apiKey } : {}),
   };
 
-  return new ChatOpenAI({
+  const chatOpenAI = new ChatOpenAI({
     ...fields,
     completions: new OpenAICompatibleReasoningContentChatOpenAICompletions(fields),
     useResponsesApi: false,
   });
+
+  // Bypass LangChain's getHeadersWithUserAgent which silently drops custom User-Agent.
+  // BaseChatOpenAI._getClientOptions short-circuits when this.client is already set.
+  if (options.userAgent) {
+    const require = createRequire(import.meta.url);
+    const langchainOpenaiPath = require.resolve("@langchain/openai/package.json");
+    const requireFromLangchain = createRequire(langchainOpenaiPath);
+    const { OpenAI } = requireFromLangchain("openai");
+    const client = new OpenAI({
+      apiKey: options.apiKey,
+      baseURL: options.baseURL,
+      defaultHeaders: { "User-Agent": options.userAgent },
+    });
+    (chatOpenAI as any).completions.client = client;
+  }
+
+  return chatOpenAI;
 }

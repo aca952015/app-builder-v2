@@ -8,6 +8,12 @@ export const GLOBAL_USER_AGENT_ENV = "APP_BUILDER_USER_AGENT";
 
 export const GLOBAL_PROTOCOL_ENV = "APP_BUILDER_PROTOCOL";
 
+export const GLOBAL_MAX_TOKENS_ENV = "APP_BUILDER_MAX_TOKENS";
+
+export const GLOBAL_MAX_INPUT_TOKENS_ENV = "APP_BUILDER_MAX_INPUT_TOKENS";
+
+export const DEFAULT_MODEL_MAX_TOKENS = 16384;
+
 export const MODEL_ROLES = ["plan", "generate", "repair"] as const;
 
 export type ModelRole = typeof MODEL_ROLES[number];
@@ -22,6 +28,8 @@ export type ModelRoleConfig = {
   protocol: ModelProtocol;
   baseURL?: string;
   userAgent?: string;
+  maxInputTokens?: number;
+  maxTokens?: number;
   apiKey?: string;
 };
 
@@ -59,6 +67,27 @@ function parseModelProtocol(value: string | undefined, source: string): ModelPro
   throw new Error(`${source} must be one of: ${MODEL_PROTOCOLS.join(", ")}.`);
 }
 
+function parseMaxTokens(value: string | undefined, source: string): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${source} must be a positive integer.`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${source} must be a positive integer.`);
+  }
+
+  return parsed;
+}
+
+function normalizeMaxTokens(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 function roleEnvPrefix(role: ModelRole): string {
   return `APP_BUILDER_${role.toUpperCase()}`;
 }
@@ -73,6 +102,14 @@ function roleUserAgentEnvName(role: ModelRole): string {
 
 function roleProtocolEnvName(role: ModelRole): string {
   return `${roleEnvPrefix(role)}_PROTOCOL`;
+}
+
+function roleMaxTokensEnvName(role: ModelRole): string {
+  return `${roleEnvPrefix(role)}_MAX_TOKENS`;
+}
+
+function roleMaxInputTokensEnvName(role: ModelRole): string {
+  return `${roleEnvPrefix(role)}_MAX_INPUT_TOKENS`;
 }
 
 function buildModelRoleConfig(
@@ -93,6 +130,15 @@ function buildModelRoleConfig(
     trimOptional(persisted?.baseURL);
   const userAgent = readEnvValue(env, roleUserAgentEnvName(role)) ?? readEnvValue(env, GLOBAL_USER_AGENT_ENV);
   const apiKey = readEnvValue(env, roleApiKeyEnvName(role)) ?? readEnvValue(env, GLOBAL_API_KEY_ENV);
+  const maxInputTokens =
+    parseMaxTokens(readEnvValue(env, roleMaxInputTokensEnvName(role)), roleMaxInputTokensEnvName(role)) ??
+    parseMaxTokens(readEnvValue(env, GLOBAL_MAX_INPUT_TOKENS_ENV), GLOBAL_MAX_INPUT_TOKENS_ENV) ??
+    normalizeMaxTokens(persisted?.maxInputTokens);
+  const maxTokens =
+    parseMaxTokens(readEnvValue(env, roleMaxTokensEnvName(role)), roleMaxTokensEnvName(role)) ??
+    parseMaxTokens(readEnvValue(env, GLOBAL_MAX_TOKENS_ENV), GLOBAL_MAX_TOKENS_ENV) ??
+    normalizeMaxTokens(persisted?.maxTokens) ??
+    DEFAULT_MODEL_MAX_TOKENS;
   const roleProtocolValue = readEnvValue(env, roleProtocolEnvName(role));
   const globalProtocolValue = readEnvValue(env, GLOBAL_PROTOCOL_ENV);
   const protocol =
@@ -112,6 +158,14 @@ function buildModelRoleConfig(
 
   if (userAgent) {
     config.userAgent = userAgent;
+  }
+
+  if (maxInputTokens) {
+    config.maxInputTokens = maxInputTokens;
+  }
+
+  if (maxTokens) {
+    config.maxTokens = maxTokens;
   }
 
   if (apiKey) {
@@ -173,12 +227,31 @@ function sanitizeModelRoleConfig(config: ModelRoleConfig): SanitizedModelRoleCon
     sanitized.userAgent = config.userAgent;
   }
 
+  if (config.maxInputTokens) {
+    sanitized.maxInputTokens = config.maxInputTokens;
+  }
+
+  if (config.maxTokens) {
+    sanitized.maxTokens = config.maxTokens;
+  }
+
   return sanitized;
 }
 
 function readStringField(record: Record<string, unknown>, keys: string[]): string | undefined {
   for (const key of keys) {
     const value = trimOptional(record[key]);
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function readMaxTokensField(record: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = normalizeMaxTokens(record[key]);
     if (value) {
       return value;
     }
@@ -210,6 +283,13 @@ export function parseSanitizedModelRoleConfigs(value: unknown): Partial<Sanitize
     const baseURL = readStringField(candidateRecord, ["baseURL", "baseUrl"]);
     const userAgent = readStringField(candidateRecord, ["userAgent"]);
     const protocol = parseModelProtocol(readStringField(candidateRecord, ["protocol"]), `models.${role}.protocol`);
+    const maxInputTokens = readMaxTokensField(candidateRecord, [
+      "maxInputTokens",
+      "max_input_tokens",
+      "contextWindowTokens",
+      "context_window_tokens",
+    ]);
+    const maxTokens = readMaxTokensField(candidateRecord, ["maxTokens", "max_tokens"]);
     const sanitized: SanitizedModelRoleConfig = {
       role,
       modelName,
@@ -220,6 +300,12 @@ export function parseSanitizedModelRoleConfigs(value: unknown): Partial<Sanitize
     }
     if (userAgent) {
       sanitized.userAgent = userAgent;
+    }
+    if (maxInputTokens) {
+      sanitized.maxInputTokens = maxInputTokens;
+    }
+    if (maxTokens) {
+      sanitized.maxTokens = maxTokens;
     }
     result[role] = sanitized;
   }

@@ -2228,6 +2228,24 @@ async function runPrdAnalysisWithStructuredResponseRetry(
   }
 }
 
+async function runInitialPrdAnalysisPipeline(
+  generator: TextGenerator & Required<Pick<TextGenerator, "analyzePrd">>,
+  spec: NormalizedSpec,
+  runtime: TextGeneratorRuntime,
+  options: { parallelWith?: string } = {},
+): Promise<PlanResult> {
+  return await measureRuntimeStep(
+    runtime,
+    {
+      name: "plan.prd_analysis",
+      phase: "plan",
+      attempt: runtime.planAttempt ?? 1,
+      metadata: options.parallelWith ? { parallelWith: options.parallelWith } : {},
+    },
+    async () => await runPrdAnalysisWithStructuredResponseRetry(generator, spec, runtime),
+  );
+}
+
 async function synthesizeRecoveredGeneratedResult(
   runtime: TextGeneratorRuntime,
   planSpec: PlanSpec,
@@ -4484,15 +4502,11 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         },
         async () => await resolveExternalReferences(createRuntime(), referenceCandidates, generator),
       );
-      const prdAnalysis = measureRuntimeStep(
+      const prdAnalysis = runInitialPrdAnalysisPipeline(
+        generator,
+        spec,
         analysisRuntime,
-        {
-          name: "plan.prd_analysis",
-          phase: "plan",
-          attempt: 1,
-          metadata: { parallelWith: "references.resolve_external" },
-        },
-        async () => await runPrdAnalysisWithStructuredResponseRetry(generator, spec, analysisRuntime),
+        { parallelWith: "references.resolve_external" },
       );
 
       const [resolvedReferences] = await Promise.all([referenceResolution, prdAnalysis]);
@@ -4548,7 +4562,9 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       outputDirectory: workspace.outputDirectory,
       activeStep: "model",
       narrative: "准备工作已完成，等待模型开始计划阶段。",
-    });    const maxPlanRepairs = template.repairRetries.plan;
+    });
+
+    const maxPlanRepairs = template.repairRetries.plan;
     const maxGenerationRepairs = template.repairRetries.generate;
 
     let approvedPlan: PlanSpec | null = null;

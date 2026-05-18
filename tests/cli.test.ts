@@ -1034,6 +1034,8 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     "APP_BUILDER_API_KEY",
     "APP_BUILDER_BASE_URL",
     "APP_BUILDER_PROTOCOL",
+    "APP_BUILDER_MAX_INPUT_TOKENS",
+    "APP_BUILDER_MAX_TOKENS",
     "APP_BUILDER_MODEL",
     "APP_BUILDER_PLAN_MODEL",
     "APP_BUILDER_GENERATE_MODEL",
@@ -1044,6 +1046,12 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     "APP_BUILDER_PLAN_PROTOCOL",
     "APP_BUILDER_GENERATE_PROTOCOL",
     "APP_BUILDER_REPAIR_PROTOCOL",
+    "APP_BUILDER_PLAN_MAX_INPUT_TOKENS",
+    "APP_BUILDER_GENERATE_MAX_INPUT_TOKENS",
+    "APP_BUILDER_REPAIR_MAX_INPUT_TOKENS",
+    "APP_BUILDER_PLAN_MAX_TOKENS",
+    "APP_BUILDER_GENERATE_MAX_TOKENS",
+    "APP_BUILDER_REPAIR_MAX_TOKENS",
   ] as const;
   const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
 
@@ -1053,6 +1061,8 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     process.env.APP_BUILDER_API_KEY = "secret-for-initial-run";
     process.env.APP_BUILDER_BASE_URL = "https://global.example/v1";
     process.env.APP_BUILDER_PROTOCOL = "openai";
+    process.env.APP_BUILDER_MAX_INPUT_TOKENS = "65536";
+    process.env.APP_BUILDER_MAX_TOKENS = "8192";
     process.env.APP_BUILDER_MODEL = "openai:global-model";
     process.env.APP_BUILDER_PLAN_MODEL = "openai:plan-resume-model";
     process.env.APP_BUILDER_GENERATE_MODEL = "openai:generate-resume-model";
@@ -1063,6 +1073,12 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     process.env.APP_BUILDER_PLAN_PROTOCOL = "anthropic";
     process.env.APP_BUILDER_GENERATE_PROTOCOL = "openai";
     process.env.APP_BUILDER_REPAIR_PROTOCOL = "anthropic";
+    process.env.APP_BUILDER_PLAN_MAX_INPUT_TOKENS = "262144";
+    process.env.APP_BUILDER_GENERATE_MAX_INPUT_TOKENS = "131072";
+    process.env.APP_BUILDER_REPAIR_MAX_INPUT_TOKENS = "196608";
+    process.env.APP_BUILDER_PLAN_MAX_TOKENS = "32768";
+    process.env.APP_BUILDER_GENERATE_MAX_TOKENS = "16384";
+    process.env.APP_BUILDER_REPAIR_MAX_TOKENS = "24576";
 
     const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
     const result = await generateApplication({
@@ -1096,6 +1112,12 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.baseURL, "https://plan-resume.example/v1");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.baseURL, "https://generate-resume.example/v1");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.baseURL, "https://repair-resume.example/v1");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.maxInputTokens, 262144);
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.maxInputTokens, 131072);
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.maxInputTokens, 196608);
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.maxTokens, 32768);
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.maxTokens, 16384);
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.maxTokens, 24576);
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.apiKey, undefined);
     assert.equal(stderrLines.length, 0);
     assert.match(stdoutLines.join("\n"), /Resumed from: generate_repair/);
