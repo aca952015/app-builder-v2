@@ -24,6 +24,7 @@ import {
   createGoogleModel,
   normalizeGoogleModelName,
   resolveGoogleReasoningEffort,
+  rewriteGoogleApiRequestUrl,
 } from "../src/lib/google-model.js";
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
@@ -601,6 +602,58 @@ test("createGoogleModel configures Gemini model generation params", () => {
   assert.equal(params.generationConfig?.temperature, 0);
   assert.equal(params.generationConfig?.maxOutputTokens, 8192);
   assert.ok(params.generationConfig?.thinkingConfig);
+});
+
+test("rewriteGoogleApiRequestUrl maps Gemini requests onto a configured base URL", () => {
+  assert.equal(
+    rewriteGoogleApiRequestUrl(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      "http://127.0.0.1:8045",
+    ),
+    "http://127.0.0.1:8045/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+  );
+
+  assert.equal(
+    rewriteGoogleApiRequestUrl(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+      "https://proxy.example/google/v1beta",
+    ),
+    "https://proxy.example/google/v1beta/models/gemini-2.5-flash:generateContent",
+  );
+});
+
+test("createGoogleModel routes Gemini protocol fetches through configured base URL", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedRequest: Request | undefined;
+  globalThis.fetch = (async (request: RequestInfo | URL, init?: RequestInit) => {
+    capturedRequest = request instanceof Request ? request : new Request(request, init);
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const model = createGoogleModel({
+      modelName: "gemini-2.5-flash",
+      baseURL: "http://127.0.0.1:8045",
+      apiKey: "proxy-key",
+    }) as unknown as {
+      apiClient: {
+        fetch: (request: Request) => Promise<Response>;
+      };
+    };
+
+    await model.apiClient.fetch(new Request(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      { method: "POST", body: "{}" },
+    ));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    capturedRequest?.url,
+    "http://127.0.0.1:8045/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+  );
+  assert.equal(capturedRequest?.headers.get("x-goog-api-key"), "proxy-key");
 });
 
 test("createOpenAICompatibleModel enables reasoning_content compat for every provider", () => {

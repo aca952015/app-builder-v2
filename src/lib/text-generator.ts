@@ -2657,6 +2657,7 @@ async function resolveModel(config: ModelRoleConfig, effort?: TemplatePhaseEffor
     return createGoogleModel({
       modelName: normalizeProtocolModelName(config.modelName, config.protocol),
       ...(effort ? { effort } : {}),
+      ...(config.baseURL ? { baseURL: config.baseURL } : {}),
       ...(config.userAgent ? { userAgent: config.userAgent } : {}),
       ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
