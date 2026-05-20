@@ -6,6 +6,7 @@ import { request as httpRequest } from "node:http";
 import { connect as connectNet, createServer as createNetServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { z } from "zod";
 
 import {
   collectPageRoutePatterns,
@@ -31,7 +32,7 @@ import {
   type RuntimeInteractionValidationSession,
 } from "../src/lib/interactive-runtime-validation.js";
 import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
-import { validatePlanSpec, type PlanSpec } from "../src/lib/plan-spec.js";
+import { planSpecSchema, validatePlanSpec, type PlanSpec } from "../src/lib/plan-spec.js";
 import { validateInteractionContract, type InteractionContract } from "../src/lib/interaction-contract.js";
 import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
 import { buildSessionPolicyDocument } from "../src/lib/session-policy.js";
@@ -56,6 +57,25 @@ import {
   TextGenerator,
   TextGeneratorRuntime,
 } from "../src/lib/types.js";
+
+function asRecord(value: unknown): Record<string, unknown> {
+  assert.equal(typeof value, "object");
+  assert.notEqual(value, null);
+  return value as Record<string, unknown>;
+}
+
+function containsObjectKey(value: unknown, key: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => containsObjectKey(item, key));
+  }
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const object = value as Record<string, unknown>;
+  return Object.prototype.hasOwnProperty.call(object, key) ||
+    Object.values(object).some((item) => containsObjectKey(item, key));
+}
 
 function buildPlanSpec(): PlanSpec {
   return {
@@ -7235,6 +7255,21 @@ test("planning payload passes plan-spec and locked env validation as blocking ha
   assert.match(JSON.stringify(payload.planSpecSchema), /references/);
   assert.match(JSON.stringify(payload.planSpecSchema), /projectConfigChanges/);
   assert.doesNotMatch(JSON.stringify(payload.planSpecSchema), /relatedApis/);
+});
+
+test("plan-spec JSON schema avoids const for Gemini tool declarations", () => {
+  const schema = z.toJSONSchema(planSpecSchema);
+  const schemaProperties = asRecord(asRecord(schema).properties);
+  const versionSchema = asRecord(schemaProperties.version);
+  const environmentVariablesSchema = asRecord(schemaProperties.environmentVariables);
+  const environmentVariableItems = asRecord(environmentVariablesSchema.items);
+  const environmentVariableProperties = asRecord(environmentVariableItems.properties);
+  const targetFileSchema = asRecord(environmentVariableProperties.targetFile);
+
+  assert.equal(containsObjectKey(schema, "const"), false);
+  assert.equal(versionSchema.minimum, 1);
+  assert.equal(versionSchema.maximum, 1);
+  assert.deepEqual(targetFileSchema.enum, [".env.example"]);
 });
 
 test("plan-repair payload preserves the blocking hard constraint for plan-spec schema validation", () => {

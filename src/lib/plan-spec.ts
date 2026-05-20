@@ -47,8 +47,13 @@ export const planSpecAcceptanceTypeSchema = z.enum([
   "flow",
 ]);
 
+// Google function declarations reject JSON Schema `const`; keep exact values
+// with equivalent schemas that serialize to supported keywords.
+const planSpecVersionSchema = z.number().int().min(1).max(1);
+const envExampleTargetFileSchema = z.enum([".env.example"]);
+
 export const planSpecSchema = z.object({
-  version: z.literal(1),
+  version: planSpecVersionSchema,
   appName: z.string().min(1),
   summary: z.string().min(1),
   resources: z.array(z.object({
@@ -95,7 +100,7 @@ export const planSpecSchema = z.object({
     name: z.string().min(1).regex(/^[A-Z][A-Z0-9_]*$/),
     value: z.string().min(1),
     description: z.string().min(1).optional(),
-    targetFile: z.literal(".env.example").optional(),
+    targetFile: envExampleTargetFileSchema.optional(),
   })).optional(),
   references: z.array(z.object({
     name: z.string().min(1),

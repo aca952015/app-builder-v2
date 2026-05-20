@@ -17,7 +17,14 @@ function normalizeLine(line: string): string {
 }
 
 function sluglessTitle(raw: string): string {
-  return compactCjkSpacing(raw.replace(/^["'`]+|["'`]+$/g, "").trim());
+  return compactCjkSpacing(
+    raw
+      .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[*_~`]+/g, "")
+      .replace(/^["'`“”‘’]+|["'`“”‘’]+$/gu, "")
+      .trim(),
+  );
 }
 
 function cleanHeadingLabel(raw: string): string {
@@ -198,6 +205,68 @@ function firstMatchingParagraph(sections: ParsedSection[], keywords: RegExp): st
   return "";
 }
 
+function trimDocumentTitleSuffix(raw: string): string {
+  return raw
+    .replace(/\s*(?:用户手册|使用手册|操作手册|产品手册|需求文档|产品需求文档|需求规格说明书|说明书|PRD)\s*$/iu, "")
+    .trim();
+}
+
+function isLowValueTitleCandidate(raw: string): boolean {
+  const title = cleanHeadingLabel(raw).toLowerCase();
+  return /^(目录|table of contents|toc|用户手册|使用手册|操作手册|产品手册|编写目的|适用范围|术语|修订记录|版本记录|系统中流程图|业务流程图|项目概述|项目背景|overview|summary|introduction)$/.test(title);
+}
+
+function cleanDocumentTitleCandidate(raw: string): string {
+  return trimDocumentTitleSuffix(cleanHeadingLabel(raw.replace(/^[-*+]\s+/, "")));
+}
+
+function looksLikeDocumentTitle(raw: string): boolean {
+  const title = cleanDocumentTitleCandidate(raw);
+  if (!title || title.length < 2 || title.length > 80 || isLowValueTitleCandidate(title)) {
+    return false;
+  }
+
+  if (/^[|:-]+$/.test(title) || /[。！？；;]$/.test(title)) {
+    return false;
+  }
+
+  return /(系统|平台|应用|管理|中心|门户|LIMS|CRM|ERP|MES|WMS|SaaS|Console|Dashboard)/i.test(title);
+}
+
+function extractDocumentTitle(sections: ParsedSection[]): string {
+  const overview = sections.find((section) => section.path[0] === "Overview");
+  if (!overview) {
+    return "";
+  }
+
+  for (const line of overview.content.split(/\r?\n/).slice(0, 80)) {
+    const normalized = normalizeLine(line);
+    if (
+      !normalized ||
+      BULLET_PATTERN.test(normalized) ||
+      NUMBERED_PATTERN.test(normalized) ||
+      /^\|.*\|$/.test(normalized) ||
+      isLowValueTitleCandidate(normalized)
+    ) {
+      continue;
+    }
+
+    if (looksLikeDocumentTitle(normalized)) {
+      return cleanDocumentTitleCandidate(normalized);
+    }
+  }
+
+  const boldCandidates = overview.content.matchAll(/\*\*([^*\n]{2,80})\*\*/gu);
+  for (const match of boldCandidates) {
+    const candidate = match[1] ?? "";
+    if (looksLikeDocumentTitle(candidate)) {
+      return cleanDocumentTitleCandidate(candidate);
+    }
+  }
+
+  return "";
+}
+
 function extractFeatureHeadings(sections: ParsedSection[]): string[] {
   const seen = new Set<string>();
   const screens: string[] = [];
@@ -231,9 +300,19 @@ function extractFeatureHeadings(sections: ParsedSection[]): string[] {
 
 export function parsePrd(markdown: string): ParsedPrd {
   const sections = parseSections(markdown);
+  const firstPrimaryHeadingTitle = cleanHeadingLabel(sections.find((section) => section.depth === 1)?.heading ?? "");
+  const primaryHeadingTitle = isLowValueTitleCandidate(firstPrimaryHeadingTitle) ? "" : firstPrimaryHeadingTitle;
+  const documentTitle = extractDocumentTitle(sections);
+  const firstMeaningfulSectionTitle = cleanHeadingLabel(
+    sections.find((section) => section.heading !== "Overview" && !isLowValueTitleCandidate(section.heading))?.heading ?? "",
+  );
+  const firstSectionTitle = cleanHeadingLabel(sections.find((section) => section.heading !== "Overview")?.heading ?? "");
   const title =
-    cleanHeadingLabel(sections.find((section) => section.depth === 1)?.heading ?? "") ||
-    cleanHeadingLabel(sections.find((section) => section.heading !== "Overview")?.heading ?? "") ||
+    primaryHeadingTitle ||
+    documentTitle ||
+    firstMeaningfulSectionTitle ||
+    firstPrimaryHeadingTitle ||
+    firstSectionTitle ||
     "Generated App";
 
   const summary =

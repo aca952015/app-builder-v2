@@ -79,6 +79,28 @@ test("parsePrd recognizes OCR-style Chinese energy PRDs", async () => {
   assert.ok(parsed.screens.includes("统计报表"));
 });
 
+test("parsePrd prefers a no-H1 product title over directory section headings", () => {
+  const markdown = [
+    "**YD-LIMS易达智检实验室管理系统**",
+    "",
+    "**用户手册**",
+    "",
+    "- 目录",
+    "- [1. **编写目的**](#_Toc20629)",
+    "- [2. 系统登录](#_Toc10643)",
+    "",
+    "# 1. **编写目的**",
+    "",
+    "**YD-LIMS易达智检实验室管理系统**用于实验室合同、样品、检测、报告和设备管理。",
+    "",
+  ].join("\n");
+
+  const parsed = parsePrd(markdown);
+
+  assert.equal(parsed.title, "YD-LIMS易达智检实验室管理系统");
+  assert.equal(parsed.sections[1]?.heading, "1. 编写目的");
+});
+
 test("normalizeSpec infers energy domain structure from Chinese PRDs", async () => {
   const markdown = await readFile(ENERGY_FIXTURE_PATH, "utf8");
   const parsed = parsePrd(markdown);
