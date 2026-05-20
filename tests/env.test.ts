@@ -20,6 +20,11 @@ import {
   resolveModelReasoningEffort,
   sanitizeOpenAICompatibleCompletionsParams,
 } from "../src/lib/openai-compatible.js";
+import {
+  createGoogleModel,
+  normalizeGoogleModelName,
+  resolveGoogleReasoningEffort,
+} from "../src/lib/google-model.js";
 import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
   DEFAULT_MODEL_MAX_TOKENS,
@@ -147,6 +152,44 @@ test("resolveModelRoleConfigs applies role-specific protocol overrides with glob
   assert.equal(configs.repair.protocol, "anthropic");
 });
 
+test("resolveModelRoleConfigs supports google protocol with GOOGLE_API_KEY precedence", () => {
+  const configs = resolveModelRoleConfigs({
+    GOOGLE_API_KEY: "google-key",
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_PROTOCOL: "google",
+    APP_BUILDER_MODEL: "google:gemini-2.5-flash",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].protocol, "google");
+    assert.equal(configs[role].modelName, "google:gemini-2.5-flash");
+    assert.equal(configs[role].apiKey, "google-key");
+  }
+});
+
+test("resolveModelRoleConfigs accepts gemini as a google protocol alias", () => {
+  const configs = resolveModelRoleConfigs({
+    GOOGLE_API_KEY: "google-key",
+    APP_BUILDER_PROTOCOL: "gemini",
+  });
+
+  assert.equal(configs.plan.protocol, "google");
+  assert.equal(configs.generate.protocol, "google");
+  assert.equal(configs.repair.protocol, "google");
+});
+
+test("resolveModelRoleConfigs accepts Google provider credentials without app-builder keys", () => {
+  const configs = resolveModelRoleConfigs({
+    GOOGLE_APPLICATION_CREDENTIALS: "/tmp/google-service-account.json",
+    APP_BUILDER_PROTOCOL: "google",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].apiKey, undefined);
+    assert.equal(configs[role].usesProviderAuth, true);
+  }
+});
+
 test("resolveModelRoleConfigs rejects invalid protocol values", () => {
   assert.throws(
     () =>
@@ -154,7 +197,7 @@ test("resolveModelRoleConfigs rejects invalid protocol values", () => {
         APP_BUILDER_API_KEY: "global-key",
         APP_BUILDER_PLAN_PROTOCOL: "claude",
       }),
-    /APP_BUILDER_PLAN_PROTOCOL must be one of: openai, anthropic/,
+    /APP_BUILDER_PLAN_PROTOCOL must be one of: openai, anthropic, google/,
   );
 });
 
@@ -518,6 +561,46 @@ test("normalizeOpenAICompatibleModelName strips only the OpenAI provider prefix"
   assert.equal(normalizeOpenAICompatibleModelName("openai:deepseek-v4-pro"), "deepseek-v4-pro");
   assert.equal(normalizeOpenAICompatibleModelName("deepseek-v4-pro"), "deepseek-v4-pro");
   assert.equal(normalizeOpenAICompatibleModelName("anthropic:claude-sonnet-4-5"), "anthropic:claude-sonnet-4-5");
+});
+
+test("normalizeGoogleModelName strips google and gemini provider prefixes", () => {
+  assert.equal(normalizeGoogleModelName("google:gemini-2.5-flash"), "gemini-2.5-flash");
+  assert.equal(normalizeGoogleModelName("gemini:gemini-2.5-pro"), "gemini-2.5-pro");
+  assert.equal(normalizeGoogleModelName("gemini-2.5-flash"), "gemini-2.5-flash");
+});
+
+test("resolveGoogleReasoningEffort maps template max to google high", () => {
+  assert.equal(resolveGoogleReasoningEffort("low"), "low");
+  assert.equal(resolveGoogleReasoningEffort("medium"), "medium");
+  assert.equal(resolveGoogleReasoningEffort("high"), "high");
+  assert.equal(resolveGoogleReasoningEffort("max"), "high");
+});
+
+test("createGoogleModel configures Gemini model generation params", () => {
+  const model = createGoogleModel({
+    modelName: "google:gemini-2.5-flash",
+    effort: "high",
+    userAgent: "app-builder-test/1.0",
+    maxTokens: 8192,
+    apiKey: "test-key",
+  }) as unknown as {
+    model: string;
+    _llmType: () => string;
+    invocationParams: (options: Record<string, unknown>) => {
+      generationConfig?: {
+        temperature?: number;
+        maxOutputTokens?: number;
+        thinkingConfig?: unknown;
+      };
+    };
+  };
+
+  assert.equal(model.model, "gemini-2.5-flash");
+  assert.equal(model._llmType(), "google");
+  const params = model.invocationParams({});
+  assert.equal(params.generationConfig?.temperature, 0);
+  assert.equal(params.generationConfig?.maxOutputTokens, 8192);
+  assert.ok(params.generationConfig?.thinkingConfig);
 });
 
 test("createOpenAICompatibleModel enables reasoning_content compat for every provider", () => {

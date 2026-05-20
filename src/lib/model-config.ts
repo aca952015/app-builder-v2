@@ -12,15 +12,25 @@ export const GLOBAL_MAX_TOKENS_ENV = "APP_BUILDER_MAX_TOKENS";
 
 export const GLOBAL_MAX_INPUT_TOKENS_ENV = "APP_BUILDER_MAX_INPUT_TOKENS";
 
+export const GOOGLE_API_KEY_ENV = "GOOGLE_API_KEY";
+
+export const GOOGLE_APPLICATION_CREDENTIALS_ENV = "GOOGLE_APPLICATION_CREDENTIALS";
+
+export const GOOGLE_CLOUD_CREDENTIALS_ENV = "GOOGLE_CLOUD_CREDENTIALS";
+
 export const DEFAULT_MODEL_MAX_TOKENS = 16384;
 
 export const MODEL_ROLES = ["plan", "generate", "repair"] as const;
 
 export type ModelRole = typeof MODEL_ROLES[number];
 
-export const MODEL_PROTOCOLS = ["openai", "anthropic"] as const;
+export const MODEL_PROTOCOLS = ["openai", "anthropic", "google"] as const;
 
 export type ModelProtocol = typeof MODEL_PROTOCOLS[number];
+
+const MODEL_PROTOCOL_ALIASES = {
+  gemini: "google",
+} as const satisfies Record<string, ModelProtocol>;
 
 export type ModelRoleConfig = {
   role: ModelRole;
@@ -31,9 +41,10 @@ export type ModelRoleConfig = {
   maxInputTokens?: number;
   maxTokens?: number;
   apiKey?: string;
+  usesProviderAuth?: boolean;
 };
 
-export type SanitizedModelRoleConfig = Omit<ModelRoleConfig, "apiKey">;
+export type SanitizedModelRoleConfig = Omit<ModelRoleConfig, "apiKey" | "usesProviderAuth">;
 
 export type ModelRoleConfigMap = Record<ModelRole, ModelRoleConfig>;
 
@@ -60,11 +71,15 @@ function parseModelProtocol(value: string | undefined, source: string): ModelPro
     return undefined;
   }
 
-  if (value === "openai" || value === "anthropic") {
+  if (value === "openai" || value === "anthropic" || value === "google") {
     return value;
   }
 
-  throw new Error(`${source} must be one of: ${MODEL_PROTOCOLS.join(", ")}.`);
+  if (value in MODEL_PROTOCOL_ALIASES) {
+    return MODEL_PROTOCOL_ALIASES[value as keyof typeof MODEL_PROTOCOL_ALIASES];
+  }
+
+  throw new Error(`${source} must be one of: ${MODEL_PROTOCOLS.join(", ")}. The alias gemini is also accepted for google.`);
 }
 
 function parseMaxTokens(value: string | undefined, source: string): number | undefined {
@@ -112,6 +127,26 @@ function roleMaxInputTokensEnvName(role: ModelRole): string {
   return `${roleEnvPrefix(role)}_MAX_INPUT_TOKENS`;
 }
 
+function readProviderApiKey(env: EnvSource, protocol: ModelProtocol): string | undefined {
+  if (protocol === "google") {
+    return readEnvValue(env, GOOGLE_API_KEY_ENV);
+  }
+
+  return undefined;
+}
+
+function hasProviderCredential(env: EnvSource, protocol: ModelProtocol): boolean {
+  if (protocol === "google") {
+    return Boolean(
+      readEnvValue(env, GOOGLE_API_KEY_ENV) ??
+        readEnvValue(env, GOOGLE_APPLICATION_CREDENTIALS_ENV) ??
+        readEnvValue(env, GOOGLE_CLOUD_CREDENTIALS_ENV),
+    );
+  }
+
+  return false;
+}
+
 function buildModelRoleConfig(
   role: ModelRole,
   env: EnvSource,
@@ -129,7 +164,6 @@ function buildModelRoleConfig(
     readEnvValue(env, GLOBAL_BASE_URL_ENV) ??
     trimOptional(persisted?.baseURL);
   const userAgent = readEnvValue(env, roleUserAgentEnvName(role)) ?? readEnvValue(env, GLOBAL_USER_AGENT_ENV);
-  const apiKey = readEnvValue(env, roleApiKeyEnvName(role)) ?? readEnvValue(env, GLOBAL_API_KEY_ENV);
   const maxInputTokens =
     parseMaxTokens(readEnvValue(env, roleMaxInputTokensEnvName(role)), roleMaxInputTokensEnvName(role)) ??
     parseMaxTokens(readEnvValue(env, GLOBAL_MAX_INPUT_TOKENS_ENV), GLOBAL_MAX_INPUT_TOKENS_ENV) ??
@@ -146,6 +180,11 @@ function buildModelRoleConfig(
     parseModelProtocol(globalProtocolValue, GLOBAL_PROTOCOL_ENV) ??
     persisted?.protocol ??
     "openai";
+  const apiKey =
+    readEnvValue(env, roleApiKeyEnvName(role)) ??
+    readProviderApiKey(env, protocol) ??
+    readEnvValue(env, GLOBAL_API_KEY_ENV);
+  const usesProviderAuth = !apiKey && hasProviderCredential(env, protocol);
   const config: ModelRoleConfig = {
     role,
     modelName,
@@ -172,18 +211,22 @@ function buildModelRoleConfig(
     config.apiKey = apiKey;
   }
 
+  if (usesProviderAuth) {
+    config.usesProviderAuth = true;
+  }
+
   return config;
 }
 
 export function validateModelRoleApiKeys(configs: ModelRoleConfigMap): void {
-  const missingRoles = MODEL_ROLES.filter((role) => !configs[role].apiKey);
+  const missingRoles = MODEL_ROLES.filter((role) => !configs[role].apiKey && !configs[role].usesProviderAuth);
   if (missingRoles.length === 0) {
     return;
   }
 
   const missingRoleKeys = missingRoles.map(roleApiKeyEnvName).join(", ");
   throw new Error(
-    `${GLOBAL_API_KEY_ENV} or role-specific API keys are required for plan, generate, and repair model roles. Missing: ${missingRoleKeys}.`,
+    `${GLOBAL_API_KEY_ENV}, role-specific API keys, or provider credentials are required for plan, generate, and repair model roles. Missing: ${missingRoleKeys}.`,
   );
 }
 

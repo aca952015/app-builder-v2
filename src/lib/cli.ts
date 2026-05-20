@@ -141,7 +141,7 @@ Environment:
   APP_BUILDER_API_KEY Required unless role-specific API keys or a custom generator are used
   APP_BUILDER_BASE_URL Optional API base URL fallback for all model roles
   APP_BUILDER_USER_AGENT Optional truthful User-Agent header fallback for all model roles
-  APP_BUILDER_PROTOCOL Optional model protocol fallback for all roles: openai or anthropic
+  APP_BUILDER_PROTOCOL Optional model protocol fallback for all roles: openai, anthropic, or google
   APP_BUILDER_MAX_INPUT_TOKENS Optional input/context window token budget fallback for all model roles
   APP_BUILDER_MAX_TOKENS Optional output token cap fallback for all model roles
   APP_BUILDER_MODEL Optional model fallback for all roles

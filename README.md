@@ -18,10 +18,10 @@ node dist/src/index.js generate ./spec.md --template mini-app --design ./designs
 Environment variables:
 
 - `.env`: loaded automatically from the project root when the CLI starts.
-- `APP_BUILDER_API_KEY`: required for the default generation path unless every model role has its own API key.
+- `APP_BUILDER_API_KEY`: required for the default generation path unless every model role has its own API key or provider-native credentials.
 - `APP_BUILDER_BASE_URL`: optional API base URL fallback for every model role. Useful for proxy or compatible endpoints.
 - `APP_BUILDER_USER_AGENT`: optional truthful `User-Agent` header fallback for every model role.
-- `APP_BUILDER_PROTOCOL`: optional model protocol fallback for every model role. Supported values are `openai` and `anthropic`; defaults to `openai`.
+- `APP_BUILDER_PROTOCOL`: optional model protocol fallback for every model role. Supported values are `openai`, `anthropic`, and `google`; `gemini` is accepted as an alias for `google`. Defaults to `openai`.
 - `APP_BUILDER_MODEL`: optional model fallback for every role. Defaults to `openai:gpt-4.1-mini`.
 - `APP_BUILDER_PLAN_MODEL`, `APP_BUILDER_GENERATE_MODEL`, `APP_BUILDER_REPAIR_MODEL`: optional model overrides for the planning, generation, and repair roles.
 - `APP_BUILDER_PLAN_BASE_URL`, `APP_BUILDER_GENERATE_BASE_URL`, `APP_BUILDER_REPAIR_BASE_URL`: optional role-specific compatible endpoint overrides.
@@ -43,6 +43,18 @@ APP_BUILDER_MODEL=openai:gpt-4.1-mini
 # APP_BUILDER_REPAIR_MODEL=openai:gpt-5.4
 APP_BUILDER_STREAM_MODES=updates,messages,tools,values
 APP_BUILDER_STDOUT=log
+```
+
+Gemini example:
+
+```bash
+APP_BUILDER_PROTOCOL=google
+APP_BUILDER_MODEL=google:gemini-2.5-flash
+GOOGLE_API_KEY=your-google-api-key
+# Optional role overrides:
+# APP_BUILDER_PLAN_MODEL=google:gemini-2.5-pro
+# APP_BUILDER_GENERATE_MODEL=google:gemini-2.5-flash
+# APP_BUILDER_REPAIR_MODEL=google:gemini-2.5-flash
 ```
 
 Each run creates a session directory under `.out/<sessionId>/`. `deepagents` writes the application files into that session directory, while `.deepagents/` stores the template context, phase prompts, plan artifacts, and generation logs. The generator will not enter code generation until `.deepagents/plan-spec.json` passes host validation.

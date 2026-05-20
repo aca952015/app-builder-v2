@@ -7,6 +7,7 @@ import { createMiddleware, ToolMessage, toolStrategy } from "langchain";
 import { z } from "zod";
 
 import { StableAnthropicToolCallChatModel } from "./anthropic-tool-stream.js";
+import { createGoogleModel } from "./google-model.js";
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
 import { interactionContractSchema } from "./interaction-contract.js";
 import { createOpenAICompatibleModel } from "./openai-compatible.js";
@@ -2648,6 +2649,16 @@ async function resolveModel(config: ModelRoleConfig, effort?: TemplatePhaseEffor
       ...(effort ? { outputConfig: { effort } } : {}),
       ...(config.baseURL ? { anthropicApiUrl: config.baseURL } : {}),
       ...(config.userAgent ? { clientOptions: { defaultHeaders: { "User-Agent": config.userAgent } } } : {}),
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    });
+  }
+
+  if (config.protocol === "google") {
+    return createGoogleModel({
+      modelName: normalizeProtocolModelName(config.modelName, config.protocol),
+      ...(effort ? { effort } : {}),
+      ...(config.userAgent ? { userAgent: config.userAgent } : {}),
+      ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
     });
   }
