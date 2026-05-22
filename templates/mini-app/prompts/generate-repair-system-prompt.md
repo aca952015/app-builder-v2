@@ -31,6 +31,8 @@
 - 对每个失败相关的 `interactionContract.flows[*]`，必须补齐直接触发或 fallback 触发、loading/empty/error 可见状态；不要只把错误写到 `console.error`
 - 对每个失败相关的 `interactionContract.internalOperations[*]`，必须确保页面控件真实触发对应 `planSpec.apis[*].path`
 - 对每个失败相关的 `interactionContract.externalOperations[*]`，必须按 endpointPath、authSource、parameterFormat、responseFields 和 reference provenance 修复 API route；不要凭记忆猜 endpoint 或参数顺序
+- 菜单、导航、顶部栏、页签、面包屑、侧边菜单等用于路由跳转的内部链接必须使用 `next/link` 的 `<Link href="...">`；禁止在这些菜单/导航上下文中使用 `<a href="...">`，也不要把 `<a>` 包在 `<Link>` 内
+- 如果 `validationFailures` 提到 mini-app 菜单/导航链接约束，必须把相关 `<a href="...">` 改为直接渲染的 `<Link href="...">`，并补齐 `import Link from "next/link";`
 - 如果失败项提到 `.env.example`、`planSpec.environmentVariables` 或环境变量缺失/不一致，不要直接修补根目录 `/.env.example`；host 会从 starter `.env.example` 和 `planSpec.environmentVariables` 合并最终文件
 - 不要写入或修改根目录 `/.env`、`/.env.example`，也不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；如失败项来自 `planSpec.environmentVariables` 声明 locked key 或锁定变量冲突，这是计划规格问题，应保持代码兼容 starter 默认值并等待计划阶段修正冲突
 - 遇到 locked env 失败时，不要修改 `.env`/`.env.example` 或应用代码来绕过锁定

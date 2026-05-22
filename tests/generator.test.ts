@@ -2835,6 +2835,41 @@ class StubTextGenerator implements TextGenerator {
   }
 }
 
+class MiniAppMenuAnchorTextGenerator extends StubTextGenerator {
+  override async generateProject(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject> {
+    await writeImplementedProjectFiles({
+      outputDirectory: runtime.outputDirectory,
+      planSpec,
+      reportContents: "# Mini App Menu Report\n\nGenerated during test.\n",
+      extraFiles: [{
+        path: "components/AppMenu.tsx",
+        contents: [
+          "export function AppMenu() {",
+          "  return (",
+          "    <nav aria-label=\"Primary menu\">",
+          "      <a href=\"/work-orders\">Work Orders</a>",
+          "    </nav>",
+          "  );",
+          "}",
+          "",
+        ].join("\n"),
+      }],
+    });
+
+    return {
+      summary: "Generated mini-app menu with an invalid anchor.",
+      filesWritten: [
+        "app-builder-report.md",
+        "components/AppMenu.tsx",
+      ],
+      implementedResources: planSpec.resources.map((resource) => resource.name),
+      implementedPages: planSpec.pages.map((page) => page.route),
+      implementedApis: planSpec.apis.map((api) => api.path),
+      notes: [],
+    };
+  }
+}
+
 class StructuredPlanSpecResultTextGenerator extends StubTextGenerator {
   override async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
     const planSpec = buildPlanSpec();
@@ -5944,6 +5979,45 @@ test("generateApplication allows next.config.ts changes when planSpec declares P
   }
 });
 
+test("generateApplication rejects mini-app menu anchors that do not use next Link", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-mini-menu-link-"));
+  const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
+  const previousCwd = process.cwd();
+
+  try {
+    await writeMinimalTemplatePack({
+      root: tempRoot,
+      id: "mini-app",
+      interactiveEnabled: false,
+      includeDevServerStep: false,
+      generateRepairRetries: 0,
+    });
+    process.chdir(tempRoot);
+
+    await assert.rejects(
+      () => generateApplication({
+        specPath,
+        outputDirectory: path.join(tempRoot, "output"),
+        templateId: "mini-app",
+        generator: new MiniAppMenuAnchorTextGenerator(),
+        validator: new SuccessfulRuntimeValidator(),
+      }),
+      /mini-app 菜单\/导航链接必须使用 next\/link 的 <Link href="\.\.\.">.*<a href="\.\.\.">/s,
+    );
+
+    const generationValidation = JSON.parse(
+      await readFile(path.join(tempRoot, "output", ".deepagents/generation-validation.json"), "utf8"),
+    ) as { valid: boolean; reasons: string[] };
+
+    assert.equal(generationValidation.valid, false);
+    assert.match(generationValidation.reasons.join("\n"), /components\/AppMenu\.tsx:\d+/);
+    assert.match(generationValidation.reasons.join("\n"), /禁止在菜单\/导航上下文中使用 <a href="\.\.\.">/);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateApplication retries the plan phase until plan-spec.json is valid", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-retry-plan-"));
   const specPath = path.resolve(process.cwd(), "tests/fixtures/sample-spec.md");
@@ -6702,6 +6776,18 @@ test("root designs include Spotify design document and mini-app starter does not
   );
 });
 
+test("AdminPanel design defines selected sidebar menu styling", async () => {
+  const designSource = await readFile(
+    path.resolve(process.cwd(), "designs/AdminPanel.md"),
+    "utf8",
+  );
+
+  assert.match(designSource, /### Sidebar Menu/);
+  assert.match(designSource, /\*\*Selected menu item\*\*/);
+  assert.match(designSource, /4px left accent bar in `\{colors\.primary\}`/);
+  assert.match(designSource, /`aria-current="page"`/);
+});
+
 test("template prompts delegate shell validation to the host", async () => {
   for (const templateId of ["mini-app", "full-stack"] as const) {
     const template = await loadTemplatePack(templateId);
@@ -7451,6 +7537,10 @@ test("mini-app prompts require interaction contract traceability", async () => {
     path.resolve(process.cwd(), "templates/mini-app/prompts/generate-repair-system-prompt.md"),
     "utf8",
   );
+  const architectureReferenceSource = await readFile(
+    path.resolve(process.cwd(), "templates/mini-app/references/generated-app-architecture.md"),
+    "utf8",
+  );
 
   assert.match(planPromptSource, /artifacts\.interactionContract/);
   assert.match(planPromptSource, /triggerControl/);
@@ -7460,11 +7550,16 @@ test("mini-app prompts require interaction contract traceability", async () => {
   assert.match(generatePromptSource, /通常为 `\/DESIGN\.md`/);
   assert.match(generatePromptSource, /fallbackTrigger/);
   assert.match(generatePromptSource, /Interaction contract trace/);
+  assert.match(generatePromptSource, /`next\/link` 的 `<Link href="\.\.\.">`/);
+  assert.match(generatePromptSource, /禁止在这些菜单\/导航上下文中使用 `<a href="\.\.\.">`/);
   assert.match(generateRepairPromptSource, /必须读取 `artifacts\.interactionContract`/);
   assert.match(generateRepairPromptSource, /artifacts\.design/);
   assert.match(generateRepairPromptSource, /通常为 `\/DESIGN\.md`/);
   assert.match(generateRepairPromptSource, /endpointPath/);
   assert.match(generateRepairPromptSource, /Interaction contract trace/);
+  assert.match(generateRepairPromptSource, /validationFailures.*mini-app 菜单\/导航链接约束/);
+  assert.match(generateRepairPromptSource, /`import Link from "next\/link";`/);
+  assert.match(architectureReferenceSource, /Menu, navigation, top-bar, tabs, breadcrumb, and sidebar route links must use `next\/link`'s `<Link href="\.\.\.">` component/);
 });
 test("split prompts enforce plan-spec gating and plan-spec-only generation", async () => {
   const planPromptSource = await readFile(

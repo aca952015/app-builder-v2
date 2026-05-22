@@ -98,6 +98,15 @@ This design system is based on a modern admin dashboard interface (like Gentelle
 - **Secondary Button**: White background, `{colors.primary}` text, border `1px solid {colors.primary}`
 - **Ghost Button**: Transparent background, `{colors.text-primary}` text
 
+### Sidebar Menu
+- **Sidebar background**: `{colors.secondary}` with white or near-white menu text.
+- **Inactive menu item**: Transparent background, text `rgba(255,255,255,0.72)`, icon `rgba(255,255,255,0.56)`, font-weight 400, min-height 44px, padding `10px 16px`, rounded `{rounded.md}`.
+- **Hover menu item**: `rgba(255,255,255,0.08)` background, text `#FFFFFF`, icon `#FFFFFF`.
+- **Selected menu item**: Must be immediately visible as the current location. Use `rgba(26,187,156,0.16)` background, `#FFFFFF` text, `{colors.primary}` icon, font-weight 600, rounded `{rounded.md}`, and a 4px left accent bar in `{colors.primary}`.
+- **Selected submenu item**: Use a quieter variant: transparent or `rgba(26,187,156,0.10)` background, `#FFFFFF` text, font-weight 600, and a 2px left accent line in `{colors.primary}`.
+- **Selected parent group**: When a child route is selected, keep the parent menu expanded and style the parent label with white text plus a subtle `{colors.primary}` icon/accent so users can trace the active section.
+- **Implementation requirement**: Apply active state from the current route, not from click-only local state. Selected menu links should set `aria-current="page"` where appropriate.
+
 ### Cards
 - **Stat Card**: Rounded `{rounded.lg}`, subtle shadow, padding `{spacing.lg}`
 - **Chart Card**: Background `{colors.surface}`, shadow level 2, contains title + chart

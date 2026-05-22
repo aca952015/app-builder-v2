@@ -43,6 +43,7 @@ Implementation constraints:
 - Prefer extending the existing shell instead of replacing the whole starter.
 - Do not introduce a database layer unless the plan explicitly requires one.
 - Treat `next.config.ts` as a protected project configuration file. It can only be edited when `planSpec.projectConfigChanges` explicitly cites PRD evidence for a project/Next.js configuration change.
+- Menu, navigation, top-bar, tabs, breadcrumb, and sidebar route links must use `next/link`'s `<Link href="...">` component. Do not use `<a href="...">` in menu/navigation contexts, and do not wrap `<a>` inside `<Link>`.
 
 Data layer conventions:
 

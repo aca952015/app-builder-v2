@@ -91,6 +91,9 @@ const DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY = 8;
 const DESIGN_ARTIFACT_RELATIVE_PATH = "DESIGN.md";
 const STARTER_ENV_EXAMPLE_SNAPSHOT_FILE = "starter.env.example";
 const STARTER_PROJECT_CONFIG_SNAPSHOT_FILE = "starter.project-config.json";
+const MINI_APP_NAVIGATION_CONTEXT_PATTERN =
+  /<nav\b|role\s*=\s*["']navigation["']|menu|sidebar|navigation|breadcrumb|tablist|tabs|导航|菜单/i;
+const JSX_ANCHOR_TAG_PATTERN = /<a\b/i;
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段" | "运行验证修复阶段";
 
 function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
@@ -1634,6 +1637,78 @@ async function collectProjectConfigPolicyIssues(
   ];
 }
 
+function isMiniAppSourceFile(relativePath: string): boolean {
+  if (!/\.[tj]sx$/.test(relativePath)) {
+    return false;
+  }
+
+  return (
+    relativePath.startsWith("app/") ||
+    relativePath.startsWith("components/") ||
+    relativePath.startsWith("layout/") ||
+    relativePath.startsWith("src/")
+  );
+}
+
+function hasNavigationIntentInFilePath(relativePath: string): boolean {
+  return /(^|\/)(nav|navigation|menu|sidebar|header|breadcrumb|tabs?|shell|layout)[^/]*\.[tj]sx$/i.test(relativePath);
+}
+
+function collectMiniAppNavigationAnchorLocations(relativePath: string, contents: string): string[] {
+  const lines = contents.split(/\r?\n/);
+  const locations: string[] = [];
+  const filePathHasNavigationIntent = hasNavigationIntentInFilePath(relativePath);
+  const fileContainsNavigationElement = /<nav\b|role\s*=\s*["']navigation["']/i.test(contents);
+
+  for (const [index, line] of lines.entries()) {
+    if (!JSX_ANCHOR_TAG_PATTERN.test(line)) {
+      continue;
+    }
+
+    const contextStart = Math.max(0, index - 8);
+    const contextEnd = Math.min(lines.length, index + 9);
+    const nearbyContext = lines.slice(contextStart, contextEnd).join("\n");
+    if (
+      filePathHasNavigationIntent ||
+      fileContainsNavigationElement ||
+      MINI_APP_NAVIGATION_CONTEXT_PATTERN.test(nearbyContext)
+    ) {
+      locations.push(`${relativePath}:${index + 1}`);
+    }
+  }
+
+  return locations;
+}
+
+async function collectMiniAppNavigationLinkIssues(
+  outputDirectory: string,
+  runtime: TextGeneratorRuntime,
+): Promise<string[]> {
+  if (runtime.templateId !== "mini-app") {
+    return [];
+  }
+
+  const files = (await collectGeneratedFiles(outputDirectory)).filter(isMiniAppSourceFile);
+  const violations: string[] = [];
+
+  for (const relativePath of files) {
+    const contents = await readIfExists(path.join(outputDirectory, relativePath));
+    if (!contents || !JSX_ANCHOR_TAG_PATTERN.test(contents)) {
+      continue;
+    }
+
+    violations.push(...collectMiniAppNavigationAnchorLocations(relativePath, contents));
+  }
+
+  if (violations.length === 0) {
+    return [];
+  }
+
+  return [
+    `生成阶段未完成：mini-app 菜单/导航链接必须使用 next/link 的 <Link href="...">，禁止在菜单/导航上下文中使用 <a href="...">。违规位置：${violations.join(", ")}。`,
+  ];
+}
+
 function resolveAppPrefixedPath(outputDirectory: string, filePath: string): string {
   const relativePath = path.relative(outputDirectory, filePath);
   return path.join(outputDirectory, "app", relativePath);
@@ -2561,6 +2636,7 @@ async function collectPersistedGeneratedValidation(
   const environmentPolicyIssues = await reconcileHostManagedEnvironment(runtime, planSpec);
   const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, runtime, planSpec);
   const projectConfigIssues = await collectProjectConfigPolicyIssues(outputDirectory, runtime, planSpec);
+  const templateContractIssues = await collectMiniAppNavigationLinkIssues(outputDirectory, runtime);
 
   if (coverage.missingApiPaths.length > 0) {
     reasons.push(`生成阶段未完成：以下接口尚未落盘：${coverage.missingApiPaths.join(", ")}。`);
@@ -2573,7 +2649,7 @@ async function collectPersistedGeneratedValidation(
   if (missingAcceptanceChecks.length > 0) {
     reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
   }
-  reasons.push(...environmentPolicyIssues, ...environmentIssues, ...projectConfigIssues);
+  reasons.push(...environmentPolicyIssues, ...environmentIssues, ...projectConfigIssues, ...templateContractIssues);
 
   let steps: GenerationValidationStep[] = [];
   if (reasons.length === 0) {
@@ -2656,6 +2732,7 @@ async function validateGeneratedArtifacts(
       const environmentPolicyIssues = await reconcileHostManagedEnvironment(runtime, planSpec);
       const environmentIssues = await collectEnvironmentVariableIssues(outputDirectory, runtime, planSpec);
       const projectConfigIssues = await collectProjectConfigPolicyIssues(outputDirectory, runtime, planSpec);
+      const templateContractIssues = await collectMiniAppNavigationLinkIssues(outputDirectory, runtime);
       if (coverage.missingPageRoutes.length > 0) {
         reasons.push(`生成阶段未完成：以下页面尚未落盘：${coverage.missingPageRoutes.join(", ")}。`);
       }
@@ -2665,7 +2742,7 @@ async function validateGeneratedArtifacts(
       if (missingAcceptanceChecks.length > 0) {
         reasons.push(`生成阶段未完成：以下验收项对应的页面或接口尚未满足：${missingAcceptanceChecks.join(", ")}。`);
       }
-      reasons.push(...environmentPolicyIssues, ...environmentIssues, ...projectConfigIssues);
+      reasons.push(...environmentPolicyIssues, ...environmentIssues, ...projectConfigIssues, ...templateContractIssues);
 
       let steps: GenerationValidationStep[] = [];
       if (reasons.length === 0) {

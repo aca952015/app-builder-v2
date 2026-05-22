@@ -54,6 +54,8 @@
   - 实现可见的 loading、empty、error 状态，不要只写 `console.error`
 - 对每个 `interactionContract.internalOperations[*]`，页面控件必须真实触发对应 `planSpec.apis[*].path`
 - 对每个 `interactionContract.externalOperations[*]`，API route 必须按契约中的 endpointPath、authSource、parameterFormat、responseFields 和 reference provenance 实现；不要凭记忆猜 endpoint 或参数顺序
+- 菜单、导航、顶部栏、页签、面包屑、侧边菜单等用于路由跳转的内部链接必须使用 `next/link` 的 `<Link href="...">`；禁止在这些菜单/导航上下文中使用 `<a href="...">`，也不要把 `<a>` 包在 `<Link>` 内
+- 如果新增菜单、导航或 shell 链接组件，必须在对应文件顶部 `import Link from "next/link";`，并让每个菜单项直接渲染为 `<Link>` 组件
 
 ## 交付要求
 
