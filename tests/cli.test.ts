@@ -402,7 +402,17 @@ test("runCli generate accepts --skip-validation", async () => {
     const specPath = path.resolve(previousCwd, "tests/fixtures/sample-spec.md");
 
     await runCli(
-      ["generate", specPath, "--skip-validation", "--runtime-validation-mode", "smoke", "--stdout", "log"],
+      [
+        "generate",
+        specPath,
+        "--generation-requirements",
+        "列表页必须优先展示高密度表格。",
+        "--skip-validation",
+        "--runtime-validation-mode",
+        "smoke",
+        "--stdout",
+        "log",
+      ],
       {
         generator: new CliTestGenerator(),
         validator: new SuccessfulCliValidator(),
@@ -414,6 +424,7 @@ test("runCli generate accepts --skip-validation", async () => {
 
     assert.equal(stderrLines.length, 0);
     assert.match(stdoutLines.join("\n"), /- command: generate/);
+    assert.match(stdoutLines.join("\n"), /- generationRequirements: provided/);
     assert.match(stdoutLines.join("\n"), /- skipValidation: true/);
     assert.match(stdoutLines.join("\n"), /- runtimeValidationMode: smoke/);
     assert.match(stdoutLines.join("\n"), /Generated Field Ops Planner/);
@@ -421,7 +432,10 @@ test("runCli generate accepts --skip-validation", async () => {
     const sessionId = await getOnlySessionId(tempRoot);
     const outputDirectory = path.join(tempRoot, ".out", sessionId);
     const deepagentsConfig = await readFile(path.join(outputDirectory, ".deepagents", "config.json"), "utf8");
+    const sourcePrd = await readFile(path.join(outputDirectory, ".deepagents", "source-prd.md"), "utf8");
     assert.doesNotMatch(deepagentsConfig, /"design"/);
+    assert.match(sourcePrd, /## 用户补充生成要求/);
+    assert.match(sourcePrd, /列表页必须优先展示高密度表格。/);
     await assert.rejects(
       () => readFile(path.join(outputDirectory, "DESIGN.md"), "utf8"),
       /ENOENT/,

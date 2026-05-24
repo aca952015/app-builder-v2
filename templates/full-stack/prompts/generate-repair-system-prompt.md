@@ -67,6 +67,7 @@
 - `next.config.ts` 是模板受保护项目配置文件。只有当 `planSpec.projectConfigChanges` 中存在 `filePath: "next.config.ts"` 且同时包含明确 `reason` 与 `prdEvidence` 时，才允许先读取再最小化修改该文件。
 - 如果 `planSpec.projectConfigChanges` 没有声明 `next.config.ts`，不得创建、修改、删除、重写 `next.config.ts`，也不得把它列入 `filesWritten`；如果失败项来自未授权修改，应撤销这类修改而不是在生成修复阶段补写计划声明。
 - 修改 `next.config.ts` 时，改动必须只覆盖 `prdEvidence` 支持的配置项，禁止顺带重写 starter 其他配置。
+- 如果修复触及 `prisma/schema.prisma`，禁止修改其中的 `datasource db` 块；必须保持 starter 原始格式。数据库连接 URL 由 `prisma.config.ts` 负责配置，schema 文件不得重复定义。
 - 只补齐缺失实现或错误接线，不得整轮重做已经正确的代码。
 - 如需修改现有文件，必须先读再改。
 - 优先局部修复缺失的资源、页面、API、报告文件或接线路径。

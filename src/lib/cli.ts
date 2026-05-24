@@ -130,9 +130,9 @@ function normalizeRuntimeValidationMode(value: string | undefined): RuntimeValid
 
 function helpText(): string {
   return `Usage:
-  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
+  app-builder generate <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--generation-requirements <text>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
   app-builder generate --resume <session-id> [--skip-validation] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
-  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
+  app-builder -g <spec.md> [--app-name <name>] [--template <id>] [--design <design.md>] [--generation-requirements <text>] [--force] [--skip-validation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
   app-builder -g --resume <session-id> [--skip-validation] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
   app-builder validate <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
   app-builder -v <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
@@ -243,6 +243,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       "app-name": { type: "string" },
       template: { type: "string" },
       design: { type: "string" },
+      "generation-requirements": { type: "string" },
       force: { type: "boolean" },
       "skip-validation": { type: "boolean" },
       runtimeValidation: { type: "boolean" },
@@ -270,8 +271,14 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
       throw new Error("Do not pass a Markdown spec path when using --resume; pass only --resume <session-id>.");
     }
 
-    if (parsed.values["app-name"] || parsed.values.template || parsed.values.design || parsed.values.force === true) {
-      throw new Error("The --app-name, --template, --design, and --force options cannot be used with --resume.");
+    if (
+      parsed.values["app-name"] ||
+      parsed.values.template ||
+      parsed.values.design ||
+      parsed.values["generation-requirements"] !== undefined ||
+      parsed.values.force === true
+    ) {
+      throw new Error("The --app-name, --template, --design, --generation-requirements, and --force options cannot be used with --resume.");
     }
 
     logCliExecutionParameters(stdoutMode, stdout, {
@@ -345,6 +352,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     parsed.values.design && parsed.values.design.trim() !== ""
       ? path.resolve(cwd, parsed.values.design)
       : undefined;
+  const generationRequirements =
+    parsed.values["generation-requirements"] && parsed.values["generation-requirements"].trim() !== ""
+      ? parsed.values["generation-requirements"].trim()
+      : undefined;
 
   const options: GenerateAppOptions = {
     specPath: resolvedSpecPath,
@@ -363,6 +374,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     options.appNameOverride = appNameOverride;
   }
 
+  if (generationRequirements) {
+    options.generationRequirements = generationRequirements;
+  }
+
   if (deps.generator) {
     options.generator = deps.generator;
   }
@@ -377,6 +392,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<void> 
     appName: appNameOverride ?? "auto",
     template: templateId,
     ...(resolvedDesignPath ? { design: resolvedDesignPath } : {}),
+    ...(generationRequirements ? { generationRequirements: "provided" } : {}),
     force: options.force ?? false,
     skipValidation: options.skipValidation ?? false,
     runtimeValidationMode,

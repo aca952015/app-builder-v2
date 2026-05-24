@@ -1417,6 +1417,15 @@ async function resolveDesignDocumentSourcePath(designPath: string): Promise<stri
   return resolvedPath;
 }
 
+function appendGenerationRequirementsToSourcePrd(sourceMarkdown: string, generationRequirements?: string): string {
+  const trimmedRequirements = generationRequirements?.trim();
+  if (!trimmedRequirements) {
+    return sourceMarkdown;
+  }
+
+  return `${sourceMarkdown.trimEnd()}\n\n## 用户补充生成要求\n\n${trimmedRequirements}\n`;
+}
+
 async function copyDesignDocumentToWorkspace(sourcePath: string, outputDirectory: string): Promise<string> {
   const destinationPath = path.join(outputDirectory, DESIGN_ARTIFACT_RELATIVE_PATH);
   await fs.copyFile(sourcePath, destinationPath);
@@ -4352,7 +4361,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       async () => await stageTemplatePack(template, workspace),
     );
 
-    const sourceMarkdown = await measureWorkflowStep(
+    const sourceMarkdownFromPrd = await measureWorkflowStep(
       workspace.deepagentsMetricsLogPath,
       workspace.sessionId,
       {
@@ -4361,6 +4370,10 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         metadata: { specPath: path.resolve(options.specPath) },
       },
       async () => await fs.readFile(options.specPath, "utf8"),
+    );
+    const sourceMarkdown = appendGenerationRequirementsToSourcePrd(
+      sourceMarkdownFromPrd,
+      options.generationRequirements,
     );
     const parsed = await measureWorkflowStep(
       workspace.deepagentsMetricsLogPath,

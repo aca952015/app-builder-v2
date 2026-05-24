@@ -77,6 +77,7 @@
 - 如果你需要修改 `prisma/schema.prisma`，必须先读取当前 `prisma/schema.prisma`，确认它是 Prisma 的 canonical schema 文件，然后直接对 `prisma/schema.prisma` 执行一次完整覆盖写入，产出最终完整 schema。
 - 修改 `prisma/schema.prisma` 时，禁止采用“先写 `schema_new.prisma` / `schema_correct.prisma` / `schema_backup.prisma` 等候选文件，再尝试搬运或比对”的策略；禁止引入任何临时 schema 副本文件。
 - 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态。
+- 禁止修改 `prisma/schema.prisma` 中的 `datasource db` 块；必须保持 starter 原始格式。数据库连接 URL 由 `prisma.config.ts` 负责配置，schema 文件不得重复定义。
 - 如果 `planSpec` 没有明确要求改变某个 starter 基础契约，优先保持兼容并在既有契约上扩展，而不是重写或漂移它的依赖链。
 - 不要直接写入或修改根目录 `/.env`、`/.env.example`；对 `.env.example` 的新增环境变量只能通过已验证的 `planSpec.environmentVariables` 表达，最终合并和落盘由 host 负责。
 - 不要写入 `template.environmentPolicy.lockedKeys` 中的环境变量；这些 key 的最终值必须保持 starter 默认值。

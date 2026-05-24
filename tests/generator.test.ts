@@ -4830,6 +4830,7 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     const result = await generateApplication({
       specPath,
       outputDirectory: path.join(tempRoot, "output"),
+      generationRequirements: "菜单必须使用固定侧边栏，内容区独立滚动。",
       generator: new StubTextGenerator(),
       validator: new SuccessfulRuntimeValidator(),
     });
@@ -5000,6 +5001,9 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(generateRepairPromptSnapshot, /非交互式、交互式或 smoke 运行验证/);
     assert.match(generateRepairPromptSnapshot, /Current stage: Generate Repair Stage/);
     assert.match(sourcePrdSnapshot, /# Field Ops Planner/);
+    assert.match(sourcePrdSnapshot, /## 用户补充生成要求/);
+    assert.match(sourcePrdSnapshot, /菜单必须使用固定侧边栏，内容区独立滚动。/);
+    assert.ok(sourcePrdSnapshot.indexOf("# Field Ops Planner") < sourcePrdSnapshot.indexOf("## 用户补充生成要求"));
     assert.match(analysisSnapshot, /# Stub 需求分析报告/);
     assert.match(generatedSpecSnapshot, /# Stub 实施详细设计规格书/);
     assert.equal(planSpec.version, 1);
@@ -6785,6 +6789,13 @@ test("AdminPanel design defines selected sidebar menu styling", async () => {
   assert.match(designSource, /### Sidebar Menu/);
   assert.match(designSource, /\*\*Selected menu item\*\*/);
   assert.match(designSource, /4px left accent bar in `\{colors\.primary\}`/);
+  assert.match(designSource, /\*\*Independent menu scroll\*\*/);
+  assert.match(designSource, /scroll within the menu area only/);
+  assert.match(designSource, /\*\*Sidebar scrollbar styling\*\*/);
+  assert.match(designSource, /transparent or `\{colors\.secondary\}` track/);
+  assert.match(designSource, /`rgba\(255,255,255,0\.22\)` with hover `rgba\(255,255,255,0\.34\)`/);
+  assert.match(designSource, /\*\*Current user block\*\*/);
+  assert.match(designSource, /dedicated bottom area outside the scrollable menu list/);
   assert.match(designSource, /`aria-current="page"`/);
 });
 

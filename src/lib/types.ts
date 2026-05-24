@@ -411,6 +411,7 @@ export type GenerateAppOptions = {
   specPath: string;
   outputDirectory?: string;
   appNameOverride?: string;
+  generationRequirements?: string;
   templateId?: string;
   force?: boolean;
   skipValidation?: boolean;

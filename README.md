@@ -11,9 +11,11 @@ pnpm install
 pnpm build
 node dist/src/index.js generate ./spec.md --template full-stack
 node dist/src/index.js generate ./spec.md --template mini-app --design ./designs/Spotify.md
+node dist/src/index.js generate ./spec.md --generation-requirements "菜单需要固定侧边栏，内容区独立滚动。"
 ```
 
 `--design` is optional. When omitted, no design Markdown is copied into the generated workspace.
+`--generation-requirements` is optional. When provided, the text is appended after the PRD as the user's additional generation requirements.
 
 Environment variables:
 

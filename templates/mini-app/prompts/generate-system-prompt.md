@@ -37,6 +37,7 @@
 - 如果你需要修改 `prisma/schema.prisma`，必须先读取当前 `prisma/schema.prisma`，确认它是 Prisma 的 canonical schema 文件，然后直接对 `prisma/schema.prisma` 执行一次完整覆盖写入，产出最终完整 schema
 - 修改 `prisma/schema.prisma` 时，禁止采用"先写 `schema_new.prisma` / `schema_correct.prisma` / `schema_backup.prisma` 等候选文件，再尝试搬运或比对"的策略；禁止引入任何临时 schema 副本文件
 - 修改 `prisma/schema.prisma` 时，禁止使用 marker、占位符、追加片段、局部拼接、跨多次补丁逐段修补的方式处理大结构变化；最终生效的 schema 必须在一次完整覆盖后直接处于可解析状态
+- 禁止修改 `prisma/schema.prisma` 中的 `datasource db` 块；必须保持 starter 原始格式。数据库连接 URL 由 `prisma.config.ts` 负责配置，schema 文件不得重复定义
 - 如果 `planSpec` 没有明确要求改变 starter 基础数据库契约，优先保持兼容并在既有契约上扩展，而不是重写或漂移它的依赖链
 - 如果你改动了 starter 自带的数据库契约，必须把所有受该契约影响的 Prisma 配置、schema、seed、脚本视为同一变更面，逐一读取并同步修改；禁止只改其中一部分就结束
 - 如果 `planSpec` 要求登录功能，必须提供一组默认用户名和密码，让用户可以立即登录：

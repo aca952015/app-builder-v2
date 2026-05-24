@@ -105,6 +105,9 @@ This design system is based on a modern admin dashboard interface (like Gentelle
 - **Selected menu item**: Must be immediately visible as the current location. Use `rgba(26,187,156,0.16)` background, `#FFFFFF` text, `{colors.primary}` icon, font-weight 600, rounded `{rounded.md}`, and a 4px left accent bar in `{colors.primary}`.
 - **Selected submenu item**: Use a quieter variant: transparent or `rgba(26,187,156,0.10)` background, `#FFFFFF` text, font-weight 600, and a 2px left accent line in `{colors.primary}`.
 - **Selected parent group**: When a child route is selected, keep the parent menu expanded and style the parent label with white text plus a subtle `{colors.primary}` icon/accent so users can trace the active section.
+- **Independent menu scroll**: The menu item list must be its own scroll region inside the fixed sidebar. The main page/body scroll must not move the sidebar menu, and long menus must scroll within the menu area only.
+- **Sidebar scrollbar styling**: The menu scrollbar must visually belong to the side menu. Use a transparent or `{colors.secondary}` track, never a light page-background track. Use a subtle thumb such as `rgba(255,255,255,0.22)` with hover `rgba(255,255,255,0.34)`, rounded `{rounded.full}`, and no bright border.
+- **Current user block**: If current user information appears in the side menu, it must occupy a dedicated bottom area outside the scrollable menu list. Keep it pinned to the bottom of the sidebar with its own divider or surface treatment so it never scrolls away with menu items.
 - **Implementation requirement**: Apply active state from the current route, not from click-only local state. Selected menu links should set `aria-current="page"` where appropriate.
 
 ### Cards
