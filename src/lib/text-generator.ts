@@ -313,7 +313,12 @@ const VALID_DEEPAGENTS_STREAM_MODES = new Set<string>(DEFAULT_DEEPAGENTS_STREAM_
 const PI_AGENT_IDLE_TIMEOUT_MS = DEEPAGENTS_IDLE_TIMEOUT_MS;
 const PI_AGENT_STRUCTURED_RESPONSE_TOOL_NAME = "app_builder_structured_response";
 const PI_AGENT_WRITE_TODOS_TOOL_NAME = "write_todos";
+const PI_AGENT_TASK_TOOL_NAME = "task";
 const PI_AGENT_DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+const PI_AGENT_SUBAGENT_TOOLS = ["read", "edit", "write", "grep", "find", "ls"] as const;
+const PI_TASK_MAX_PARALLEL_TASKS = 8;
+const PI_TASK_MAX_CONCURRENCY = 4;
+const PI_TASK_OUTPUT_MAX_LENGTH = 24_000;
 const WORKSPACE_TODO_RELATIVE_PATH = workspaceRelativePath(WORKSPACE_TODO_FILE_NAME);
 
 type DeepAgentRunner = {
@@ -2940,9 +2945,79 @@ export function resolvePiModelsJsonPath(env: Record<string, string | undefined> 
 
 type PiProviderConfigInput = Parameters<ModelRegistry["registerProvider"]>[1];
 type PiProviderModelConfig = NonNullable<PiProviderConfigInput["models"]>[number];
+type PiResolvedModel = ReturnType<ModelRegistry["getAll"]>[number];
 type PiWriteTodosToolDetails = {
   path?: string;
   todos: TodoItem[];
+};
+
+type PiTaskMode = "single" | "parallel" | "chain";
+
+type PiTaskItem = {
+  agent: string;
+  task: string;
+};
+
+type PiTaskNormalizedParams =
+  | {
+      mode: "single";
+      agent: string;
+      task: string;
+    }
+  | {
+      mode: "parallel";
+      tasks: PiTaskItem[];
+    }
+  | {
+      mode: "chain";
+      chain: PiTaskItem[];
+    };
+
+type PiTaskSubagentSpec = {
+  name: string;
+  description: string;
+  systemPrompt: string;
+};
+
+type PiTaskSingleResult = {
+  agent: string;
+  requestedAgent?: string | undefined;
+  task: string;
+  status: "running" | "completed" | "failed";
+  output: string;
+  error?: string | undefined;
+};
+
+type PiTaskToolDetails = {
+  mode: PiTaskMode;
+  results: PiTaskSingleResult[];
+  availableAgents: string[];
+};
+
+type PiTaskRunnerRequest = {
+  runtime: TextGeneratorRuntime;
+  runtimePhase: RuntimeStatusPhase;
+  subagent: PiTaskSubagentSpec;
+  requestedAgent: string;
+  task: string;
+  authStorage?: AuthStorage | undefined;
+  modelRegistry?: ModelRegistry | undefined;
+  model?: PiResolvedModel | undefined;
+  effort?: TemplatePhaseEffort | undefined;
+  skillsDirectory?: string | undefined;
+  signal?: AbortSignal | undefined;
+  onUpdate?: ((partial: {
+    content: Array<{ type: "text"; text: string }>;
+    details: PiTaskToolDetails;
+  }) => void) | undefined;
+  makeDetails: (results: PiTaskSingleResult[]) => PiTaskToolDetails;
+};
+
+type PiTaskRunner = (request: PiTaskRunnerRequest) => Promise<PiTaskSingleResult>;
+
+type PiHostParallelGenerationResult = {
+  task: PiTaskItem;
+  result: PiTaskSingleResult;
 };
 
 const PI_PROVIDER_ENV_API_KEYS = {
@@ -3242,6 +3317,769 @@ function createPiWriteTodosTool(runtime: TextGeneratorRuntime): ToolDefinition {
   });
 }
 
+function truncatePiTaskOutput(value: string, maxLength = PI_TASK_OUTPUT_MAX_LENGTH): string {
+  const normalized = value.trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}\n…(truncated)` : normalized;
+}
+
+function parsePiTaskToolArgs(args: unknown): Record<string, unknown> | null {
+  if (typeof args === "string") {
+    const trimmed = args.trim();
+    if (!trimmed) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(trimmed);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : { description: trimmed };
+    } catch {
+      return { description: trimmed };
+    }
+  }
+
+  return args && typeof args === "object" && !Array.isArray(args) ? args as Record<string, unknown> : null;
+}
+
+function normalizePiTaskItemCandidate(value: unknown): PiTaskItem | null {
+  const record = parsePiTaskToolArgs(value);
+  if (!record) {
+    return null;
+  }
+
+  const agent = readStringField(record, ["subagent_type", "subagentType", "agent", "agentName", "name", "type"]);
+  const task = readStringField(record, ["description", "task", "prompt", "input", "summary"]);
+
+  if (!agent || !task) {
+    return null;
+  }
+
+  return { agent, task };
+}
+
+export function normalizePiTaskToolCallArgs(args: unknown): PiTaskNormalizedParams | null {
+  const record = parsePiTaskToolArgs(args);
+  if (!record) {
+    return null;
+  }
+
+  const tasks = Array.isArray(record.tasks)
+    ? record.tasks.map(normalizePiTaskItemCandidate).filter((item): item is PiTaskItem => item !== null)
+    : [];
+  const chain = Array.isArray(record.chain)
+    ? record.chain.map(normalizePiTaskItemCandidate).filter((item): item is PiTaskItem => item !== null)
+    : [];
+  const single = normalizePiTaskItemCandidate(record);
+
+  const hasTasks = tasks.length > 0;
+  const hasChain = chain.length > 0;
+  const hasSingle = Boolean(single);
+  const modeCount = Number(hasTasks) + Number(hasChain) + Number(hasSingle);
+  if (modeCount !== 1) {
+    return null;
+  }
+
+  if (hasTasks) {
+    return { mode: "parallel", tasks };
+  }
+  if (hasChain) {
+    return { mode: "chain", chain };
+  }
+
+  return single ? { mode: "single", agent: single.agent, task: single.task } : null;
+}
+
+function preparePiTaskToolArguments(args: unknown): Record<string, unknown> {
+  const normalized = normalizePiTaskToolCallArgs(args);
+  if (!normalized) {
+    const record = parsePiTaskToolArgs(args);
+    return record ?? {};
+  }
+
+  switch (normalized.mode) {
+    case "single":
+      return {
+        subagent_type: normalized.agent,
+        description: normalized.task,
+      };
+    case "parallel":
+      return {
+        tasks: normalized.tasks.map((task) => ({
+          subagent_type: task.agent,
+          description: task.task,
+        })),
+      };
+    case "chain":
+      return {
+        chain: normalized.chain.map((task) => ({
+          subagent_type: task.agent,
+          description: task.task,
+        })),
+      };
+  }
+}
+
+function formatTaskList(values: readonly string[], empty: string, maxItems = 40): string {
+  const uniqueValues = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  if (uniqueValues.length === 0) {
+    return empty;
+  }
+
+  const visible = uniqueValues.slice(0, maxItems).map((value) => `- ${value}`);
+  const hiddenCount = uniqueValues.length - visible.length;
+  return [
+    ...visible,
+    ...(hiddenCount > 0 ? [`- ...and ${hiddenCount} more`] : []),
+  ].join("\n");
+}
+
+function normalizeApiFilePath(apiPath: string): string {
+  return apiPath.replace(/^\/+/, "");
+}
+
+function buildPlanSpecSourceOfTruthInstructions(runtime: TextGeneratorRuntime): string {
+  return [
+    "Source of truth and boundaries:",
+    `- Read the validated plan spec from /${workspaceRelativePath("plan-spec.json")}.`,
+    `- Read the interaction contract from /${workspaceRelativePath("interaction-contract.json")}.`,
+    `- Read generated architecture guidance from /${workspaceRelativePath("references/generated-app-architecture.md")}.`,
+    runtime.designPath ? "- Read DESIGN.md before editing UI files." : "",
+    "- Do not modify host-managed .workspace artifacts.",
+    "- Do not run shell validation commands; host validation runs after generation.",
+  ].filter(Boolean).join("\n");
+}
+
+export function buildPiParallelGenerationTaskItems(
+  planSpec: PlanSpec,
+  runtime: TextGeneratorRuntime,
+): PiTaskItem[] {
+  const apiPaths = Array.from(new Set(planSpec.apis.map((api) => normalizeApiFilePath(api.path))));
+  const pageRoutes = Array.from(new Set(planSpec.pages.map((page) => page.route)));
+  const resourceNames = Array.from(new Set(planSpec.resources.map((resource) => resource.name)));
+  const sourceInstructions = buildPlanSpecSourceOfTruthInstructions(runtime);
+
+  return [
+    {
+      agent: "backend-implementer",
+      task: [
+        "Implement the backend/data slice for the validated planSpec.",
+        sourceInstructions,
+        "",
+        "Owned scope:",
+        "- Prisma schema, seed data, server-side helpers, and API route handlers needed by the planned app.",
+        "- API route files:",
+        formatTaskList(apiPaths, "- No dedicated API route files were planned; inspect planSpec before deciding whether backend work is needed."),
+        "- Resources:",
+        formatTaskList(resourceNames, "- No resources were planned."),
+        "",
+        "Do not edit page/component/style files except for tiny server-contract compatibility notes if unavoidable. Return files touched, work completed, blockers, and validation gaps.",
+      ].join("\n"),
+    },
+    {
+      agent: "frontend-implementer",
+      task: [
+        "Implement the frontend/page slice for the validated planSpec.",
+        sourceInstructions,
+        "",
+        "Owned scope:",
+        "- App Router page routes, client interactions, navigation, layout components, and UI styles needed by the planned app.",
+        "- Page routes:",
+        formatTaskList(pageRoutes, "- No dedicated page routes were planned; inspect planSpec before deciding whether frontend work is needed."),
+        "",
+        "Use the planned API route contracts for business data. Do not edit Prisma schema, seed data, or API route handlers. Return files touched, work completed, blockers, and validation gaps.",
+      ].join("\n"),
+    },
+    {
+      agent: "integration-verifier",
+      task: [
+        "Inspect integration coverage while backend and frontend slices run.",
+        sourceInstructions,
+        "",
+        "Owned scope:",
+        "- Prefer read-only inspection of planSpec coverage, API/page mapping, report requirements, and obvious file gaps.",
+        "- Only make narrow edits to app-builder-report.md or small wiring fixes when the ownership is unambiguous.",
+        "- Planned page routes:",
+        formatTaskList(pageRoutes, "- No dedicated page routes were planned."),
+        "- Planned API route files:",
+        formatTaskList(apiPaths, "- No dedicated API route files were planned."),
+        "",
+        "Return missing coverage, likely merge conflicts, files touched, and validation gaps. Do not run shell validation commands.",
+      ].join("\n"),
+    },
+  ];
+}
+
+function buildParallelGenerationFinalizerSystemPrompt(baseSystemPrompt: string): string {
+  return [
+    baseSystemPrompt,
+    "",
+    "## Host-Run Parallel Subagents",
+    "",
+    "The host has already launched backend, frontend, and integration subagents before this final merge pass.",
+    "First inspect their reported results in the payload. Then merge, resolve conflicts, fill any remaining gaps, update app-builder-report.md, and return the structured generation response.",
+    "Do not restart from the original PRD. Do not discard completed child-agent work. Only call additional task subagents if a new, clearly independent gap remains after reviewing the host-run results.",
+  ].join("\n");
+}
+
+function isGenerationRuntimePhase(runtimePhase: RuntimeStatusPhase): boolean {
+  return runtimePhase === "generate" || runtimePhase === "generateRepair" || runtimePhase === "generate_repair";
+}
+
+function toPiTaskSubagentSpecs(subagents: readonly Record<string, unknown>[]): PiTaskSubagentSpec[] {
+  return subagents
+    .map((subagent): PiTaskSubagentSpec | null => {
+      const name = typeof subagent.name === "string" ? subagent.name.trim() : "";
+      const systemPrompt = typeof subagent.systemPrompt === "string" ? subagent.systemPrompt.trim() : "";
+      if (!name || !systemPrompt) {
+        return null;
+      }
+
+      return {
+        name,
+        description: typeof subagent.description === "string" ? subagent.description.trim() : "",
+        systemPrompt,
+      };
+    })
+    .filter((subagent): subagent is PiTaskSubagentSpec => subagent !== null);
+}
+
+function buildPiTaskAgentAliases(subagents: readonly PiTaskSubagentSpec[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const names = new Set(subagents.map((subagent) => subagent.name));
+  for (const subagent of subagents) {
+    aliases.set(subagent.name, subagent.name);
+  }
+
+  const maybeAddAlias = (alias: string, target: string) => {
+    if (names.has(target) && !aliases.has(alias)) {
+      aliases.set(alias, target);
+    }
+  };
+
+  maybeAddAlias("frontend-fixer", "frontend-implementer");
+  maybeAddAlias("backend-fixer", "backend-implementer");
+  maybeAddAlias("verifier", "integration-verifier");
+  maybeAddAlias("integration-fixer", "integration-verifier");
+
+  return aliases;
+}
+
+function resolvePiTaskSubagent(
+  requestedAgent: string,
+  subagents: readonly PiTaskSubagentSpec[],
+): PiTaskSubagentSpec | undefined {
+  const aliases = buildPiTaskAgentAliases(subagents);
+  const resolvedName = aliases.get(requestedAgent);
+  return subagents.find((subagent) => subagent.name === (resolvedName ?? requestedAgent));
+}
+
+function getPiTaskAvailableAgentNames(subagents: readonly PiTaskSubagentSpec[]): string[] {
+  const aliases = buildPiTaskAgentAliases(subagents);
+  return Array.from(new Set([...subagents.map((subagent) => subagent.name), ...aliases.keys()])).sort();
+}
+
+function buildPiSubagentSystemPrompt(subagent: PiTaskSubagentSpec, runtimePhase: RuntimeStatusPhase): string {
+  return [
+    subagent.systemPrompt,
+    "",
+    "## Pi task compatibility rules",
+    "",
+    `- This is an isolated Pi child session launched by the app-builder \`${PI_AGENT_TASK_TOOL_NAME}\` compatibility tool during ${runtimePhase}.`,
+    "- The generated app root is the current working directory. Treat paths beginning with `/` as app-root-relative virtual paths.",
+    "- Execute only the delegated task. Do not broaden requirements, redefine planSpec, modify host-managed `.workspace` artifacts, or perform unrelated cleanup.",
+    "- Do not call nested subagents/task tools. This child session has no task tool by design.",
+    "- Do not run shell validation commands (`pnpm`, `npm`, `node`, `tsc`, `test`, `dev`, `build`, `lint`, `prisma`, `migrate`, browser checks, etc.).",
+    "- Return a concise final report with files touched, work completed, blockers, and validation gaps.",
+  ].join("\n");
+}
+
+function buildPiSubagentPrompt(task: string): string {
+  return [
+    "Execute the delegated app-builder subtask below.",
+    "",
+    "Delegated task:",
+    task,
+    "",
+    "Remember: stay inside the assigned files/responsibility scope and return only a concise final report.",
+  ].join("\n");
+}
+
+function createRunningPiTaskResult(
+  subagent: PiTaskSubagentSpec,
+  requestedAgent: string,
+  task: string,
+): PiTaskSingleResult {
+  return {
+    agent: subagent.name,
+    ...(requestedAgent !== subagent.name ? { requestedAgent } : {}),
+    task,
+    status: "running",
+    output: "Subagent is running...",
+  };
+}
+
+async function runPiTaskSubagent(request: PiTaskRunnerRequest): Promise<PiTaskSingleResult> {
+  if (!request.authStorage || !request.modelRegistry || !request.model) {
+    return {
+      agent: request.subagent.name,
+      ...(request.requestedAgent !== request.subagent.name ? { requestedAgent: request.requestedAgent } : {}),
+      task: request.task,
+      status: "failed",
+      output: "Pi task subagent runtime is missing model/auth services.",
+      error: "Missing Pi child-session dependencies.",
+    };
+  }
+
+  const settingsManager = SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: true, maxRetries: 1 },
+    defaultProvider: request.model.provider,
+    defaultModel: request.model.id,
+    defaultThinkingLevel: resolvePiThinkingLevel(request.effort),
+    terminal: { showTerminalProgress: false },
+  });
+  const resourceLoader = createPiResourceLoader({
+    runtime: request.runtime,
+    systemPrompt: buildPiSubagentSystemPrompt(request.subagent, request.runtimePhase),
+    settingsManager,
+    ...(request.skillsDirectory ? { skillsDirectory: request.skillsDirectory } : {}),
+  });
+  await resourceLoader.reload();
+
+  const { session } = await createAgentSession({
+    cwd: request.runtime.outputDirectory,
+    agentDir: path.join(request.runtime.deepagentsDirectory, "pi-agent"),
+    authStorage: request.authStorage,
+    modelRegistry: request.modelRegistry,
+    model: request.model,
+    thinkingLevel: resolvePiThinkingLevel(request.effort),
+    resourceLoader,
+    settingsManager,
+    sessionManager: SessionManager.inMemory(request.runtime.outputDirectory),
+    tools: [...PI_AGENT_SUBAGENT_TOOLS],
+  });
+
+  let finalMessages: readonly unknown[] = [];
+  let eventQueue = Promise.resolve();
+  let eventError: unknown;
+  let textBuffer = "";
+  let lastUpdateAt = 0;
+  const started = createRunningPiTaskResult(request.subagent, request.requestedAgent, request.task);
+
+  const emitUpdate = (result: PiTaskSingleResult) => {
+    request.onUpdate?.({
+      content: [{ type: "text", text: truncatePiTaskOutput(result.output || "Subagent is running...", 4_000) }],
+      details: request.makeDetails([result]),
+    });
+  };
+
+  const maybeEmitTextProgress = () => {
+    const now = Date.now();
+    if (textBuffer.length < 300 && now - lastUpdateAt < 15_000) {
+      return;
+    }
+    lastUpdateAt = now;
+    emitUpdate({
+      ...started,
+      output: textBuffer.trim() || "Subagent is generating a response...",
+    });
+  };
+
+  const unsubscribe = session.subscribe((event) => {
+    eventQueue = eventQueue
+      .then(async () => {
+        if (event.type === "message_update") {
+          const assistantEvent = event.assistantMessageEvent;
+          if (assistantEvent.type === "text_delta" && assistantEvent.delta.trim()) {
+            textBuffer += assistantEvent.delta;
+            maybeEmitTextProgress();
+          } else if (assistantEvent.type === "toolcall_end") {
+            emitUpdate({
+              ...started,
+              output: `Subagent called ${assistantEvent.toolCall.name}.`,
+            });
+          }
+          return;
+        }
+
+        if (event.type === "tool_execution_start") {
+          emitUpdate({
+            ...started,
+            output: `Subagent started ${event.toolName}.`,
+          });
+          return;
+        }
+
+        if (event.type === "tool_execution_update") {
+          emitUpdate({
+            ...started,
+            output: `Subagent is running ${event.toolName}.`,
+          });
+          return;
+        }
+
+        if (event.type === "tool_execution_end") {
+          emitUpdate({
+            ...started,
+            output: event.isError ? `Subagent ${event.toolName} failed.` : `Subagent completed ${event.toolName}.`,
+          });
+          return;
+        }
+
+        if (event.type === "agent_end") {
+          finalMessages = event.messages;
+        }
+      })
+      .catch((error: unknown) => {
+        eventError = eventError ?? error;
+      });
+  });
+
+  const abortChild = () => {
+    void session.abort().catch(() => {
+      // Best-effort cancellation; the parent run will surface the original abort/timeout.
+    });
+  };
+  if (request.signal?.aborted) {
+    abortChild();
+  } else {
+    request.signal?.addEventListener("abort", abortChild, { once: true });
+  }
+
+  try {
+    emitUpdate(started);
+    await withActivityTimeout(
+      async (signalActivity) => {
+        const activityUnsubscribe = session.subscribe(() => {
+          signalActivity();
+        });
+        try {
+          signalActivity();
+          await session.prompt(buildPiSubagentPrompt(request.task), { source: "extension" });
+          await eventQueue;
+        } finally {
+          activityUnsubscribe();
+        }
+      },
+      PI_AGENT_IDLE_TIMEOUT_MS,
+      `pi ${PI_AGENT_TASK_TOOL_NAME} subagent ${request.subagent.name}`,
+    );
+
+    if (eventError) {
+      throw eventError;
+    }
+
+    const output = truncatePiTaskOutput(
+      extractPiAssistantText(finalMessages.length > 0 ? finalMessages : session.messages) ||
+        textBuffer ||
+        "(subagent returned no text)",
+    );
+
+    return {
+      agent: request.subagent.name,
+      ...(request.requestedAgent !== request.subagent.name ? { requestedAgent: request.requestedAgent } : {}),
+      task: request.task,
+      status: "completed",
+      output,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      agent: request.subagent.name,
+      ...(request.requestedAgent !== request.subagent.name ? { requestedAgent: request.requestedAgent } : {}),
+      task: request.task,
+      status: "failed",
+      output: message,
+      error: message,
+    };
+  } finally {
+    request.signal?.removeEventListener("abort", abortChild);
+    unsubscribe();
+    session.dispose();
+  }
+}
+
+async function mapWithPiTaskConcurrencyLimit<TIn, TOut>(
+  items: readonly TIn[],
+  concurrency: number,
+  callback: (item: TIn, index: number) => Promise<TOut>,
+): Promise<TOut[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results: TOut[] = new Array(items.length);
+  let nextIndex = 0;
+
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      for (;;) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= items.length) {
+          return;
+        }
+        results[index] = await callback(items[index] as TIn, index);
+      }
+    }),
+  );
+
+  return results;
+}
+
+function formatPiTaskResultMarkdown(result: PiTaskSingleResult): string {
+  const requested = result.requestedAgent ? ` (requested: ${result.requestedAgent})` : "";
+  const heading = `### [${result.agent}] ${result.status}${requested}`;
+  const body = result.output || result.error || "(no output)";
+  return `${heading}\n\n${truncatePiTaskOutput(body, 8_000)}`;
+}
+
+function buildPiTaskPromptGuidelines(subagents: readonly PiTaskSubagentSpec[]): string[] {
+  const available = subagents
+    .map((subagent) => `\`${subagent.name}\`${subagent.description ? ` — ${subagent.description}` : ""}`)
+    .join("; ");
+  const aliases = Array.from(buildPiTaskAgentAliases(subagents).entries())
+    .filter(([alias, target]) => alias !== target)
+    .map(([alias, target]) => `\`${alias}\` -> \`${target}\``)
+    .join(", ");
+
+  return [
+    `Use \`${PI_AGENT_TASK_TOOL_NAME}\` only for bounded, genuinely parallel generation or generation-repair slices with non-overlapping ownership.`,
+    `Available app-builder subagents: ${available || "none"}.`,
+    ...(aliases ? [`Accepted compatibility aliases: ${aliases}.`] : []),
+    "Use DeepAgents-compatible single-call arguments: `subagent_type` plus `description`.",
+    "You may also pass `tasks: [{ subagent_type, description }]` for bounded parallel fanout or `chain: [...]` for sequential delegation.",
+    "Every delegated description must include the exact file/path or responsibility scope, the planSpec-only source-of-truth rule, no shell validation, and concise final-report expectations.",
+    "The main agent remains responsible for merging subagent results, resolving conflicts, maintaining todo state, and returning the final structured response.",
+  ];
+}
+
+export function createPiTaskCompatibilityTool(options: {
+  runtime: TextGeneratorRuntime;
+  runtimePhase: RuntimeStatusPhase;
+  subagents: readonly Record<string, unknown>[];
+  authStorage?: AuthStorage | undefined;
+  modelRegistry?: ModelRegistry | undefined;
+  model?: PiResolvedModel | undefined;
+  effort?: TemplatePhaseEffort | undefined;
+  skillsDirectory?: string | undefined;
+  runTask?: PiTaskRunner | undefined;
+}): ToolDefinition {
+  const subagents = toPiTaskSubagentSpecs(options.subagents);
+  const availableAgents = getPiTaskAvailableAgentNames(subagents);
+  const runner = options.runTask ?? runPiTaskSubagent;
+  const makeDetails = (mode: PiTaskMode) => (results: PiTaskSingleResult[]): PiTaskToolDetails => ({
+    mode,
+    results,
+    availableAgents,
+  });
+
+  const executeTask = async (
+    item: PiTaskItem,
+    mode: PiTaskMode,
+    signal: AbortSignal | undefined,
+    onUpdate: PiTaskRunnerRequest["onUpdate"],
+  ): Promise<PiTaskSingleResult> => {
+    const subagent = resolvePiTaskSubagent(item.agent, subagents);
+    if (!subagent) {
+      return {
+        agent: item.agent,
+        task: item.task,
+        status: "failed",
+        output: `Unknown subagent "${item.agent}". Available agents: ${availableAgents.join(", ") || "none"}.`,
+        error: "Unknown subagent.",
+      };
+    }
+
+    return runner({
+      runtime: options.runtime,
+      runtimePhase: options.runtimePhase,
+      subagent,
+      requestedAgent: item.agent,
+      task: item.task,
+      authStorage: options.authStorage,
+      modelRegistry: options.modelRegistry,
+      model: options.model,
+      effort: options.effort,
+      skillsDirectory: options.skillsDirectory,
+      signal,
+      onUpdate,
+      makeDetails: makeDetails(mode),
+    });
+  };
+
+  return defineTool({
+    name: PI_AGENT_TASK_TOOL_NAME,
+    label: "Task",
+    description: "Delegate bounded app-builder generation work to an isolated Pi child agent. Compatible with DeepAgents task-style subagent calls.",
+    promptSnippet: "Delegate bounded generation work to an isolated Pi child subagent",
+    promptGuidelines: buildPiTaskPromptGuidelines(subagents),
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        subagent_type: { type: "string", description: "Name of the subagent for single-task mode." },
+        subagentType: { type: "string", description: "Compatibility alias for subagent_type." },
+        agent: { type: "string", description: "Compatibility alias for subagent_type." },
+        description: { type: "string", description: "Delegated task description for single-task mode." },
+        task: { type: "string", description: "Compatibility alias for description." },
+        tasks: {
+          type: "array",
+          maxItems: PI_TASK_MAX_PARALLEL_TASKS,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              subagent_type: { type: "string" },
+              subagentType: { type: "string" },
+              agent: { type: "string" },
+              description: { type: "string" },
+              task: { type: "string" },
+            },
+          },
+          description: "Parallel tasks. Use only for non-overlapping file/responsibility scopes.",
+        },
+        chain: {
+          type: "array",
+          maxItems: PI_TASK_MAX_PARALLEL_TASKS,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              subagent_type: { type: "string" },
+              subagentType: { type: "string" },
+              agent: { type: "string" },
+              description: { type: "string" },
+              task: { type: "string" },
+            },
+          },
+          description: "Sequential delegated tasks. Later descriptions may include {previous}.",
+        },
+      },
+    } as never,
+    prepareArguments: (args: unknown) => preparePiTaskToolArguments(args) as never,
+    executionMode: "parallel",
+    async execute(_toolCallId, params, signal, onUpdate) {
+      if (!isGenerationRuntimePhase(options.runtimePhase)) {
+        const details = makeDetails("single")([]);
+        return {
+          content: [{ type: "text", text: "The task tool is only enabled for app-builder generation phases." }],
+          details,
+          isError: true,
+        };
+      }
+
+      const normalized = normalizePiTaskToolCallArgs(params);
+      if (!normalized) {
+        const details = makeDetails("single")([]);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Invalid task parameters. Provide exactly one of {subagent_type, description}, tasks[], or chain[]. Available agents: ${availableAgents.join(", ") || "none"}.`,
+            },
+          ],
+          details,
+          isError: true,
+        };
+      }
+
+      if (normalized.mode === "parallel") {
+        if (normalized.tasks.length > PI_TASK_MAX_PARALLEL_TASKS) {
+          const details = makeDetails("parallel")([]);
+          return {
+            content: [{ type: "text", text: `Too many parallel tasks (${normalized.tasks.length}). Max is ${PI_TASK_MAX_PARALLEL_TASKS}.` }],
+            details,
+            isError: true,
+          };
+        }
+
+        const results = await mapWithPiTaskConcurrencyLimit(
+          normalized.tasks,
+          PI_TASK_MAX_CONCURRENCY,
+          async (item, index) => {
+            const result = await executeTask(
+              item,
+              "parallel",
+              signal,
+              onUpdate
+                ? (partial) => {
+                    const partialResults = [...(partial.details.results ?? [])];
+                    partialResults[0] = partial.details.results[0] ?? createRunningPiTaskResult(
+                      resolvePiTaskSubagent(item.agent, subagents) ?? { name: item.agent, description: "", systemPrompt: "" },
+                      item.agent,
+                      item.task,
+                    );
+                    onUpdate({
+                      content: partial.content,
+                      details: makeDetails("parallel")(
+                        partialResults.map((candidate, candidateIndex) =>
+                          candidateIndex === 0 ? { ...candidate, task: candidate.task || item.task } : candidate
+                        ),
+                      ),
+                    });
+                  }
+                : undefined,
+            );
+            return { ...result, output: result.output || `Parallel task ${index + 1} completed.` };
+          },
+        );
+        const successCount = results.filter((result) => result.status === "completed").length;
+        const details = makeDetails("parallel")(results);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Parallel tasks: ${successCount}/${results.length} completed\n\n${results.map(formatPiTaskResultMarkdown).join("\n\n---\n\n")}`,
+            },
+          ],
+          details,
+          isError: successCount !== results.length,
+        };
+      }
+
+      if (normalized.mode === "chain") {
+        const results: PiTaskSingleResult[] = [];
+        let previousOutput = "";
+        for (const item of normalized.chain) {
+          const task = item.task.replace(/\{previous\}/g, previousOutput);
+          const result = await executeTask({ ...item, task }, "chain", signal, onUpdate);
+          results.push(result);
+          previousOutput = result.output;
+          if (result.status !== "completed") {
+            const details = makeDetails("chain")(results);
+            return {
+              content: [{ type: "text", text: `Chain stopped at ${result.agent}: ${result.output}` }],
+              details,
+              isError: true,
+            };
+          }
+        }
+
+        const details = makeDetails("chain")(results);
+        return {
+          content: [{ type: "text", text: results.at(-1)?.output || "(no output)" }],
+          details,
+        };
+      }
+
+      const result = await executeTask(
+        { agent: normalized.agent, task: normalized.task },
+        "single",
+        signal,
+        onUpdate,
+      );
+      const details = makeDetails("single")([result]);
+      return {
+        content: [{ type: "text", text: result.output || "(no output)" }],
+        details,
+        isError: result.status !== "completed",
+      };
+    },
+  });
+}
+
 function createPiResourceLoader(options: {
   runtime: TextGeneratorRuntime;
   systemPrompt: string;
@@ -3309,7 +4147,9 @@ async function createPiSessionForPhase<T>(options: {
   systemPrompt: string;
   responseSchema: z.ZodType<T>;
   modelConfig: ModelRoleConfig;
+  runtimePhase: RuntimeStatusPhase;
   effort?: TemplatePhaseEffort | undefined;
+  projectConfigGuardPrompt?: string | undefined;
   skillsDirectory?: string | undefined;
 }): Promise<{ session: AgentSession; structuredResponse: PiStructuredResponseBox }> {
   const structuredResponse: PiStructuredResponseBox = {};
@@ -3341,6 +4181,36 @@ async function createPiSessionForPhase<T>(options: {
     ...(options.skillsDirectory ? { skillsDirectory: options.skillsDirectory } : {}),
   });
   await resourceLoader.reload();
+  const taskSubagents = isGenerationRuntimePhase(options.runtimePhase)
+    ? buildGenerationSubagents(
+        options.runtimePhase,
+        Boolean(options.skillsDirectory),
+        options.projectConfigGuardPrompt ?? "",
+      )
+    : [];
+  const taskTool = taskSubagents.length > 0
+    ? createPiTaskCompatibilityTool({
+        runtime: options.runtime,
+        runtimePhase: options.runtimePhase,
+        subagents: taskSubagents,
+        authStorage,
+        modelRegistry,
+        model,
+        effort: options.effort,
+        ...(options.skillsDirectory ? { skillsDirectory: options.skillsDirectory } : {}),
+      })
+    : undefined;
+  const toolNames = [
+    ...PI_AGENT_DEFAULT_TOOLS,
+    ...(taskTool ? [PI_AGENT_TASK_TOOL_NAME] : []),
+    PI_AGENT_WRITE_TODOS_TOOL_NAME,
+    PI_AGENT_STRUCTURED_RESPONSE_TOOL_NAME,
+  ];
+  const customTools = [
+    ...(taskTool ? [taskTool] : []),
+    createPiWriteTodosTool(options.runtime),
+    createPiStructuredResponseTool(options.responseSchema, structuredResponse),
+  ];
 
   const result = await createAgentSession({
     cwd: options.runtime.outputDirectory,
@@ -3352,11 +4222,8 @@ async function createPiSessionForPhase<T>(options: {
     resourceLoader,
     settingsManager,
     sessionManager: SessionManager.inMemory(options.runtime.outputDirectory),
-    tools: [...PI_AGENT_DEFAULT_TOOLS, PI_AGENT_WRITE_TODOS_TOOL_NAME, PI_AGENT_STRUCTURED_RESPONSE_TOOL_NAME],
-    customTools: [
-      createPiWriteTodosTool(options.runtime),
-      createPiStructuredResponseTool(options.responseSchema, structuredResponse),
-    ],
+    tools: toolNames,
+    customTools,
   });
 
   return { session: result.session, structuredResponse };
@@ -3384,6 +4251,123 @@ export function buildPiStructuredPrompt<T>(payload: Record<string, unknown>, sch
     JSON.stringify(z.toJSONSchema(schema), null, 2),
     "```",
   ].join("\n");
+}
+
+async function appendPiHostParallelTaskMetric(
+  runtime: TextGeneratorRuntime,
+  input: {
+    task: PiTaskItem;
+    result: PiTaskSingleResult;
+    startedAt: Date;
+    completedAt: Date;
+    startedHr: bigint;
+  },
+): Promise<void> {
+  await appendWorkflowMetricRecord(
+    runtime.deepagentsMetricsLogPath,
+    buildWorkflowMetricRecord({
+      sessionId: runtime.sessionId,
+      metric: {
+        name: `generate.parallel_subagent.${input.task.agent}`,
+        phase: "generate",
+        ...(runtime.generateAttempt !== undefined ? { attempt: runtime.generateAttempt } : {}),
+        metadata: {
+          agent: input.result.agent,
+          requestedAgent: input.result.requestedAgent ?? input.task.agent,
+          task: input.task.task,
+          status: input.result.status,
+          outputPreview: truncatePiTaskOutput(input.result.output, 1_000),
+        },
+      },
+      status: input.result.status === "completed" ? "success" : "failure",
+      startedAt: input.startedAt,
+      completedAt: input.completedAt,
+      startedHr: input.startedHr,
+      ...(input.result.error ? { error: input.result.error } : {}),
+    }),
+  );
+}
+
+async function runPiHostParallelGenerationSubagents(options: {
+  planSpec: PlanSpec;
+  runtime: TextGeneratorRuntime;
+  modelConfig: ModelRoleConfig;
+  effort?: TemplatePhaseEffort | undefined;
+  projectConfigGuardPrompt?: string | undefined;
+  skillsDirectory?: string | undefined;
+}): Promise<PiHostParallelGenerationResult[]> {
+  const { authStorage, modelRegistry } = createPiModelRegistry(options.modelConfig);
+  const modelName = resolvePiModelName(options.modelConfig);
+  const provider = resolvePiProvider(options.modelConfig);
+  const model =
+    modelRegistry.find(provider, modelName) ??
+    modelRegistry.getAll().find((candidate) => candidate.id === modelName);
+
+  if (!model) {
+    throw new Error(
+      `Pi Agent model not found for ${provider}:${modelName}. Set APP_BUILDER_MODEL/APP_BUILDER_PROTOCOL to a Pi-supported model.`,
+    );
+  }
+
+  const subagents = toPiTaskSubagentSpecs(
+    buildGenerationSubagents(
+      "generate",
+      Boolean(options.skillsDirectory),
+      options.projectConfigGuardPrompt ?? "",
+    ),
+  );
+  const tasks = buildPiParallelGenerationTaskItems(options.planSpec, options.runtime);
+
+  await appendWorkflowLog(`[host] 启动宿主并行生成 subagent：${tasks.map((task) => task.agent).join(", ")}。`);
+
+  return await Promise.all(tasks.map(async (task) => {
+    const startedAt = new Date();
+    const startedHr = process.hrtime.bigint();
+    const subagent = resolvePiTaskSubagent(task.agent, subagents);
+    let result: PiTaskSingleResult;
+
+    if (!subagent) {
+      result = {
+        agent: task.agent,
+        task: task.task,
+        status: "failed",
+        output: `Unknown subagent "${task.agent}".`,
+        error: "Unknown subagent.",
+      };
+    } else {
+      result = await runPiTaskSubagent({
+        runtime: options.runtime,
+        runtimePhase: "generate",
+        subagent,
+        requestedAgent: task.agent,
+        task: task.task,
+        authStorage,
+        modelRegistry,
+        model,
+        effort: options.effort,
+        skillsDirectory: options.skillsDirectory,
+        makeDetails: (results) => ({
+          mode: "parallel",
+          results,
+          availableAgents: subagents.map((candidate) => candidate.name),
+        }),
+      });
+    }
+
+    await appendPiHostParallelTaskMetric(options.runtime, {
+      task,
+      result,
+      startedAt,
+      completedAt: new Date(),
+      startedHr,
+    });
+
+    await appendWorkflowLog(
+      `[host] subagent ${task.agent} ${result.status === "completed" ? "完成" : "失败"}：${truncatePiTaskOutput(result.output, 500)}`,
+    );
+
+    return { task, result };
+  }));
 }
 
 function extractPiAssistantText(messages: readonly unknown[]): string {
@@ -3552,7 +4536,9 @@ export class PiTextGenerator implements TextGenerator {
       systemPrompt,
       responseSchema: options.responseSchema,
       modelConfig,
+      runtimePhase,
       effort,
+      projectConfigGuardPrompt,
       ...(hasTemplateSkills ? { skillsDirectory } : {}),
     });
 
@@ -3589,6 +4575,7 @@ export class PiTextGenerator implements TextGenerator {
         systemPrompt: REFERENCE_MARKDOWN_CONVERSION_SYSTEM_PROMPT,
         responseSchema: referenceMarkdownConversionSchema,
         modelConfig,
+        runtimePhase: "plan",
         effort: runtime.templatePhases.plan?.effort,
       });
       const payload = {
@@ -3750,6 +4737,91 @@ export class PiTextGenerator implements TextGenerator {
             maxRetries: runtime.maxGenerateRetries ?? 0,
             repairMode: false,
             retryReasons: runtime.retryReasons ?? [],
+          },
+          artifacts: {
+            analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),
+            ...buildOptionalDesignArtifact(runtime),
+            generatedSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsDetailedSpecPath),
+            planSpec: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanSpecPath),
+            interactionContract: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsInteractionContractPath),
+            referenceManifest: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsReferenceManifestPath),
+            generationValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsGenerationValidationPath),
+            runtimeValidationLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeValidationLogPath),
+            runtimeInteractionValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsRuntimeInteractionValidationPath),
+            planValidation: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsPlanValidationPath),
+            report: "/app-builder-report.md",
+            errorLog: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsErrorLogPath),
+          },
+        },
+      });
+    } catch (error) {
+      await writeErrorLog(runtime.deepagentsErrorLogPath, error);
+      throw error;
+    }
+  }
+
+  async generateProjectWithParallelAgents(planSpec: PlanSpec, runtime: TextGeneratorRuntime): Promise<GeneratedProject> {
+    try {
+      const generatePromptPath =
+        runtime.templateGeneratePromptPath ??
+        await resolveTemplateFilePath("full-stack", "prompts/generate-system-prompt.md");
+      const modelConfig = runtime.modelRoles?.generate ?? this.modelRoles.generate;
+      const effort = resolveEffortForRuntimePhase(runtime, "generate");
+      const projectConfigGuardPrompt = buildProjectConfigGuardPrompt(runtime, planSpec);
+      const skillsDirectory = path.join(runtime.templateDirectory, "skills");
+      const hasTemplateSkills = await pathExists(skillsDirectory);
+      const parallelResults = await runPiHostParallelGenerationSubagents({
+        planSpec,
+        runtime,
+        modelConfig,
+        effort,
+        projectConfigGuardPrompt,
+        ...(hasTemplateSkills ? { skillsDirectory } : {}),
+      });
+
+      const baseSystemPrompt = await loadSystemPrompt(runtime, generatePromptPath, "generate");
+      const systemPrompt = buildParallelGenerationFinalizerSystemPrompt(baseSystemPrompt);
+
+      return await this.runPhase(runtime, {
+        systemPrompt,
+        promptSnapshotPath: runtime.deepagentsGeneratePromptSnapshotPath,
+        responseSchema: generatedProjectSchema,
+        stage: "generate",
+        runtimePhase: "generate",
+        timeoutLabel: "pi agent parallel generation finalizer",
+        payload: {
+          stage: "生成阶段",
+          planSpec,
+          parallelGeneration: {
+            mode: "host_parallel_subagents",
+            requiredBeforeFinalizer: true,
+            results: parallelResults.map(({ task, result }) => ({
+              requestedAgent: task.agent,
+              agent: result.agent,
+              status: result.status,
+              task: task.task,
+              output: result.output,
+              ...(result.error ? { error: result.error } : {}),
+            })),
+          },
+          template: {
+            id: runtime.templateId,
+            name: runtime.templateName,
+            version: runtime.templateVersion,
+            directory: toVirtualWorkspacePath(runtime.outputDirectory, runtime.templateDirectory),
+            runtimeValidation: runtime.templateRuntimeValidation,
+            interactiveRuntimeValidation: runtime.templateInteractiveRuntimeValidation,
+            environmentPolicy: runtime.templateEnvironmentPolicy,
+            projectConfigPolicy: runtime.templateProjectConfigPolicy,
+          },
+          generationPolicy: {
+            dataMode: "rest_api",
+            requirePlanSpecAsOnlySourceOfTruth: true,
+            attempt: runtime.generateAttempt ?? 1,
+            maxRetries: runtime.maxGenerateRetries ?? 0,
+            repairMode: false,
+            retryReasons: runtime.retryReasons ?? [],
+            hostParallelSubagentsRequired: true,
           },
           artifacts: {
             analysis: toVirtualWorkspacePath(runtime.outputDirectory, runtime.deepagentsAnalysisPath),

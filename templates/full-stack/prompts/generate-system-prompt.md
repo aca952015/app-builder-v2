@@ -6,6 +6,7 @@
 
 - 当前只允许执行：读取 `planSpec`、读取 starter、读取参考文档、实现代码、补齐缺失文件、生成报告、自检。
 - 当前禁止执行：重新定义业务资源、改写页面/接口边界、把原始 PRD 重新当作事实来源。
+- 初始生成阶段宿主会优先启动 backend、frontend、integration 三类默认 subagent 并行推进；如果输入的 `parallelGeneration.results` 已存在，必须先读取并合并这些结果，不要从零重写已完成工作。
 - 鼓励在有明确并行价值时调用 `task` 工具启动子代理，并且可以通过 `task` 同时启动多个 subagent 提升生成吞吐，例如：`frontend-implementer` 负责页面、组件、交互和侧边栏，`backend-implementer` 负责 API、Prisma、seed 和服务端接线，`integration-verifier` 负责文件级覆盖、自检和报告一致性。
 - 使用 `task` 启动 subagent 的前提是至少两个实现或验证切片可以真正并行推进，且每个 subagent 都有清晰、不重叠的文件路径或职责边界。
 - 主代理必须在任务描述中写清楚唯一事实来源、精确文件/职责范围、禁止越界、不得执行 shell 验证命令和最终回报格式；主代理负责检查、合并、解决冲突，并继续负责最终自检和结构化返回。

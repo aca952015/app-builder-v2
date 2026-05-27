@@ -1,6 +1,6 @@
 # Apple Style Mini Program Design Specification
 
-> 适用范围：用于指导 LLM / 设计工具 / 前端开发生成 **Apple 风格的小程序移动端页面设计稿**。  
+> 适用范围：用于指导 LLM / 设计工具 / 前端开发生成 **Apple 风格的小程序移动端页面设计稿**。
 > 核心目标：输出干净、克制、可交付开发的 **平面 UI 页面**，而不是手机样机图、浏览器截图或带设备外框的展示图。
 
 ---
@@ -55,8 +55,8 @@
 
 每次生成界面时，都应默认遵守：
 
-> Render only the app page itself.  
-> Do not include phone frames, device bezels, hardware outlines, browser chrome, desktop windows, external containers, or any global scrollbar.  
+> Render only the app page itself.
+> Do not include phone frames, device bezels, hardware outlines, browser chrome, desktop windows, external containers, or any global scrollbar.
 > The result should look like a clean production-ready mobile UI screen, not a phone mockup.
 
 ---

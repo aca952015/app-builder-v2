@@ -39,14 +39,19 @@ import { prepareOutputWorkspace } from "../src/lib/output-workspace.js";
 import { buildSessionPolicyDocument } from "../src/lib/session-policy.js";
 import {
   buildHostManagedArtifactPermissions,
+  buildGenerationSubagents,
+  buildPiParallelGenerationTaskItems,
   buildPiStructuredPrompt,
   buildPlanProjectPayload,
   buildPlanRepairPayload,
+  createPiTaskCompatibilityTool,
   createHostManagedArtifactWriteGuardMiddleware,
   extractStructuredResponseFromPiText,
   HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS,
   isHostManagedWriteProtectedArtifactPath,
   mapPiToolPathToWorkspaceRelative,
+  normalizePiTaskToolCallArgs,
+  PiTextGenerator,
   runDeepAgentWithLogs,
   runPiAgentWithLogs,
   rewritePiToolPathInput,
@@ -1352,6 +1357,162 @@ test("runPiAgentWithLogs fails closed when Pi does not return schema-valid struc
     assert.equal(unsubscribeCount(), 1);
   } finally {
     await closeWorkflowBoard();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("normalizePiTaskToolCallArgs accepts DeepAgents and official subagent forms", () => {
+  assert.deepEqual(
+    normalizePiTaskToolCallArgs({
+      subagent_type: "frontend-implementer",
+      description: "实现订单列表页面",
+    }),
+    {
+      mode: "single",
+      agent: "frontend-implementer",
+      task: "实现订单列表页面",
+    },
+  );
+
+  assert.deepEqual(
+    normalizePiTaskToolCallArgs({
+      tasks: [
+        { agent: "backend-implementer", task: "实现订单 API" },
+        { subagentType: "integration-verifier", description: "检查文件覆盖" },
+      ],
+    }),
+    {
+      mode: "parallel",
+      tasks: [
+        { agent: "backend-implementer", task: "实现订单 API" },
+        { agent: "integration-verifier", task: "检查文件覆盖" },
+      ],
+    },
+  );
+
+  assert.equal(
+    normalizePiTaskToolCallArgs({
+      subagent_type: "frontend-implementer",
+      description: "单任务",
+      tasks: [{ agent: "backend-implementer", task: "并行任务" }],
+    }),
+    null,
+  );
+});
+
+test("PiTextGenerator exposes host-level parallel initial generation", () => {
+  const generator = new PiTextGenerator(resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "test-key",
+  }));
+
+  assert.equal(typeof generator.generateProjectWithParallelAgents, "function");
+});
+
+test("buildPiParallelGenerationTaskItems creates default backend frontend and verifier slices", () => {
+  const runtime = buildTestRuntimeForOutput("/virtual-output", {
+    designPath: "/virtual-output/DESIGN.md",
+  });
+  const tasks = buildPiParallelGenerationTaskItems(buildPlanSpec(), runtime);
+
+  assert.deepEqual(tasks.map((task) => task.agent), [
+    "backend-implementer",
+    "frontend-implementer",
+    "integration-verifier",
+  ]);
+  assert.match(tasks[0]?.task ?? "", /app\/api\/work-orders\/route\.ts/);
+  assert.match(tasks[1]?.task ?? "", /\/work-orders/);
+  assert.match(tasks[1]?.task ?? "", /Do not edit Prisma schema/);
+  assert.match(tasks[2]?.task ?? "", /Inspect integration coverage/);
+  assert.match(tasks[2]?.task ?? "", /Do not run shell validation commands/);
+});
+
+test("Pi task compatibility tool delegates DeepAgents-style task calls and blocks non-generation phases", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-pi-task-tool-"));
+  const runtime = buildTestRuntimeForOutput(tempRoot);
+  const calls: Array<{ requestedAgent: string; subagent: string; task: string; phase: string }> = [];
+  const updates: unknown[] = [];
+
+  try {
+    const tool = createPiTaskCompatibilityTool({
+      runtime,
+      runtimePhase: "generateRepair",
+      subagents: buildGenerationSubagents("generateRepair", false),
+      runTask: async (request) => {
+        calls.push({
+          requestedAgent: request.requestedAgent,
+          subagent: request.subagent.name,
+          task: request.task,
+          phase: request.runtimePhase,
+        });
+        request.onUpdate?.({
+          content: [{ type: "text", text: "partial child update" }],
+          details: request.makeDetails([
+            {
+              agent: request.subagent.name,
+              requestedAgent: request.requestedAgent,
+              task: request.task,
+              status: "running",
+              output: "partial child update",
+            },
+          ]),
+        });
+        return {
+          agent: request.subagent.name,
+          requestedAgent: request.requestedAgent,
+          task: request.task,
+          status: "completed",
+          output: "child completed",
+        };
+      },
+    });
+
+    const result = await tool.execute(
+      "task-1",
+      { subagent_type: "frontend-fixer", description: "修复订单页面渲染" } as never,
+      undefined,
+      (partial) => updates.push(partial),
+      {} as never,
+    );
+
+    assert.deepEqual(calls, [
+      {
+        requestedAgent: "frontend-fixer",
+        subagent: "frontend-implementer",
+        task: "修复订单页面渲染",
+        phase: "generateRepair",
+      },
+    ]);
+    assert.equal((result as unknown as Record<string, unknown>).isError, false);
+    assert.match(String(result.content[0]?.type === "text" ? result.content[0].text : ""), /child completed/);
+    assert.equal(updates.length, 1);
+
+    let blockedRunnerCalled = false;
+    const planTool = createPiTaskCompatibilityTool({
+      runtime,
+      runtimePhase: "plan",
+      subagents: buildGenerationSubagents("generate", false),
+      runTask: async (request) => {
+        blockedRunnerCalled = true;
+        return {
+          agent: request.subagent.name,
+          task: request.task,
+          status: "completed",
+          output: "should not run",
+        };
+      },
+    });
+    const blocked = await planTool.execute(
+      "task-2",
+      { subagent_type: "frontend-implementer", description: "不应在计划阶段执行" } as never,
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    assert.equal((blocked as unknown as Record<string, unknown>).isError, true);
+    assert.equal(blockedRunnerCalled, false);
+    assert.match(String(blocked.content[0]?.type === "text" ? blocked.content[0].text : ""), /only enabled/);
+  } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
@@ -5218,7 +5379,8 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(sessionAgents, /# Host Session Policy/);
     assert.match(sessionAgents, /acceptanceChecks\.target/);
     assert.doesNotMatch(sessionAgents, /Do not delegate to child agents or task-style fanout tools/);
-    assert.match(sessionAgents, /prefer using `task` to launch bounded child agents/);
+    assert.match(sessionAgents, /host may launch default backend, frontend, and integration subagents/);
+    assert.match(sessionAgents, /prefer using `task` to launch additional bounded child agents/);
     assert.match(sessionAgents, /frontend, backend, and verification slices/);
     assert.match(sessionAgents, /main agent remains responsible for merging/);
     assert.match(planPromptSnapshot, /artifacts\.planSpec/);
@@ -7955,6 +8117,8 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
   assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
   assert.doesNotMatch(generatePromptSource, /当前禁止执行：调用任何子代理/);
+  assert.match(generatePromptSource, /宿主会优先启动 backend、frontend、integration 三类默认 subagent/);
+  assert.match(generatePromptSource, /parallelGeneration\.results/);
   assert.match(generatePromptSource, /鼓励在有明确并行价值时调用 `task` 工具启动子代理/);
   assert.match(generatePromptSource, /通过 `task` 同时启动多个 subagent/);
   assert.match(generatePromptSource, /frontend-implementer/);

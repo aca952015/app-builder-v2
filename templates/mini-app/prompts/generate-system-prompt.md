@@ -10,6 +10,7 @@
 
 ## 并行 subagent 策略
 
+- 初始生成阶段宿主会优先启动 backend、frontend、integration 三类默认 subagent 并行推进；如果输入的 `parallelGeneration.results` 已存在，必须先读取并合并这些结果，不要从零重写已完成工作。
 - 鼓励在有明确并行价值时使用 `task` 工具启动 subagent，并且可以通过 `task` 同时启动多个 subagent 提升生成吞吐，例如：`frontend-implementer` 负责页面/交互，`backend-implementer` 负责 API/数据处理，`integration-verifier` 负责文件级覆盖、自检和报告一致性。
 - 使用 `task` 启动 subagent 时必须给出清晰且不重叠的文件路径或职责边界；主代理负责分配任务、整合结果、解决冲突，并最终返回结构化响应。
 - 不要把同一个文件、共享契约或同一处业务逻辑交给多个 subagent 并行修改；强耦合、小范围或顺序依赖工作由主代理直接完成。
