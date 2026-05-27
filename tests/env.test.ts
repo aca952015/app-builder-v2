@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -35,12 +35,14 @@ import {
   sanitizeModelRoleConfigs,
 } from "../src/lib/model-config.js";
 import {
+  closeWorkflowBoard,
   createTodoBoardRenderer,
   mergeWorkflowRuntimeStatus,
   parseTodoMarkdown,
   releaseWorkflowInputStream,
   resolveWorkflowStdoutMode,
   setWorkflowStdoutMode,
+  updateWorkflowBoard,
 } from "../src/lib/terminal-ui.js";
 import type { RuntimeUsageSummary, TextGeneratorRuntime } from "../src/lib/types.js";
 import {
@@ -1317,6 +1319,82 @@ test("parseTodoMarkdown reads the host-monitored workspace todo board", () => {
     ],
   );
   assert.equal(parseTodoMarkdown("# empty\n"), null);
+});
+
+test("updateWorkflowBoard clears the monitored todo file before phase changes", async () => {
+  const outputDirectory = await mkdtemp(path.join(os.tmpdir(), "app-builder-todo-phase-"));
+  const workspaceDirectory = path.join(outputDirectory, ".workspace");
+  const todoPath = path.join(workspaceDirectory, "todo.md");
+
+  try {
+    await mkdir(workspaceDirectory, { recursive: true });
+    await writeFile(todoPath, "- [~] stale plan todo\n", "utf8");
+
+    await updateWorkflowBoard({
+      stage: "计划阶段",
+      todos: [{ content: "读取 PRD 与模板上下文", status: "in_progress" }],
+      artifacts: [],
+      narrative: "进入计划阶段。",
+      outputDirectory,
+      runtimeStatus: { phase: "plan" },
+    });
+
+    assert.equal(parseTodoMarkdown(await readFile(todoPath, "utf8")), null);
+
+    await writeFile(todoPath, "- [~] live plan todo\n", "utf8");
+    await updateWorkflowBoard({
+      stage: "计划阶段",
+      todos: [{ content: "读取 PRD 与模板上下文", status: "in_progress" }],
+      artifacts: [],
+      narrative: "计划阶段继续。",
+      outputDirectory,
+      runtimeStatus: { phase: "plan" },
+    });
+
+    assert.deepEqual(parseTodoMarkdown(await readFile(todoPath, "utf8")), [
+      { content: "live plan todo", status: "in_progress" },
+    ]);
+
+    await writeFile(todoPath, "- [~] stale before plan repair\n", "utf8");
+    await updateWorkflowBoard({
+      stage: "计划阶段",
+      todos: [{ content: "修复计划阶段产物", status: "in_progress" }],
+      artifacts: [],
+      narrative: "进入计划修复。",
+      outputDirectory,
+      runtimeStatus: { phase: "planRepair" },
+    });
+
+    assert.equal(parseTodoMarkdown(await readFile(todoPath, "utf8")), null);
+
+    await writeFile(todoPath, "- [~] live plan repair todo\n", "utf8");
+    await updateWorkflowBoard({
+      stage: "计划阶段",
+      todos: [{ content: "修复计划阶段产物", status: "in_progress" }],
+      artifacts: [],
+      narrative: "计划修复继续。",
+      outputDirectory,
+      runtimeStatus: { phase: "planRepair" },
+    });
+
+    assert.deepEqual(parseTodoMarkdown(await readFile(todoPath, "utf8")), [
+      { content: "live plan repair todo", status: "in_progress" },
+    ]);
+
+    await updateWorkflowBoard({
+      stage: "生成阶段",
+      todos: [{ content: "读取已验证的 planSpec 与 starter", status: "in_progress" }],
+      artifacts: [],
+      narrative: "进入生成阶段。",
+      outputDirectory,
+      runtimeStatus: { phase: "generate" },
+    });
+
+    assert.equal(parseTodoMarkdown(await readFile(todoPath, "utf8")), null);
+  } finally {
+    await closeWorkflowBoard();
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
 });
 
 test("formatTodoHeader uses completed and total counts", () => {

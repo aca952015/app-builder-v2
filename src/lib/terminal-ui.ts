@@ -373,6 +373,54 @@ export function parseTodoMarkdown(markdown: string): TodoItem[] | null {
   return todos.length > 0 ? todos : null;
 }
 
+function formatClearedTodoMarkdown(): string {
+  return [
+    "# App Builder TODO",
+    "",
+    "<!-- Host-cleared phase boundary. Use write_todos to update this file. -->",
+    "",
+  ].join("\n");
+}
+
+export async function clearWorkspaceTodoFile(outputDirectory: string): Promise<void> {
+  const todoPath = path.join(outputDirectory, WORKSPACE_DIR_NAME, WORKSPACE_TODO_FILE_NAME);
+  await fs.mkdir(path.dirname(todoPath), { recursive: true });
+  await fs.writeFile(todoPath, formatClearedTodoMarkdown(), "utf8");
+}
+
+async function clearWorkspaceTodoFileIfPossible(outputDirectory: string | undefined): Promise<void> {
+  if (!outputDirectory) {
+    return;
+  }
+
+  try {
+    await clearWorkspaceTodoFile(outputDirectory);
+  } catch {
+    // Todo monitoring is best-effort UI state; a failed clear must not block generation.
+  }
+}
+
+function shouldClearTodoOnWorkflowUpdate(
+  previousState: TodoBoardState | null,
+  nextState: TodoBoardState,
+  runtimePhaseChanged: boolean,
+): boolean {
+  if (!nextState.outputDirectory) {
+    return false;
+  }
+
+  if (!previousState) {
+    return true;
+  }
+
+  return (
+    previousState.outputDirectory !== nextState.outputDirectory ||
+    previousState.sessionId !== nextState.sessionId ||
+    previousState.stage !== nextState.stage ||
+    runtimePhaseChanged
+  );
+}
+
 async function monitorTodoItems(state: TodoBoardState): Promise<TodoItem[]> {
   if (!state.outputDirectory) {
     return state.todos;
@@ -1795,10 +1843,14 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
     activeWorkflowStartedAt = Date.now();
   }
 
-  const previousRuntimeStatus = activeWorkflowState?.runtimeStatus;
+  const previousState = activeWorkflowState;
+  const previousRuntimeStatus = previousState?.runtimeStatus;
   const incomingRuntimeStatus = state.runtimeStatus;
   const runtimePhaseChanged =
     Boolean(incomingRuntimeStatus?.phase) && incomingRuntimeStatus?.phase !== previousRuntimeStatus?.phase;
+  if (shouldClearTodoOnWorkflowUpdate(previousState, state, runtimePhaseChanged)) {
+    await clearWorkspaceTodoFileIfPossible(state.outputDirectory);
+  }
   const runtimeStatus = mergeWorkflowRuntimeStatus(previousRuntimeStatus, incomingRuntimeStatus, state);
   const streamProgress = state.streamProgress
     ? runtimePhaseChanged
