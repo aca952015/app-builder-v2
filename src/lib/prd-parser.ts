@@ -267,18 +267,42 @@ function extractDocumentTitle(sections: ParsedSection[]): string {
   return "";
 }
 
+function isDocumentStructureHeading(raw: string): boolean {
+  const heading = cleanHeadingLabel(raw);
+  if (!heading) {
+    return true;
+  }
+
+  const normalized = heading.toLowerCase();
+  if (
+    /^(功能需求(?:列表)?|非功能性?需求|核心目标|技术栈建议|环境配置|开发优先级说明|项目概述|项目背景|用户流程|业务流程|api 参考|api参考)$/iu
+      .test(normalized)
+  ) {
+    return true;
+  }
+
+  if (
+    /(?:需求|要求|说明|配置|原则)$/u.test(heading) &&
+    !/(页面|界面|导航|看板|管理|监控|报表|报警|告警|管控|计划)/u.test(heading)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function extractFeatureHeadings(sections: ParsedSection[]): string[] {
   const seen = new Set<string>();
   const screens: string[] = [];
 
   for (const section of sections) {
     const cleanedHeading = cleanHeadingLabel(section.heading);
-    if (!cleanedHeading) {
+    if (!cleanedHeading || isDocumentStructureHeading(cleanedHeading)) {
       continue;
     }
 
     const featureKeywords =
-      /(screen|screens|page|pages|ui|interface|navigation|功能|模块|系统功能|信息架构|页面|监控|分析|计划|报警|告警|报表|设备|计量|管控)/i;
+      /(screen|screens|page|pages|ui|interface|navigation|module|modules|信息架构|页面|界面|导航|看板|管理|监控|分析|计划|报警|告警|报表|设备|计量|管控)/i;
     const withinFeatureArea = featureKeywords.test(cleanedHeading) || includesKeyword(section, featureKeywords);
     const looksLikeConcreteFeature =
       section.depth >= 1 &&
@@ -327,7 +351,8 @@ export function parsePrd(markdown: string): ParsedPrd {
   const screens = [
     ...sections
       .filter((section) => includesKeyword(section, /(screen|screens|page|pages|ui|interface|navigation|页面|界面|导航)/i))
-      .flatMap((section) => extractListItems(section.content)),
+      .flatMap((section) => extractListItems(section.content))
+      .filter((screen) => !isDocumentStructureHeading(screen)),
     ...extractFeatureHeadings(sections),
   ];
 

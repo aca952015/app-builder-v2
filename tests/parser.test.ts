@@ -79,6 +79,67 @@ test("parsePrd recognizes OCR-style Chinese energy PRDs", async () => {
   assert.ok(parsed.screens.includes("统计报表"));
 });
 
+test("parsePrd ignores PRD document structure headings as screens", () => {
+  const markdown = [
+    "这是一份为您构思的天气预报单页应用（SPA）的产品需求文档（PRD）。",
+    "",
+    "# 产品需求文档：极简天气 (WeatherOne)",
+    "",
+    "## 1. 项目概述",
+    "本项目旨在开发一款轻量级、响应式的天气预报单页应用（SPA）。",
+    "",
+    "## 2. 核心目标",
+    "* **简洁高效**：用户进入页面后在 3 秒内获取核心天气信息。",
+    "* **跨设备兼容**：完美适配移动端和桌面端浏览器。",
+    "* **低延迟**：通过轻量化架构减少加载耗时。",
+    "",
+    "## 3. 用户流程",
+    "1. **自动定位**：用户打开页面，应用自动请求地理位置权限并显示当前城市天气。",
+    "2. **搜索查询**：用户可通过搜索框输入城市名称查询其他城市天气。",
+    "3. **信息查看**：展示当前天气概况、未来小时趋势及未来 5 天预报。",
+    "4. **历史记录**：自动保存最近查询的 3 个城市，方便快速切换。",
+    "",
+    "## 4. 功能需求列表",
+    "",
+    "| 功能模块 | 优先级 | 功能描述 |",
+    "| :--- | :--- | :--- |",
+    "| **实时天气** | P0 | 显示当前温度、天气状况、体感温度、湿度、风向及风速。 |",
+    "| **小时趋势** | P1 | 以水平滚动条形式显示未来 24 小时气温变化趋势。 |",
+    "| **多日预报** | P1 | 显示未来 5 天的日期、天气情况及最高/最低气温。 |",
+    "",
+    "## 5. 非功能性需求",
+    "* **性能**：页面加载时间 < 1.5s，交互响应 < 100ms。",
+    "* **设计原则**：采用卡片式 UI 设计，背景随天气情况自动变换。",
+    "* **适配性**：兼容主流现代浏览器。",
+    "",
+  ].join("\n");
+  const parsed = parsePrd(markdown);
+  const normalized = normalizeSpec(parsed, markdown);
+
+  assert.deepEqual(parsed.screens, []);
+  assert.ok(normalized.screens.some((screen) => screen.name === "Dashboard"));
+  assert.ok(normalized.screens.some((screen) => screen.name === "Settings"));
+  assert.ok(!normalized.screens.some((screen) => screen.route === "/module-1"));
+  assert.ok(!normalized.screens.some((screen) => screen.route === "/module-2"));
+});
+
+test("parsePrd preserves concrete monitoring dashboards but not non-functional requirement headings", () => {
+  const markdown = [
+    "# 性能平台",
+    "",
+    "## 性能监控看板",
+    "- 展示接口延迟、首屏加载时间和错误率趋势。",
+    "",
+    "## 非功能性需求",
+    "* **性能**：页面加载时间 < 1.5s，交互响应 < 100ms。",
+    "",
+  ].join("\n");
+  const parsed = parsePrd(markdown);
+
+  assert.ok(parsed.screens.includes("性能监控看板"));
+  assert.ok(!parsed.screens.includes("非功能性需求"));
+});
+
 test("parsePrd prefers a no-H1 product title over directory section headings", () => {
   const markdown = [
     "**YD-LIMS易达智检实验室管理系统**",
