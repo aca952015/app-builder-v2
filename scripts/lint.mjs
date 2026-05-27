@@ -10,6 +10,10 @@ async function collectFiles(dir) {
   const files = [];
 
   for (const entry of entries) {
+    if (entry.name.startsWith(".")) {
+      continue;
+    }
+
     if (IGNORE.has(entry.name)) {
       continue;
     }

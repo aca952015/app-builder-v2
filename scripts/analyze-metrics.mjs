@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_TOP_N = 10;
+const WORKSPACE_DIR_NAME = ".workspace";
 const FAILURE_CLASSES = ["planSpec", "typecheck", "runtime", "db:init", "smoke", "structured response", "unknown"];
 const STATUS_VALUES = new Set(["success", "failure"]);
 
@@ -415,11 +416,11 @@ function extractRepairReasons(contents) {
 }
 
 function readArtifacts(sessionDir) {
-  const deepagentsDir = path.join(sessionDir, ".deepagents");
+  const workspaceDir = path.join(sessionDir, WORKSPACE_DIR_NAME);
   return {
-    generationValidation: readGenerationValidation(path.join(deepagentsDir, "generation-validation.json")),
-    runtimeValidationLog: readLogSummary(path.join(deepagentsDir, "runtime-validation.log")),
-    errorLog: readLogSummary(path.join(deepagentsDir, "error.log")),
+    generationValidation: readGenerationValidation(path.join(workspaceDir, "generation-validation.json")),
+    runtimeValidationLog: readLogSummary(path.join(workspaceDir, "runtime-validation.log")),
+    errorLog: readLogSummary(path.join(workspaceDir, "error.log")),
   };
 }
 
@@ -427,7 +428,7 @@ function analyzeSessionDir(sessionDir, options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const topN = options.topN ?? DEFAULT_TOP_N;
   const sessionId = path.basename(sessionDir);
-  const metricsPath = path.join(sessionDir, ".deepagents", "metrics.jsonl");
+  const metricsPath = path.join(sessionDir, WORKSPACE_DIR_NAME, "metrics.jsonl");
   const metrics = readMetricsJsonl(metricsPath);
   const phaseBreakdown = buildPhaseBreakdown(metrics.records);
   const artifacts = readArtifacts(sessionDir);
@@ -481,11 +482,11 @@ function analyzeAllSessions(options = {}) {
   const sessions = [];
 
   for (const sessionDir of allSessionDirs) {
-    const metricsPath = path.join(sessionDir, ".deepagents", "metrics.jsonl");
+    const metricsPath = path.join(sessionDir, WORKSPACE_DIR_NAME, "metrics.jsonl");
     if (!existsSync(metricsPath)) {
       skippedSessions.push({
         sessionId: path.basename(sessionDir),
-        reason: "missing .deepagents/metrics.jsonl",
+        reason: "missing .workspace/metrics.jsonl",
       });
       continue;
     }
@@ -735,7 +736,7 @@ function buildAllRecommendations(result) {
   }
 
   if (result.analyzedSessionCount === 0) {
-    recommendations.push("No sessions with metrics.jsonl were found under .out/.");
+    recommendations.push("No sessions with .workspace/metrics.jsonl were found under .out/.");
   }
 
   return recommendations;

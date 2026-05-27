@@ -121,10 +121,10 @@ class CliTestGenerator implements TextGenerator {
     return {
       summary: "计划阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -207,7 +207,7 @@ class FailingCliValidator implements GeneratedAppValidator {
   async validate(_outputDirectory: string, runtime: TextGeneratorRuntime) {
     await writeFile(runtime.deepagentsRuntimeValidationLogPath, "cli validate failed\n", "utf8");
     return {
-      reasons: ["生成阶段运行验证失败：pnpm dev 未通过。端口冲突。详见 .deepagents/runtime-validation.log。"],
+      reasons: ["生成阶段运行验证失败：pnpm dev 未通过。端口冲突。详见 .workspace/runtime-validation.log。"],
       steps: [
         { name: "mv .env.example .env", ok: true, detail: "执行成功。" },
         { name: "pnpm install", ok: true, detail: "执行成功。" },
@@ -324,10 +324,10 @@ class CliPlanRepairingGenerator extends CliRepairingGenerator {
     return {
       summary: "计划修复阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -431,8 +431,8 @@ test("runCli generate accepts --skip-validation", async () => {
 
     const sessionId = await getOnlySessionId(tempRoot);
     const outputDirectory = path.join(tempRoot, ".out", sessionId);
-    const deepagentsConfig = await readFile(path.join(outputDirectory, ".deepagents", "config.json"), "utf8");
-    const sourcePrd = await readFile(path.join(outputDirectory, ".deepagents", "source-prd.md"), "utf8");
+    const deepagentsConfig = await readFile(path.join(outputDirectory, ".workspace", "config.json"), "utf8");
+    const sourcePrd = await readFile(path.join(outputDirectory, ".workspace", "source-prd.md"), "utf8");
     assert.doesNotMatch(deepagentsConfig, /"design"/);
     assert.match(sourcePrd, /## 用户补充生成要求/);
     assert.match(sourcePrd, /列表页必须优先展示高密度表格。/);
@@ -496,7 +496,7 @@ test("runCli generate copies an explicit design document into the output root", 
     const sessionId = await getOnlySessionId(tempRoot);
     const outputDirectory = path.join(tempRoot, ".out", sessionId);
     const copiedDesign = await readFile(path.join(outputDirectory, "DESIGN.md"), "utf8");
-    const deepagentsConfig = await readFile(path.join(outputDirectory, ".deepagents", "config.json"), "utf8");
+    const deepagentsConfig = await readFile(path.join(outputDirectory, ".workspace", "config.json"), "utf8");
 
     assert.equal(stderrLines.length, 0);
     assert.ok(stdoutLines.includes(`- design: ${designPath}`));
@@ -523,7 +523,7 @@ test("runCli validate can validate an existing validation session by session id"
       generator: new CliTestGenerator(),
       validator: new SuccessfulCliValidator(),
     });
-    const configPath = path.join(result.outputDirectory, ".deepagents/config.json");
+    const configPath = path.join(result.outputDirectory, ".workspace/config.json");
     const persistedConfig = JSON.parse(await readFile(configPath, "utf8")) as {
       workflow?: {
         phase?: string;
@@ -557,7 +557,7 @@ test("runCli validate can validate an existing validation session by session id"
     assert.match(stdoutLines.join("\n"), /OK pnpm dev: 执行成功。/);
     assert.match(stdoutLines.join("\n"), /Validation passed\./);
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"valid": true/,
     );
     assert.match(await readFile(configPath, "utf8"), /"phase": "complete"/);
@@ -603,7 +603,7 @@ test("runCli validate accepts runtimeValidation flag and enters runtime validati
     assert.match(stdoutLines.join("\n"), /OK pnpm dev: 执行成功。/);
     assert.match(stdoutLines.join("\n"), /Validation passed\./);
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"valid": true/,
     );
   } finally {
@@ -666,7 +666,7 @@ test("runCli generate --resume resumes a plan-complete session by short id", asy
       generator,
       validator: new SuccessfulCliValidator(),
     });
-    const configPath = path.join(result.outputDirectory, ".deepagents/config.json");
+    const configPath = path.join(result.outputDirectory, ".workspace/config.json");
     const persistedConfig = JSON.parse(await readFile(configPath, "utf8")) as {
       workflow?: {
         phase?: string;
@@ -704,7 +704,7 @@ test("runCli generate --resume resumes a plan-complete session by short id", asy
     assert.match(stdoutLines.join("\n"), /Resumed from: plan/);
     assert.match(stdoutLines.join("\n"), /Session resumed\./);
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"valid": true/,
     );
     assert.match(await readFile(configPath, "utf8"), /"phase": "complete"/);
@@ -1020,7 +1020,7 @@ test("runCli validate resumes generate repair instead of exiting on validation f
     assert.match(stdoutLines.join("\n"), /OK pnpm dev: 执行成功。/);
     assert.match(stdoutLines.join("\n"), /Validation recovered and workflow resumed\./);
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"valid": true/,
     );
     assert.match(
@@ -1028,7 +1028,7 @@ test("runCli validate resumes generate repair instead of exiting on validation f
       /CLI validate repaired fixture/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/config.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/config.json"), "utf8"),
       /"phase": "complete"/,
     );
   } finally {
@@ -1165,7 +1165,7 @@ test("runCli validate respects template-configured generate repair retry limits"
       generator: new CliTestGenerator(),
       validator: new SuccessfulCliValidator(),
     });
-    const configPath = path.join(result.outputDirectory, ".deepagents/config.json");
+    const configPath = path.join(result.outputDirectory, ".workspace/config.json");
     const persistedConfig = JSON.parse(await readFile(configPath, "utf8")) as {
       template?: {
         repairRetries?: {
@@ -1249,11 +1249,11 @@ test("runCli validate resumes plan repair and continues the main workflow", asyn
     assert.match(stdoutLines.join("\n"), /Resumed from: plan_repair/);
     assert.match(stdoutLines.join("\n"), /Validation recovered and workflow resumed\./);
     assert.match(
-      await readFile(path.join(outputDirectory, ".deepagents/plan-validation.json"), "utf8"),
+      await readFile(path.join(outputDirectory, ".workspace/plan-validation.json"), "utf8"),
       /"valid": true/,
     );
     assert.match(
-      await readFile(path.join(outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"valid": true/,
     );
     assert.match(
@@ -1261,7 +1261,7 @@ test("runCli validate resumes plan repair and continues the main workflow", asyn
       /CLI validate session fixture/,
     );
     assert.match(
-      await readFile(path.join(outputDirectory, ".deepagents/config.json"), "utf8"),
+      await readFile(path.join(outputDirectory, ".workspace/config.json"), "utf8"),
       /"phase": "complete"/,
     );
   } finally {

@@ -28,7 +28,7 @@ import { parsePrd } from "./prd-parser.js";
 import { extractExternalReferenceDrafts, normalizeSpec } from "./spec-normalizer.js";
 import { copyStarterScaffold, loadTemplatePack, stageTemplatePack } from "./template-pack.js";
 import {
-  DeepAgentsTextGenerator,
+  PiTextGenerator,
   materializeGenerationPromptSnapshot,
   materializeSessionPromptSnapshots,
 } from "./text-generator.js";
@@ -54,6 +54,13 @@ import {
   measureRuntimeStep,
   measureWorkflowStep,
 } from "./workflow-metrics.js";
+import {
+  createWorkspaceArtifactPaths,
+  formatLegacyWorkspaceError,
+  LEGACY_WORKSPACE_DIR_NAME,
+  WORKSPACE_DIR_NAME,
+  workspaceRelativePath,
+} from "./workspace-artifacts.js";
 import {
   TEMPLATE_PHASE_EFFORTS,
   type ExternalReferenceDraft,
@@ -363,7 +370,7 @@ async function readReferenceManifest(runtime: TextGeneratorRuntime): Promise<Ref
 function resolveVirtualReferencePath(runtime: TextGeneratorRuntime, localPath: string): string | null {
   const normalized = localPath.replace(/\\/g, "/");
   const relative = normalized.startsWith("/") ? normalized.slice(1) : normalized;
-  if (!relative.startsWith(".deepagents/references/")) {
+  if (!relative.startsWith(workspaceRelativePath("references/"))) {
     return null;
   }
   const absolutePath = path.resolve(runtime.outputDirectory, relative);
@@ -1038,7 +1045,7 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
       steps.push(envStep);
       if (!envStep.ok) {
         return {
-          reasons: [`生成阶段运行验证失败：${envStep.name} 未通过。${envStep.detail} 详见 .deepagents/runtime-validation.log。`],
+          reasons: [`生成阶段运行验证失败：${envStep.name} 未通过。${envStep.detail} 详见 ${workspaceRelativePath("runtime-validation.log")}。`],
           steps,
         };
       }
@@ -1057,7 +1064,7 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
       steps.push(pnpmStep);
       if (!pnpmStep.ok) {
         return {
-          reasons: [`生成阶段运行验证失败：${pnpmStep.name} 未通过。${pnpmStep.detail} 详见 .deepagents/runtime-validation.log。`],
+          reasons: [`生成阶段运行验证失败：${pnpmStep.name} 未通过。${pnpmStep.detail} 详见 ${workspaceRelativePath("runtime-validation.log")}。`],
           steps,
         };
       }
@@ -1114,7 +1121,7 @@ class ShellGeneratedAppValidator implements GeneratedAppValidator {
       steps.push(step);
       if (!step.ok) {
         return {
-          reasons: [`生成阶段运行验证失败：${validationStep.name} 未通过。${step.detail} 详见 .deepagents/runtime-validation.log。`],
+          reasons: [`生成阶段运行验证失败：${validationStep.name} 未通过。${step.detail} 详见 ${workspaceRelativePath("runtime-validation.log")}。`],
           steps,
         };
       }
@@ -1769,7 +1776,7 @@ async function collectReferenceManifestIssues(runtime: TextGeneratorRuntime): Pr
       }
       const absolutePath = resolveVirtualReferencePath(runtime, entry.localPath);
       if (!absolutePath) {
-        issues.push(`reference-manifest localPath 必须位于 .deepagents/references/ 内：${entry.localPath}`);
+        issues.push(`reference-manifest localPath 必须位于 ${workspaceRelativePath("references/")} 内：${entry.localPath}`);
         continue;
       }
       const contents = await readIfExists(absolutePath);
@@ -1817,7 +1824,7 @@ async function collectPlanReferenceIssues(runtime: TextGeneratorRuntime, planSpe
 
     const absolutePath = resolveVirtualReferencePath(runtime, reference.localPath);
     if (!absolutePath) {
-      issues.push(`planSpec.references localPath 必须位于 .deepagents/references/ 内：${reference.localPath}`);
+      issues.push(`planSpec.references localPath 必须位于 ${workspaceRelativePath("references/")} 内：${reference.localPath}`);
       continue;
     }
 
@@ -2721,7 +2728,9 @@ async function validateGeneratedArtifacts(
       await reconcileHostManagedArtifacts(runtime, [path.join(outputDirectory, "app-builder-report.md")]);
 
       const reasons: string[] = [];
-      const nonPlanningFiles = result.filesWritten.filter((file) => !file.startsWith(".deepagents/"));
+      const nonPlanningFiles = result.filesWritten.filter(
+        (file) => !file.startsWith(`${WORKSPACE_DIR_NAME}/`) && !file.startsWith(`${LEGACY_WORKSPACE_DIR_NAME}/`),
+      );
 
       if (result.filesWritten.length === 0) {
         reasons.push("生成阶段未完成：结构化结果中的 filesWritten 为空，说明本轮没有明确报告已落盘文件。");
@@ -2868,7 +2877,11 @@ async function collectGeneratedFiles(outputDirectory: string): Promise<string[]>
       const relativePath = path.relative(outputDirectory, absolutePath).split(path.sep).join("/");
 
       if (entry.isDirectory()) {
-        if (relativePath === ".deepagents" || relativePath === ".git") {
+        if (
+          relativePath === WORKSPACE_DIR_NAME ||
+          relativePath === LEGACY_WORKSPACE_DIR_NAME ||
+          relativePath === ".git"
+        ) {
           continue;
         }
         await visit(absolutePath);
@@ -2930,11 +2943,15 @@ async function resolveSessionIdForLookup(sessionId: string, cwd = process.cwd())
 async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): Promise<TextGeneratorRuntime> {
   const resolvedSessionId = await resolveSessionIdForLookup(sessionId, cwd);
   const outputDirectory = path.resolve(cwd, ".out", resolvedSessionId);
-  const deepagentsDirectory = path.join(outputDirectory, ".deepagents");
-  const configPath = path.join(deepagentsDirectory, "config.json");
+  const artifacts = createWorkspaceArtifactPaths(outputDirectory);
+  const workspaceDirectory = artifacts.workspaceDirectory;
+  const configPath = artifacts.configPath;
 
-  if (!await pathExists(deepagentsDirectory)) {
-    throw new Error(`Session "${resolvedSessionId}" is missing the .deepagents workspace.`);
+  if (!await pathExists(workspaceDirectory)) {
+    if (await pathExists(artifacts.legacyWorkspaceDirectory)) {
+      throw new Error(formatLegacyWorkspaceError(resolvedSessionId, artifacts.legacyWorkspaceDirectory));
+    }
+    throw new Error(`Session "${resolvedSessionId}" is missing the ${WORKSPACE_DIR_NAME} workspace.`);
   }
 
   let templateId = "unknown";
@@ -3177,34 +3194,35 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
   return {
     sessionId: resolvedSessionId,
     outputDirectory,
-    deepagentsDirectory,
-    deepagentsAgentsPath: path.join(deepagentsDirectory, "AGENTS.md"),
-    deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
-    deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
-    deepagentsMetricsLogPath: path.join(deepagentsDirectory, "metrics.jsonl"),
-    deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
-    deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
-    deepagentsInteractionContractPath: path.join(deepagentsDirectory, "interaction-contract.json"),
-    deepagentsReferenceManifestPath: path.join(deepagentsDirectory, "references", "reference-manifest.json"),
+    deepagentsDirectory: artifacts.workspaceDirectory,
+    deepagentsAgentsPath: artifacts.agentsPath,
+    deepagentsLogPath: artifacts.logPath,
+    deepagentsErrorLogPath: artifacts.errorLogPath,
+    deepagentsMetricsLogPath: artifacts.metricsLogPath,
+    deepagentsRuntimeValidationLogPath: artifacts.runtimeValidationLogPath,
+    deepagentsRuntimeInteractionValidationPath: artifacts.runtimeInteractionValidationPath,
+    deepagentsTodoPath: artifacts.todoPath,
+    deepagentsInteractionContractPath: artifacts.interactionContractPath,
+    deepagentsReferenceManifestPath: artifacts.referenceManifestPath,
     deepagentsConfigPath: configPath,
-    deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
-    deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
-    deepagentsGeneratePromptSnapshotPath: path.join(deepagentsDirectory, "generate-system-prompt.md"),
-    deepagentsGenerateRepairPromptSnapshotPath: path.join(deepagentsDirectory, "generate-repair-system-prompt.md"),
+    deepagentsPlanPromptSnapshotPath: artifacts.planPromptSnapshotPath,
+    deepagentsPlanRepairPromptSnapshotPath: artifacts.planRepairPromptSnapshotPath,
+    deepagentsGeneratePromptSnapshotPath: artifacts.generatePromptSnapshotPath,
+    deepagentsGenerateRepairPromptSnapshotPath: artifacts.generateRepairPromptSnapshotPath,
     templateId,
     templateName,
     templateVersion,
-    templateDirectory: deepagentsDirectory,
-    templatePlanPromptPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
-    templatePlanRepairPromptPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
-    templateGeneratePromptPath: path.join(deepagentsDirectory, "generate-system-prompt.md"),
-    templateGenerateRepairPromptPath: path.join(deepagentsDirectory, "generate-repair-system-prompt.md"),
-    sourcePrdSnapshotPath: path.join(deepagentsDirectory, "source-prd.md"),
-    deepagentsAnalysisPath: path.join(deepagentsDirectory, "prd-analysis.md"),
-    deepagentsDetailedSpecPath: path.join(deepagentsDirectory, "generated-spec.md"),
-    deepagentsPlanSpecPath: path.join(deepagentsDirectory, "plan-spec.json"),
-    deepagentsPlanValidationPath: path.join(deepagentsDirectory, "plan-validation.json"),
-    deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
+    templateDirectory: artifacts.templateDirectory,
+    templatePlanPromptPath: artifacts.planPromptSnapshotPath,
+    templatePlanRepairPromptPath: artifacts.planRepairPromptSnapshotPath,
+    templateGeneratePromptPath: artifacts.generatePromptSnapshotPath,
+    templateGenerateRepairPromptPath: artifacts.generateRepairPromptSnapshotPath,
+    sourcePrdSnapshotPath: artifacts.sourcePrdSnapshotPath,
+    deepagentsAnalysisPath: artifacts.analysisPath,
+    deepagentsDetailedSpecPath: artifacts.detailedSpecPath,
+    deepagentsPlanSpecPath: artifacts.planSpecPath,
+    deepagentsPlanValidationPath: artifacts.planValidationPath,
+    deepagentsGenerationValidationPath: artifacts.generationValidationPath,
     ...(designArtifactRelativePath ? { designPath: path.join(outputDirectory, designArtifactRelativePath) } : {}),
     maxPlanRetries: templateRepairRetries.plan,
     maxGenerateRetries: templateRepairRetries.generate,
@@ -3224,7 +3242,7 @@ function requireSessionGenerator(runtime: TextGeneratorRuntime, generator?: Text
 
   validateModelRoleApiKeys(runtime.modelRoles);
 
-  return new DeepAgentsTextGenerator({ modelRoles: runtime.modelRoles });
+  return new PiTextGenerator({ modelRoles: runtime.modelRoles });
 }
 
 function createSessionRuntime(
@@ -4398,7 +4416,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
     });
     const generator =
       options.generator ??
-      new DeepAgentsTextGenerator({ modelRoles });
+      new PiTextGenerator({ modelRoles });
     const validator =
       options.validator ??
       (options.generator ? new PassthroughGeneratedAppValidator() : new ShellGeneratedAppValidator());
@@ -4415,6 +4433,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
       deepagentsMetricsLogPath: workspace.deepagentsMetricsLogPath,
       deepagentsRuntimeValidationLogPath: workspace.deepagentsRuntimeValidationLogPath,
       deepagentsRuntimeInteractionValidationPath: workspace.deepagentsRuntimeInteractionValidationPath,
+      deepagentsTodoPath: workspace.deepagentsTodoPath,
       deepagentsInteractionContractPath: workspace.deepagentsInteractionContractPath,
       deepagentsReferenceManifestPath: workspace.deepagentsReferenceManifestPath,
       localReferences,
@@ -4527,25 +4546,26 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
             completedPhases: [],
           },
           artifacts: {
-            sourcePrd: ".deepagents/source-prd.md",
+            sourcePrd: workspaceRelativePath("source-prd.md"),
             ...(designArtifactRelativePath ? { design: designArtifactRelativePath } : {}),
-            analysis: ".deepagents/prd-analysis.md",
-            generatedSpec: ".deepagents/generated-spec.md",
-            planSpec: ".deepagents/plan-spec.json",
-            interactionContract: ".deepagents/interaction-contract.json",
-            referenceManifest: ".deepagents/references/reference-manifest.json",
-            planValidation: ".deepagents/plan-validation.json",
-            generationValidation: ".deepagents/generation-validation.json",
-            runtimeValidationLog: ".deepagents/runtime-validation.log",
-            runtimeInteractionValidation: ".deepagents/runtime-interaction-validation.json",
-            metricsLog: ".deepagents/metrics.jsonl",
-            errorLog: ".deepagents/error.log",
+            analysis: workspaceRelativePath("prd-analysis.md"),
+            generatedSpec: workspaceRelativePath("generated-spec.md"),
+            planSpec: workspaceRelativePath("plan-spec.json"),
+            interactionContract: workspaceRelativePath("interaction-contract.json"),
+            referenceManifest: workspaceRelativePath("references/reference-manifest.json"),
+            planValidation: workspaceRelativePath("plan-validation.json"),
+            generationValidation: workspaceRelativePath("generation-validation.json"),
+            runtimeValidationLog: workspaceRelativePath("runtime-validation.log"),
+            runtimeInteractionValidation: workspaceRelativePath("runtime-interaction-validation.json"),
+            todo: workspaceRelativePath("todo.md"),
+            metricsLog: workspaceRelativePath("metrics.jsonl"),
+            errorLog: workspaceRelativePath("error.log"),
           },
           prompts: {
-            plan: ".deepagents/plan-system-prompt.md",
-            planRepair: ".deepagents/plan-repair-system-prompt.md",
-            generate: ".deepagents/generate-system-prompt.md",
-            generateRepair: ".deepagents/generate-repair-system-prompt.md",
+            plan: workspaceRelativePath("plan-system-prompt.md"),
+            planRepair: workspaceRelativePath("plan-repair-system-prompt.md"),
+            generate: workspaceRelativePath("generate-system-prompt.md"),
+            generateRepair: workspaceRelativePath("generate-repair-system-prompt.md"),
           },
           template: templateLock,
         }),

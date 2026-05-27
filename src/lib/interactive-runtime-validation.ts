@@ -39,6 +39,9 @@ import type {
   TemplateRuntimeValidationStep,
   TextGeneratorRuntime,
 } from "./types.js";
+import { workspaceRelativePath } from "./workspace-artifacts.js";
+
+const RUNTIME_VALIDATION_LOG_LABEL = workspaceRelativePath("runtime-validation.log");
 
 type RuntimeInteractionTargetKind = "page" | "api";
 type RuntimeInteractionRequestSource = "proxy" | "dev-server-output" | "non-interactive-probe" | "browser-smoke";
@@ -1929,7 +1932,7 @@ export async function runNonInteractiveRuntimeValidation(options: {
           "",
         ]);
         return {
-          reasons: [`非交互式运行验证失败：${failureReason} 详见 .deepagents/runtime-validation.log。`],
+          reasons: [`非交互式运行验证失败：${failureReason} 详见 ${RUNTIME_VALIDATION_LOG_LABEL}。`],
           steps: [{ name: options.devServerStep.name, ok: false, detail: failureReason }],
           artifact,
         };
@@ -2011,7 +2014,7 @@ export async function runNonInteractiveRuntimeValidation(options: {
         "",
       ]);
       return {
-        reasons: [`非交互式运行验证失败：${reasons.join(" | ")} 详见 .deepagents/runtime-validation.log。`],
+        reasons: [`非交互式运行验证失败：${reasons.join(" | ")} 详见 ${RUNTIME_VALIDATION_LOG_LABEL}。`],
         steps: [{
           name: options.devServerStep.name,
           ok: false,
@@ -2210,7 +2213,7 @@ export async function runSmokeRuntimeValidation(options: {
           "",
         ]);
         return {
-          reasons: [`冒烟运行验证失败：${failureReason} 详见 .deepagents/runtime-validation.log。`],
+          reasons: [`冒烟运行验证失败：${failureReason} 详见 ${RUNTIME_VALIDATION_LOG_LABEL}。`],
           steps: [{ name: options.devServerStep.name, ok: false, detail: failureReason }],
           artifact,
         };
@@ -2370,7 +2373,7 @@ export async function runSmokeRuntimeValidation(options: {
         "",
       ]);
       return {
-        reasons: [`冒烟运行验证失败：${reasons.join(" | ")} 详见 .deepagents/runtime-validation.log。`],
+        reasons: [`冒烟运行验证失败：${reasons.join(" | ")} 详见 ${RUNTIME_VALIDATION_LOG_LABEL}。`],
         steps: [{
           name: "browser smoke runtime validation",
           ok: false,
@@ -2889,7 +2892,7 @@ export async function runInteractiveRuntimeValidation(options: {
           "",
         ]);
         return {
-          reasons: [`交互式运行验证失败：${failureReason} 详见 .deepagents/runtime-validation.log。`],
+          reasons: [`交互式运行验证失败：${failureReason} 详见 ${RUNTIME_VALIDATION_LOG_LABEL}。`],
           steps: [{
             name: "interactive runtime validation",
             ok: false,

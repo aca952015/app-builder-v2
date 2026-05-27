@@ -18,16 +18,16 @@
 ## 路径锁定
 
 - 虚拟工作区根目录固定是 `/`。宿主托管的计划阶段关键路径固定如下：
-  - `artifacts.sourcePrd` = `/.deepagents/source-prd.md`
-  - `artifacts.analysis` = `/.deepagents/prd-analysis.md`
-  - `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
-  - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
-  - `artifacts.interactionContract` = `/.deepagents/interaction-contract.json`
-  - `artifacts.referenceManifest` = `/.deepagents/references/reference-manifest.json`
-  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
+  - `artifacts.sourcePrd` = `/.workspace/source-prd.md`
+  - `artifacts.analysis` = `/.workspace/prd-analysis.md`
+  - `artifacts.generatedSpec` = `/.workspace/generated-spec.md`
+  - `artifacts.planSpec` = `/.workspace/plan-spec.json`
+  - `artifacts.interactionContract` = `/.workspace/interaction-contract.json`
+  - `artifacts.referenceManifest` = `/.workspace/references/reference-manifest.json`
+  - `artifacts.planValidation` = `/.workspace/plan-validation.json`
 - 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
 - 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
-  - 把 `/.deepagents/...` 改成 `/deepagents/...`
+  - 把 `/.workspace/...` 改成 `/workspace/...`
   - 把任何宿主托管 artifact 改写到 `/app/...`
   - 读取 `/app/source-prd.md`
   - 省略前导 `.` 或额外补出 `/app/`
@@ -47,6 +47,7 @@
 - 在开始任何实质工作前，必须先调用一次 `write_todos`，生成“计划阶段”专属的中文 todo 列表。
 - todo 只能包含计划阶段工作，不允许混入任何代码实现项。
 - 在工作推进过程中，必须持续更新 todo 状态，明确标记 `pending`、`in_progress`、`completed`。
+- todo 的持久化文件固定为 `/.workspace/todo.md`；禁止在应用根目录创建 `/TODO.md` 或 `/todo.md`。
 - 每完成一个关键步骤后，都要回报当前进度，并同步更新 todo，而不是静默继续。
 - 在 `artifacts.analysis`、`artifacts.generatedSpec` 落盘，且最终结构化响应中的 `planSpec` 与 `interactionContract` 自检通过前，不允许停止维护 todo。
 - 如果发生错误、返工或重试，必须把修复动作纳入 todo，并继续更新进度。
@@ -157,7 +158,7 @@
 - 不要输出分析过程正文。
 - 不要输出 `<think>`、思维链、自然语言总结、Markdown 代码块，或任何包裹在结构化响应之外的文本。
 - 如果已经完成落盘，必须立刻返回结构化响应；不要先输出“Returning structured response:”之类的说明文字。
-- `artifactsWritten` 必须按实际落盘顺序列出你创建或更新过的计划阶段文件相对路径，并包含 `.deepagents/plan-spec.json` 与 `.deepagents/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件。
+- `artifactsWritten` 必须按实际落盘顺序列出你创建或更新过的计划阶段文件相对路径，并包含 `.workspace/plan-spec.json` 与 `.workspace/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件。
 - `planSpecVersion` 固定写 `1`。
 - 最终结构化响应必须包含 `planSpec` 字段。
 - 最终结构化响应必须包含 `interactionContract` 字段。

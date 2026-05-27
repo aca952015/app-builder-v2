@@ -34,16 +34,22 @@ import {
 import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
 import { planSpecSchema, validatePlanSpec, type PlanSpec } from "../src/lib/plan-spec.js";
 import { validateInteractionContract, type InteractionContract } from "../src/lib/interaction-contract.js";
-import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand } from "../src/lib/generator.js";
+import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand, validateSessionPhase } from "../src/lib/generator.js";
+import { prepareOutputWorkspace } from "../src/lib/output-workspace.js";
 import { buildSessionPolicyDocument } from "../src/lib/session-policy.js";
 import {
   buildHostManagedArtifactPermissions,
+  buildPiStructuredPrompt,
   buildPlanProjectPayload,
   buildPlanRepairPayload,
   createHostManagedArtifactWriteGuardMiddleware,
+  extractStructuredResponseFromPiText,
   HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS,
   isHostManagedWriteProtectedArtifactPath,
+  mapPiToolPathToWorkspaceRelative,
   runDeepAgentWithLogs,
+  runPiAgentWithLogs,
+  rewritePiToolPathInput,
 } from "../src/lib/text-generator.js";
 import { closeWorkflowBoard } from "../src/lib/terminal-ui.js";
 import { copyStarterScaffold, loadTemplatePack } from "../src/lib/template-pack.js";
@@ -57,6 +63,11 @@ import {
   TextGenerator,
   TextGeneratorRuntime,
 } from "../src/lib/types.js";
+import {
+  LEGACY_WORKSPACE_DIR_NAME,
+  WORKSPACE_DIR_NAME,
+  createWorkspaceArtifactPaths,
+} from "../src/lib/workspace-artifacts.js";
 
 function asRecord(value: unknown): Record<string, unknown> {
   assert.equal(typeof value, "object");
@@ -498,34 +509,35 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
   return {
     sessionId: "test-session",
     outputDirectory: "/virtual-workspace",
-    deepagentsDirectory: "/virtual-workspace/.deepagents",
-    deepagentsAgentsPath: "/virtual-workspace/.deepagents/AGENTS.md",
-    deepagentsLogPath: "/virtual-workspace/.deepagents/trace.log",
-    deepagentsErrorLogPath: "/virtual-workspace/.deepagents/error.log",
-    deepagentsMetricsLogPath: "/virtual-workspace/.deepagents/metrics.jsonl",
-    deepagentsRuntimeValidationLogPath: "/virtual-workspace/.deepagents/runtime-validation.log",
-    deepagentsRuntimeInteractionValidationPath: "/virtual-workspace/.deepagents/runtime-interaction-validation.json",
-    deepagentsInteractionContractPath: "/virtual-workspace/.deepagents/interaction-contract.json",
-    deepagentsReferenceManifestPath: "/virtual-workspace/.deepagents/references/reference-manifest.json",
-    deepagentsConfigPath: "/virtual-workspace/.deepagents/config.json",
-    deepagentsPlanPromptSnapshotPath: "/virtual-workspace/.deepagents/plan-system-prompt.md",
-    deepagentsPlanRepairPromptSnapshotPath: "/virtual-workspace/.deepagents/plan-repair-system-prompt.md",
-    deepagentsGeneratePromptSnapshotPath: "/virtual-workspace/.deepagents/generate-system-prompt.md",
-    deepagentsGenerateRepairPromptSnapshotPath: "/virtual-workspace/.deepagents/generate-repair-system-prompt.md",
+    deepagentsDirectory: "/virtual-workspace/.workspace",
+    deepagentsAgentsPath: "/virtual-workspace/.workspace/AGENTS.md",
+    deepagentsLogPath: "/virtual-workspace/.workspace/trace.log",
+    deepagentsErrorLogPath: "/virtual-workspace/.workspace/error.log",
+    deepagentsMetricsLogPath: "/virtual-workspace/.workspace/metrics.jsonl",
+    deepagentsRuntimeValidationLogPath: "/virtual-workspace/.workspace/runtime-validation.log",
+    deepagentsRuntimeInteractionValidationPath: "/virtual-workspace/.workspace/runtime-interaction-validation.json",
+    deepagentsTodoPath: "/virtual-workspace/.workspace/todo.md",
+    deepagentsInteractionContractPath: "/virtual-workspace/.workspace/interaction-contract.json",
+    deepagentsReferenceManifestPath: "/virtual-workspace/.workspace/references/reference-manifest.json",
+    deepagentsConfigPath: "/virtual-workspace/.workspace/config.json",
+    deepagentsPlanPromptSnapshotPath: "/virtual-workspace/.workspace/plan-system-prompt.md",
+    deepagentsPlanRepairPromptSnapshotPath: "/virtual-workspace/.workspace/plan-repair-system-prompt.md",
+    deepagentsGeneratePromptSnapshotPath: "/virtual-workspace/.workspace/generate-system-prompt.md",
+    deepagentsGenerateRepairPromptSnapshotPath: "/virtual-workspace/.workspace/generate-repair-system-prompt.md",
     templateId: "full-stack",
     templateName: "Full Stack",
     templateVersion: "1.0.0",
-    templateDirectory: "/virtual-workspace/.deepagents/template",
-    templatePlanPromptPath: "/virtual-workspace/.deepagents/template/prompts/plan-system-prompt.md",
-    templatePlanRepairPromptPath: "/virtual-workspace/.deepagents/template/prompts/plan-repair-system-prompt.md",
-    templateGeneratePromptPath: "/virtual-workspace/.deepagents/template/prompts/generate-system-prompt.md",
-    templateGenerateRepairPromptPath: "/virtual-workspace/.deepagents/template/prompts/generate-repair-system-prompt.md",
-    sourcePrdSnapshotPath: "/virtual-workspace/.deepagents/source-prd.md",
-    deepagentsAnalysisPath: "/virtual-workspace/.deepagents/prd-analysis.md",
-    deepagentsDetailedSpecPath: "/virtual-workspace/.deepagents/generated-spec.md",
-    deepagentsPlanSpecPath: "/virtual-workspace/.deepagents/plan-spec.json",
-    deepagentsPlanValidationPath: "/virtual-workspace/.deepagents/plan-validation.json",
-    deepagentsGenerationValidationPath: "/virtual-workspace/.deepagents/generation-validation.json",
+    templateDirectory: "/virtual-workspace/.workspace/template",
+    templatePlanPromptPath: "/virtual-workspace/.workspace/template/prompts/plan-system-prompt.md",
+    templatePlanRepairPromptPath: "/virtual-workspace/.workspace/template/prompts/plan-repair-system-prompt.md",
+    templateGeneratePromptPath: "/virtual-workspace/.workspace/template/prompts/generate-system-prompt.md",
+    templateGenerateRepairPromptPath: "/virtual-workspace/.workspace/template/prompts/generate-repair-system-prompt.md",
+    sourcePrdSnapshotPath: "/virtual-workspace/.workspace/source-prd.md",
+    deepagentsAnalysisPath: "/virtual-workspace/.workspace/prd-analysis.md",
+    deepagentsDetailedSpecPath: "/virtual-workspace/.workspace/generated-spec.md",
+    deepagentsPlanSpecPath: "/virtual-workspace/.workspace/plan-spec.json",
+    deepagentsPlanValidationPath: "/virtual-workspace/.workspace/plan-validation.json",
+    deepagentsGenerationValidationPath: "/virtual-workspace/.workspace/generation-validation.json",
     planAttempt: 1,
     maxPlanRetries: 10,
     generateAttempt: 1,
@@ -558,6 +570,101 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
     }),
     ...overrides,
   };
+}
+
+function buildTestRuntimeForOutput(outputDirectory: string, overrides: Partial<TextGeneratorRuntime> = {}): TextGeneratorRuntime {
+  const artifacts = createWorkspaceArtifactPaths(outputDirectory);
+  return buildTestRuntime({
+    outputDirectory,
+    deepagentsDirectory: artifacts.workspaceDirectory,
+    deepagentsAgentsPath: artifacts.agentsPath,
+    deepagentsLogPath: artifacts.logPath,
+    deepagentsErrorLogPath: artifacts.errorLogPath,
+    deepagentsMetricsLogPath: artifacts.metricsLogPath,
+    deepagentsRuntimeValidationLogPath: artifacts.runtimeValidationLogPath,
+    deepagentsRuntimeInteractionValidationPath: artifacts.runtimeInteractionValidationPath,
+    deepagentsTodoPath: artifacts.todoPath,
+    deepagentsInteractionContractPath: artifacts.interactionContractPath,
+    deepagentsReferenceManifestPath: artifacts.referenceManifestPath,
+    deepagentsConfigPath: artifacts.configPath,
+    deepagentsPlanPromptSnapshotPath: artifacts.planPromptSnapshotPath,
+    deepagentsPlanRepairPromptSnapshotPath: artifacts.planRepairPromptSnapshotPath,
+    deepagentsGeneratePromptSnapshotPath: artifacts.generatePromptSnapshotPath,
+    deepagentsGenerateRepairPromptSnapshotPath: artifacts.generateRepairPromptSnapshotPath,
+    templateDirectory: artifacts.templateDirectory,
+    templatePlanPromptPath: path.join(artifacts.templateDirectory, "prompts", "plan-system-prompt.md"),
+    templatePlanRepairPromptPath: path.join(artifacts.templateDirectory, "prompts", "plan-repair-system-prompt.md"),
+    templateGeneratePromptPath: path.join(artifacts.templateDirectory, "prompts", "generate-system-prompt.md"),
+    templateGenerateRepairPromptPath: path.join(artifacts.templateDirectory, "prompts", "generate-repair-system-prompt.md"),
+    sourcePrdSnapshotPath: artifacts.sourcePrdSnapshotPath,
+    deepagentsAnalysisPath: artifacts.analysisPath,
+    deepagentsDetailedSpecPath: artifacts.detailedSpecPath,
+    deepagentsPlanSpecPath: artifacts.planSpecPath,
+    deepagentsPlanValidationPath: artifacts.planValidationPath,
+    deepagentsGenerationValidationPath: artifacts.generationValidationPath,
+    ...overrides,
+  });
+}
+
+function createFakePiSession(
+  events: readonly unknown[],
+): {
+  session: Parameters<typeof runPiAgentWithLogs>[0]["session"];
+  emit: (event: unknown) => void;
+  isSubscribed: () => boolean;
+  unsubscribeCount: () => number;
+} {
+  let subscribed = false;
+  let unsubscribeCount = 0;
+  let handler: ((event: unknown) => void) | undefined;
+  const emit = (event: unknown) => {
+    if (subscribed) {
+      handler?.(event);
+    }
+  };
+
+  return {
+    session: {
+      subscribe(callback: (event: never) => void) {
+        subscribed = true;
+        handler = callback as (event: unknown) => void;
+        return () => {
+          subscribed = false;
+          unsubscribeCount += 1;
+        };
+      },
+      async prompt() {
+        for (const event of events) {
+          emit(event);
+        }
+      },
+    } as unknown as Parameters<typeof runPiAgentWithLogs>[0]["session"],
+    emit,
+    isSubscribed: () => subscribed,
+    unsubscribeCount: () => unsubscribeCount,
+  };
+}
+
+async function collectFilesWithExtensions(root: string, extensions: ReadonlySet<string>): Promise<string[]> {
+  const absoluteRoot = path.resolve(root);
+  const files: string[] = [];
+
+  async function visit(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(absolutePath);
+        continue;
+      }
+      if (entry.isFile() && extensions.has(path.extname(entry.name))) {
+        files.push(path.relative(process.cwd(), absolutePath).split(path.sep).join("/"));
+      }
+    }
+  }
+
+  await visit(absoluteRoot);
+  return files.sort();
 }
 
 async function requestLocalUrl(url: string, method = "GET"): Promise<number> {
@@ -886,7 +993,7 @@ async function writeMinimalTemplatePack(options: {
 
 test("runDeepAgentWithLogs retries stream for compatible stream output errors", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-stream-retry-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const runtime = buildTestRuntime({
     outputDirectory: tempRoot,
     deepagentsDirectory,
@@ -968,7 +1075,7 @@ test("runDeepAgentWithLogs retries stream for compatible stream output errors", 
 
 test("runDeepAgentWithLogs retries stream for transient socket resets", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-stream-reset-retry-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const runtime = buildTestRuntime({
     outputDirectory: tempRoot,
     deepagentsDirectory,
@@ -1051,7 +1158,7 @@ test("runDeepAgentWithLogs retries stream for transient socket resets", async ()
 
 test("runDeepAgentWithLogs records model-planned todo timing metrics", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-todo-metrics-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const runtime = buildTestRuntime({
     outputDirectory: tempRoot,
     deepagentsDirectory,
@@ -1140,6 +1247,145 @@ test("runDeepAgentWithLogs records model-planned todo timing metrics", async () 
   }
 });
 
+test("runPiAgentWithLogs finalizes assistant-text structured responses and ignores late events", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-pi-agent-finalize-"));
+  const runtime = buildTestRuntimeForOutput(tempRoot);
+  const schema = z.object({ summary: z.string() });
+  const structuredFromText = { summary: "pi text fallback ok" };
+  let lateEventAttempted = false;
+  let lateEventDelivered = false;
+  const { session, emit, isSubscribed, unsubscribeCount } = createFakePiSession([
+    {
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        delta: "Reading workspace context.",
+      },
+    },
+    {
+      type: "tool_execution_start",
+      toolCallId: "tool-read",
+      toolName: "read",
+      args: { path: "/.workspace/source-prd.md" },
+    },
+    {
+      type: "agent_end",
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: JSON.stringify({ response: structuredFromText }) }],
+        },
+      ],
+    },
+  ]);
+
+  try {
+    await mkdir(runtime.deepagentsDirectory, { recursive: true });
+    const result = await runPiAgentWithLogs({
+      session,
+      structuredResponse: {},
+      prompt: buildPiStructuredPrompt({ stage: "plan" }, schema),
+      responseSchema: schema,
+      runtime,
+      runtimePhase: "plan",
+      timeoutLabel: "pi agent test",
+    }) as { structuredResponse?: unknown };
+
+    lateEventAttempted = true;
+    if (isSubscribed()) {
+      lateEventDelivered = true;
+    }
+    emit({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        delta: "late event should not be logged",
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.deepEqual(result.structuredResponse, structuredFromText);
+    assert.equal(unsubscribeCount(), 1);
+    assert.equal(lateEventAttempted, true);
+    assert.equal(lateEventDelivered, false);
+
+    const traceLog = await readFile(runtime.deepagentsLogPath, "utf8");
+    assert.match(traceLog, /Pi Agent 生成流程结束/);
+    assert.match(traceLog, /读取文件：\/?\.workspace\/source-prd\.md/);
+    assert.doesNotMatch(traceLog, /late event should not be logged/);
+  } finally {
+    await closeWorkflowBoard();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("runPiAgentWithLogs fails closed when Pi does not return schema-valid structured data", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-pi-agent-schema-failure-"));
+  const runtime = buildTestRuntimeForOutput(tempRoot);
+  const schema = z.object({ summary: z.string() });
+  const { session, unsubscribeCount } = createFakePiSession([
+    {
+      type: "agent_end",
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: JSON.stringify({ response: { summary: 123 } }) }],
+        },
+      ],
+    },
+  ]);
+
+  try {
+    await mkdir(runtime.deepagentsDirectory, { recursive: true });
+    await assert.rejects(
+      () => runPiAgentWithLogs({
+        session,
+        structuredResponse: {},
+        prompt: buildPiStructuredPrompt({ stage: "generate" }, schema),
+        responseSchema: schema,
+        runtime,
+        runtimePhase: "generate",
+        timeoutLabel: "pi agent schema failure",
+      }),
+      /pi agent schema failure did not return a valid structured response/,
+    );
+    assert.equal(unsubscribeCount(), 1);
+  } finally {
+    await closeWorkflowBoard();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("Pi path adapter keeps tool paths inside the generated workspace", () => {
+  const outputDirectory = path.resolve("tmp", "pi-path-output");
+
+  assert.equal(
+    mapPiToolPathToWorkspaceRelative(path.join(outputDirectory, "app", "page.tsx"), outputDirectory),
+    "app/page.tsx",
+  );
+  assert.equal(mapPiToolPathToWorkspaceRelative("/app/page.tsx", outputDirectory), "app/page.tsx");
+  assert.equal(mapPiToolPathToWorkspaceRelative("/.workspace/plan-spec.json", outputDirectory), ".workspace/plan-spec.json");
+  assert.equal(mapPiToolPathToWorkspaceRelative("/TODO.md", outputDirectory), ".workspace/todo.md");
+  assert.equal(mapPiToolPathToWorkspaceRelative("/todo.md", outputDirectory), ".workspace/todo.md");
+  assert.equal(mapPiToolPathToWorkspaceRelative("/.workspace/TODO.md", outputDirectory), ".workspace/todo.md");
+  assert.equal(
+    mapPiToolPathToWorkspaceRelative(path.join(outputDirectory, "TODO.md"), outputDirectory),
+    ".workspace/todo.md",
+  );
+
+  const relativeInput: Record<string, unknown> = { path: "./app/page.tsx" };
+  assert.deepEqual(rewritePiToolPathInput(relativeInput, outputDirectory), {});
+  assert.equal(relativeInput.path, "app/page.tsx");
+
+  const parentEscape: Record<string, unknown> = { path: "../outside.txt" };
+  assert.match(rewritePiToolPathInput(parentEscape, outputDirectory).blockedReason ?? "", /escapes/);
+  assert.equal(parentEscape.path, "../outside.txt");
+
+  const windowsEscape: Record<string, unknown> = { path: "..\\outside.txt" };
+  assert.match(rewritePiToolPathInput(windowsEscape, outputDirectory).blockedReason ?? "", /escapes/);
+  assert.equal(windowsEscape.path, "..\\outside.txt");
+});
+
 test("resolveSpawnCommand finds Windows command shims through PATHEXT", async (context) => {
   if (process.platform !== "win32") {
     context.skip("Windows-only command shim resolution");
@@ -1165,7 +1411,7 @@ test("resolveSpawnCommand finds Windows command shims through PATHEXT", async (c
 
 test("filterRedundantValidationDetailLines removes validation detail already present in reasons", () => {
   const reasons = [
-    "生成阶段运行验证失败：pnpm typecheck 未通过。退出码 2。摘要：app/(admin)/page.tsx(24,5): error TS2687。详见 .deepagents/runtime-validation.log。",
+    "生成阶段运行验证失败：pnpm typecheck 未通过。退出码 2。摘要：app/(admin)/page.tsx(24,5): error TS2687。详见 .workspace/runtime-validation.log。",
   ];
 
   assert.deepEqual(
@@ -1343,7 +1589,7 @@ test("non-interactive runtime validation starts dev server and visits every page
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-non-interactive-dev-server-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -1430,7 +1676,7 @@ test("smoke runtime validation starts dev server and renders every planned page 
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-smoke-dev-server-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -1544,7 +1790,7 @@ test("smoke runtime validation fails on browser render and runtime errors", asyn
 
   for (const smokeCase of cases) {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), `app-builder-smoke-failure-${smokeCase.name.replace(/\s+/g, "-")}-`));
-    const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+    const deepagentsDirectory = path.join(tempRoot, ".workspace");
     const serverPath = path.join(tempRoot, "server.mjs");
     const devServerStep = {
       name: "node dev server",
@@ -1619,7 +1865,7 @@ test("smoke runtime validation reports missing Playwright Chromium with an insta
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-smoke-missing-browser-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -1699,7 +1945,7 @@ test("interactive runtime exposes proxy and passes after request idle", async (c
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-dev-server-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -1805,7 +2051,7 @@ test("interactive runtime validate page can manually complete without coverage p
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-manual-complete-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -1901,7 +2147,7 @@ test("interactive runtime validate page can submit implementation requests for r
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-implementation-request-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -1988,7 +2234,7 @@ test("interactive runtime captures API 401 response body for repair context", as
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-proxy-401-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -2068,7 +2314,7 @@ test("interactive runtime captures proxy 5xx response body for repair context", 
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-proxy-5xx-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -2146,7 +2392,7 @@ test("interactive runtime reuses ports and does not reopen browser within a sess
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-stable-session-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const startCountPath = path.join(tempRoot, "server-starts.txt");
   const devServerStep = {
@@ -2238,7 +2484,7 @@ test("closeRuntimeInteractionValidationSession terminates dev server descendants
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-process-tree-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const childPath = path.join(tempRoot, "child.mjs");
   const childPidPath = path.join(tempRoot, "child.pid");
@@ -2319,7 +2565,7 @@ test("interactive runtime clears stale Next dev lock for the current output dire
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-stale-next-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const nextDevDirectory = path.join(tempRoot, ".next", "dev");
   const staleProcessPath = path.join(tempRoot, "stale-next.mjs");
   const serverPath = path.join(tempRoot, "server.mjs");
@@ -2400,7 +2646,7 @@ test("interactive runtime fails on blocked cross-origin dev resource output", as
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-cross-origin-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -2459,7 +2705,7 @@ test("interactive runtime fails from dev server stdout errors", async (context) 
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-stdout-error-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -2519,7 +2765,7 @@ test("interactive runtime detects compile errors before MallocStackLogging noise
   }
 
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-interactive-stdout-noise-"));
-  const deepagentsDirectory = path.join(tempRoot, ".deepagents");
+  const deepagentsDirectory = path.join(tempRoot, ".workspace");
   const serverPath = path.join(tempRoot, "server.mjs");
   const devServerStep = {
     name: "node dev server",
@@ -2602,7 +2848,7 @@ test("planSpec schema accepts PRD-derived environment variables, references, and
       url: "https://dev.qweather.com/docs/api/weather/weather-now/",
       description: "用于理解和风天气实时天气接口的认证、请求参数和响应结构。",
       usage: "生成阶段自行判断是否用于相关天气 API 实现。",
-      localPath: "/.deepagents/references/external/dev-qweather-com-docs-api-weather-weather-now.md",
+      localPath: "/.workspace/references/external/dev-qweather-com-docs-api-weather-weather-now.md",
       retrievedAt: "2026-04-30T00:00:00.000Z",
       contentType: "text/html; charset=utf-8",
       retrievalStatus: "downloaded",
@@ -2713,7 +2959,7 @@ class SequencedRuntimeValidator implements GeneratedAppValidator {
       );
 
       return {
-        reasons: ["生成阶段运行验证失败：pnpm db:init 未通过。Prisma schema 校验失败。详见 .deepagents/runtime-validation.log。"],
+        reasons: ["生成阶段运行验证失败：pnpm db:init 未通过。Prisma schema 校验失败。详见 .workspace/runtime-validation.log。"],
         steps: [
           { name: "mv .env.example .env", ok: true, detail: "已生成 .env。" },
           { name: "pnpm install", ok: true, detail: "执行成功。" },
@@ -2795,10 +3041,10 @@ class StubTextGenerator implements TextGenerator {
     return {
       summary: "Stub planner wrote validated planning artifacts.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -2883,10 +3129,10 @@ class StructuredPlanSpecResultTextGenerator extends StubTextGenerator {
     return {
       summary: "Planner returned planSpec as structured response.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       planSpec,
@@ -3025,10 +3271,10 @@ class ReferenceAwareTextGenerator implements TextGenerator {
     return {
       summary: "Reference-aware planner wrote local reference paths.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3137,10 +3383,10 @@ class MultiReferenceTextGenerator extends ReferenceAwareTextGenerator {
     return {
       summary: "Multi-reference planner wrote local reference paths.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3202,7 +3448,7 @@ class SplitPlanReferenceTextGenerator implements TextGenerator {
 
     return {
       summary: "Wrote PRD analysis while references converted.",
-      artifactsWritten: [".deepagents/prd-analysis.md"],
+      artifactsWritten: [".workspace/prd-analysis.md"],
       planSpecVersion: 1,
       notes: [],
     };
@@ -3246,9 +3492,9 @@ class SplitPlanReferenceTextGenerator implements TextGenerator {
     return {
       summary: "Assembled final plan from PRD analysis and converted references.",
       artifactsWritten: [
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3343,10 +3589,10 @@ class EnvRepairTextGenerator implements TextGenerator {
     return {
       summary: "Weather planner wrote env-aware artifacts.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3419,10 +3665,10 @@ class LockedEnvMutationTextGenerator implements TextGenerator {
     return {
       summary: "Weather planner wrote env-aware artifacts.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3496,10 +3742,10 @@ class LockedEnvConflictTextGenerator extends LockedEnvMutationTextGenerator {
     return {
       summary: "Planner wrote a locked env conflict.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3540,10 +3786,10 @@ class LockedEnvPlanRepairTextGenerator extends LockedEnvConflictTextGenerator {
     return {
       summary: "Plan repair removed locked env declarations.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3603,10 +3849,10 @@ class AuthorizedNextConfigMutationTextGenerator extends UnauthorizedNextConfigMu
     return {
       summary: "Planner declared the PRD-backed project config change.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3626,9 +3872,9 @@ class IndirectResourceTextGenerator implements TextGenerator {
     return {
       summary: "已写入包含 indirect 资源的计划产物。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3673,9 +3919,9 @@ class ColonRouteTextGenerator implements TextGenerator {
     return {
       summary: "已写入使用冒号路由语义的计划产物。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3720,9 +3966,9 @@ class MainRouteGroupTextGenerator implements TextGenerator {
     return {
       summary: "Wrote plan artifacts for pages under an arbitrary route group.",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3797,9 +4043,9 @@ class RetryingPlanTextGenerator implements TextGenerator {
     return {
       summary: "重试后已补齐必需计划 artifacts。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -3985,10 +4231,10 @@ class NormalizingPlanTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段返回了需要宿主归一化的 plan spec。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4082,10 +4328,10 @@ class MissingStructuredGenerateRetryTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
-        ".deepagents/interaction-contract.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
+        ".workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4144,9 +4390,9 @@ class GenerateStructuredResponseRecoveryTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4185,9 +4431,9 @@ class GenerateRepairStructuredResponseRecoveryTextGenerator implements TextGener
     return {
       summary: "计划阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4243,9 +4489,9 @@ class RetryingGenerationTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4319,9 +4565,9 @@ class RuntimeValidationRepairingTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4383,9 +4629,9 @@ class InteractiveRuntimeRepairingTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4521,9 +4767,9 @@ class LooseDeclarationTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段成功。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4620,9 +4866,9 @@ class ApiOnlySupportResourceTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段成功，包含仅暴露 API 的支持资源。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4683,7 +4929,7 @@ class ApiOnlySupportResourceTextGenerator implements TextGenerator {
 class MisplacedArtifactTextGenerator implements TextGenerator {
   async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime) {
     const planSpec = buildPlanSpec();
-    const misplacedDeepagentsDirectory = path.join(runtime.outputDirectory, "app", ".deepagents");
+    const misplacedDeepagentsDirectory = path.join(runtime.outputDirectory, "app", ".workspace");
 
     await mkdir(misplacedDeepagentsDirectory, { recursive: true });
     await writeFile(
@@ -4710,10 +4956,10 @@ class MisplacedArtifactTextGenerator implements TextGenerator {
     return {
       summary: "Planner mistakenly wrote host artifacts under /app.",
       artifactsWritten: [
-        "/app/.deepagents/prd-analysis.md",
-        "/app/.deepagents/generated-spec.md",
-        "/app/.deepagents/plan-spec.json",
-        "/app/.deepagents/interaction-contract.json",
+        "/app/.workspace/prd-analysis.md",
+        "/app/.workspace/generated-spec.md",
+        "/app/.workspace/plan-spec.json",
+        "/app/.workspace/interaction-contract.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4787,9 +5033,9 @@ class RestSplitApiTextGenerator implements TextGenerator {
     return {
       summary: "计划阶段允许同一路径按 method 拆分接口。",
       artifactsWritten: [
-        ".deepagents/prd-analysis.md",
-        ".deepagents/generated-spec.md",
-        ".deepagents/plan-spec.json",
+        ".workspace/prd-analysis.md",
+        ".workspace/generated-spec.md",
+        ".workspace/plan-spec.json",
       ],
       planSpecVersion: 1,
       notes: [],
@@ -4854,67 +5100,67 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     ) as Array<Record<string, unknown>>;
     const templateLock = await readFile(path.join(result.outputDirectory, "template-lock.json"), "utf8");
     const stagedTemplateManifest = await readFile(
-      path.join(result.outputDirectory, ".deepagents/template.json"),
+      path.join(result.outputDirectory, ".workspace/template.json"),
       "utf8",
     );
     const sessionAgents = await readFile(
-      path.join(result.outputDirectory, ".deepagents/AGENTS.md"),
+      path.join(result.outputDirectory, ".workspace/AGENTS.md"),
       "utf8",
     );
     const planPromptSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-system-prompt.md"),
+      path.join(result.outputDirectory, ".workspace/plan-system-prompt.md"),
       "utf8",
     );
     const planRepairPromptSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-repair-system-prompt.md"),
+      path.join(result.outputDirectory, ".workspace/plan-repair-system-prompt.md"),
       "utf8",
     );
     const generatePromptSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generate-system-prompt.md"),
+      path.join(result.outputDirectory, ".workspace/generate-system-prompt.md"),
       "utf8",
     );
     const generateRepairPromptSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generate-repair-system-prompt.md"),
+      path.join(result.outputDirectory, ".workspace/generate-repair-system-prompt.md"),
       "utf8",
     );
     const sourcePrdSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/source-prd.md"),
+      path.join(result.outputDirectory, ".workspace/source-prd.md"),
       "utf8",
     );
     const analysisSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/prd-analysis.md"),
+      path.join(result.outputDirectory, ".workspace/prd-analysis.md"),
       "utf8",
     );
     const generatedSpecSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generated-spec.md"),
+      path.join(result.outputDirectory, ".workspace/generated-spec.md"),
       "utf8",
     );
     const planSpecSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-spec.json"),
+      path.join(result.outputDirectory, ".workspace/plan-spec.json"),
       "utf8",
     );
     const planValidationSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-validation.json"),
+      path.join(result.outputDirectory, ".workspace/plan-validation.json"),
       "utf8",
     );
     const generationValidationSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
     const runtimeValidationLog = await readFile(
-      path.join(result.outputDirectory, ".deepagents/runtime-validation.log"),
+      path.join(result.outputDirectory, ".workspace/runtime-validation.log"),
       "utf8",
     );
     const metricsLog = await readFile(
-      path.join(result.outputDirectory, ".deepagents/metrics.jsonl"),
+      path.join(result.outputDirectory, ".workspace/metrics.jsonl"),
       "utf8",
     );
     const deepagentsConfig = await readFile(
-      path.join(result.outputDirectory, ".deepagents/config.json"),
+      path.join(result.outputDirectory, ".workspace/config.json"),
       "utf8",
     );
     const stagedReference = await readFile(
-      path.join(result.outputDirectory, ".deepagents/references/generated-app-architecture.md"),
+      path.join(result.outputDirectory, ".workspace/references/generated-app-architecture.md"),
       "utf8",
     );
 
@@ -5016,8 +5262,8 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(generationValidationSnapshot, /"name": "pnpm dev"/);
     assert.match(runtimeValidationLog, /=== pnpm install ===/);
     assert.match(runtimeValidationLog, /=== pnpm dev ===/);
-    assert.match(deepagentsConfig, /"runtimeValidationLog": "\.deepagents\/runtime-validation\.log"/);
-    assert.match(deepagentsConfig, /"metricsLog": "\.deepagents\/metrics\.jsonl"/);
+    assert.match(deepagentsConfig, /"runtimeValidationLog": "\.workspace\/runtime-validation\.log"/);
+    assert.match(deepagentsConfig, /"metricsLog": "\.workspace\/metrics\.jsonl"/);
     assert.ok(metricRecords.length >= 10);
     assert.ok(metricNames.includes("workspace.prepare"));
     assert.ok(metricNames.includes("template.load"));
@@ -5043,9 +5289,9 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.doesNotMatch(deepagentsConfig, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.doesNotMatch(stagedReference, /\/Users\/aca\/dev\/app-builder-v2/);
     assert.equal(result.files.some((file) => file.startsWith(".git/")), false);
-    await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/normalized-spec.json")));
-    await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/prompts")));
-    await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/starter")));
+    await assert.rejects(() => access(path.join(result.outputDirectory, ".workspace/normalized-spec.json")));
+    await assert.rejects(() => access(path.join(result.outputDirectory, ".workspace/prompts")));
+    await assert.rejects(() => access(path.join(result.outputDirectory, ".workspace/starter")));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -5082,7 +5328,7 @@ test("generateApplication resolves PRD API docs into local reference artifacts b
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifestPath = path.join(result.outputDirectory, ".workspace/references/reference-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { entries: Array<{ url: string; localPath?: string; retrievalStatus: string; contentType?: string }> };
     assert.equal(manifest.entries.length, 1);
     assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
@@ -5095,7 +5341,7 @@ test("generateApplication resolves PRD API docs into local reference artifacts b
     assert.equal(generator.observedConversionRuntime?.sessionId, result.sessionId);
 
     const localPath = manifest.entries[0]?.localPath;
-    assert.ok(localPath?.startsWith("/.deepagents/references/external/"));
+    assert.ok(localPath?.startsWith("/.workspace/references/external/"));
     assert.equal(path.extname(localPath!), ".md");
     assert.equal(generator.observedSpecExternalReferences?.[0]?.localPath, localPath);
     assert.equal(generator.observedSpecExternalReferences?.[0]?.retrievalStatus, "downloaded");
@@ -5104,18 +5350,18 @@ test("generateApplication resolves PRD API docs into local reference artifacts b
       await readFile(
         path.join(
           result.outputDirectory,
-          ".deepagents/references/external/dev-qweather-com-docs-api-weather-weather-now.html",
+          ".workspace/references/external/dev-qweather-com-docs-api-weather-weather-now.html",
         ),
         "utf8",
       ),
       rawHtml,
     );
 
-    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8")) as PlanSpec;
+    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".workspace/plan-spec.json"), "utf8")) as PlanSpec;
     assert.equal(planSpec.references?.[0]?.localPath, localPath);
     assert.equal(planSpec.references?.[0]?.localPath, generator.observedLocalReferences?.[0]?.localPath);
     assert.equal(planSpec.references?.[0]?.retrievalStatus, "downloaded");
-    assert.match(await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8"), new RegExp(localPath!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(await readFile(path.join(result.outputDirectory, ".workspace/generated-spec.md"), "utf8"), new RegExp(localPath!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     globalThis.fetch = originalFetch;
     await rm(tempRoot, { recursive: true, force: true });
@@ -5152,12 +5398,12 @@ test("generateApplication keeps downloaded references when Markdown conversion f
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifestPath = path.join(result.outputDirectory, ".workspace/references/reference-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { entries: Array<{ localPath?: string; retrievalStatus: string }> };
     const localPath = manifest.entries[0]?.localPath;
 
     assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
-    assert.ok(localPath?.startsWith("/.deepagents/references/external/"));
+    assert.ok(localPath?.startsWith("/.workspace/references/external/"));
     assert.equal(path.extname(localPath!), ".md");
     assert.equal(generator.observedLocalReferences?.[0]?.localPath, localPath);
 
@@ -5166,7 +5412,7 @@ test("generateApplication keeps downloaded references when Markdown conversion f
     assert.match(convertedContents, /GET \/v7\/weather\/now/);
     assert.doesNotMatch(convertedContents, /<html|<body|<code/i);
     assert.equal(
-      await readFile(path.join(result.outputDirectory, ".deepagents/references/external/docs-example-com-weather-api.html"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/references/external/docs-example-com-weather-api.html"), "utf8"),
       rawHtml,
     );
   } finally {
@@ -5209,12 +5455,12 @@ test("generateApplication falls back to stripped Markdown when custom generator 
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifestPath = path.join(result.outputDirectory, ".workspace/references/reference-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { entries: Array<{ localPath?: string; retrievalStatus: string }> };
     const localPath = manifest.entries[0]?.localPath;
 
     assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
-    assert.ok(localPath?.startsWith("/.deepagents/references/external/"));
+    assert.ok(localPath?.startsWith("/.workspace/references/external/"));
     assert.equal(path.extname(localPath!), ".md");
     assert.equal(generator.observedLocalReferences?.[0]?.localPath, localPath);
 
@@ -5277,7 +5523,7 @@ test("generateApplication converts multiple external references concurrently wit
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifestPath = path.join(result.outputDirectory, ".workspace/references/reference-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
       entries: Array<{ url: string; localPath?: string; retrievalStatus: string }>;
     };
@@ -5286,20 +5532,20 @@ test("generateApplication converts multiple external references concurrently wit
     assert.deepEqual(manifest.entries.map((entry) => entry.url), referenceUrls);
     assert.deepEqual(manifest.entries.map((entry) => entry.retrievalStatus), referenceUrls.map(() => "downloaded"));
     assert.equal(new Set(localPaths).size, referenceUrls.length);
-    assert.equal(localPaths[0], "/.deepagents/references/external/docs-example-com-weather-current.md");
-    assert.equal(localPaths[1], "/.deepagents/references/external/docs-example-com-weather-current-2.md");
+    assert.equal(localPaths[0], "/.workspace/references/external/docs-example-com-weather-current.md");
+    assert.equal(localPaths[1], "/.workspace/references/external/docs-example-com-weather-current-2.md");
     assert.equal(generator.maxConcurrentConversions <= 8, true);
     assert.equal(generator.maxConcurrentConversions > 1, true);
     assert.deepEqual(generator.observedLocalReferences?.map((reference) => reference.localPath), localPaths);
 
-    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8")) as PlanSpec;
+    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".workspace/plan-spec.json"), "utf8")) as PlanSpec;
     assert.deepEqual(planSpec.references?.map((reference) => reference.localPath), localPaths);
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/references/external/docs-example-com-weather-current.html"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/references/external/docs-example-com-weather-current.html"), "utf8"),
       /Reference 1/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/references/external/docs-example-com-weather-current-2.html"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/references/external/docs-example-com-weather-current-2.html"), "utf8"),
       /Reference 2/,
     );
   } finally {
@@ -5338,13 +5584,13 @@ test("generateApplication runs reference conversion in parallel with PRD analysi
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifestPath = path.join(result.outputDirectory, ".workspace/references/reference-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
       entries: Array<{ url: string; localPath?: string; retrievalStatus: string }>;
     };
     const localPath = manifest.entries[0]?.localPath;
-    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8")) as PlanSpec;
-    const generatedSpec = await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8");
+    const planSpec = JSON.parse(await readFile(path.join(result.outputDirectory, ".workspace/plan-spec.json"), "utf8")) as PlanSpec;
+    const generatedSpec = await readFile(path.join(result.outputDirectory, ".workspace/generated-spec.md"), "utf8");
 
     assert.equal(generator.planProjectCalled, false);
     assert.equal(manifest.entries[0]?.retrievalStatus, "downloaded");
@@ -5403,8 +5649,8 @@ test("generateApplication keeps long PRD analysis as a single full-input model c
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const analysis = await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8");
-    const metricRecords = (await readFile(path.join(result.outputDirectory, ".deepagents/metrics.jsonl"), "utf8"))
+    const analysis = await readFile(path.join(result.outputDirectory, ".workspace/prd-analysis.md"), "utf8");
+    const metricRecords = (await readFile(path.join(result.outputDirectory, ".workspace/metrics.jsonl"), "utf8"))
       .trim()
       .split(/\r?\n/)
       .filter(Boolean)
@@ -5419,7 +5665,7 @@ test("generateApplication keeps long PRD analysis as a single full-input model c
     assert.match(analysis, /# Parallel PRD Analysis/);
     assert.doesNotMatch(analysis, /Host assembled this analysis from/);
     await assert.rejects(
-      access(path.join(result.outputDirectory, ".deepagents/prd-analysis-chunks")),
+      access(path.join(result.outputDirectory, ".workspace/prd-analysis-chunks")),
       /ENOENT/,
     );
   } finally {
@@ -5440,9 +5686,9 @@ test("generateApplication retries split PRD analysis when structured response is
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const analysis = await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8");
-    const generatedSpec = await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8");
-    const metricRecords = (await readFile(path.join(result.outputDirectory, ".deepagents/metrics.jsonl"), "utf8"))
+    const analysis = await readFile(path.join(result.outputDirectory, ".workspace/prd-analysis.md"), "utf8");
+    const generatedSpec = await readFile(path.join(result.outputDirectory, ".workspace/generated-spec.md"), "utf8");
+    const metricRecords = (await readFile(path.join(result.outputDirectory, ".workspace/metrics.jsonl"), "utf8"))
       .trim()
       .split(/\r?\n/)
       .filter(Boolean)
@@ -5471,8 +5717,8 @@ test("generateApplication recovers split PRD analysis when artifact was written 
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const analysis = await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8");
-    const generatedSpec = await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8");
+    const analysis = await readFile(path.join(result.outputDirectory, ".workspace/prd-analysis.md"), "utf8");
+    const generatedSpec = await readFile(path.join(result.outputDirectory, ".workspace/generated-spec.md"), "utf8");
 
     assert.equal(generator.analysisAttempts, 2);
     assert.match(analysis, /Parallel PRD Analysis/);
@@ -5495,7 +5741,7 @@ test("generateApplication can delegate initial generation to parallel agents beh
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const metricRecords = (await readFile(path.join(result.outputDirectory, ".deepagents/metrics.jsonl"), "utf8"))
+    const metricRecords = (await readFile(path.join(result.outputDirectory, ".workspace/metrics.jsonl"), "utf8"))
       .trim()
       .split(/\r?\n/)
       .filter(Boolean)
@@ -5517,7 +5763,7 @@ test("generateApplication can delegate initial generation to parallel agents beh
       true,
     );
     assert.equal(await readFile(path.join(result.outputDirectory, "generated/parallel-marker.txt"), "utf8"), "parallel-generation-ran\n");
-    assert.match(await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"), /"valid": true/);
+    assert.match(await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"), /"valid": true/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -5569,7 +5815,7 @@ test("generateApplication isolates reference download and conversion failures", 
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const manifestPath = path.join(result.outputDirectory, ".deepagents/references/reference-manifest.json");
+    const manifestPath = path.join(result.outputDirectory, ".workspace/references/reference-manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
       entries: Array<{ url: string; localPath?: string; retrievalStatus: string; error?: string }>;
     };
@@ -5620,7 +5866,7 @@ test("generateApplication fails plan validation when required API docs cannot be
       /Plan validation failed:.*必需参考资料下载失败.*https:\/\/docs\.example\.invalid\/broken-weather-api/s,
     );
 
-    const validation = JSON.parse(await readFile(path.join(tempRoot, "output/.deepagents/plan-validation.json"), "utf8")) as { valid: boolean; reasons: string[] };
+    const validation = JSON.parse(await readFile(path.join(tempRoot, "output/.workspace/plan-validation.json"), "utf8")) as { valid: boolean; reasons: string[] };
     assert.equal(validation.valid, false);
     assert.match(validation.reasons.join("\n"), /必需参考资料下载失败/);
   } finally {
@@ -5664,11 +5910,11 @@ test("generateApplication repairs mini-app .env.example when planSpec declares e
 
     const envExample = await readFile(path.join(result.outputDirectory, ".env.example"), "utf8");
     const planSpecSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-spec.json"),
+      path.join(result.outputDirectory, ".workspace/plan-spec.json"),
       "utf8",
     );
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -5729,7 +5975,7 @@ test("generateApplication restores locked .env.example keys from the starter sna
     const envExample = await readFile(path.join(result.outputDirectory, ".env.example"), "utf8");
     const env = await readFile(path.join(result.outputDirectory, ".env"), "utf8");
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -5789,7 +6035,7 @@ test("generateApplication fails plan validation when planSpec declares a locked 
     );
 
     const validation = JSON.parse(
-      await readFile(path.join(tempRoot, "output", ".deepagents/plan-validation.json"), "utf8"),
+      await readFile(path.join(tempRoot, "output", ".workspace/plan-validation.json"), "utf8"),
     ) as { valid: boolean; reasons: string[] };
     const envExample = await readFile(path.join(tempRoot, "output", ".env.example"), "utf8");
 
@@ -5843,15 +6089,15 @@ test("generateApplication removes locked env declarations during plan repair bef
     });
 
     const planSpecSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-spec.json"),
+      path.join(result.outputDirectory, ".workspace/plan-spec.json"),
       "utf8",
     );
     const envExample = await readFile(path.join(result.outputDirectory, ".env.example"), "utf8");
     const planValidation = JSON.parse(
-      await readFile(path.join(result.outputDirectory, ".deepagents/plan-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/plan-validation.json"), "utf8"),
     ) as { valid: boolean; reasons: string[] };
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -5911,7 +6157,7 @@ test("generateApplication fails generation validation when next.config.ts change
     );
 
     const generationValidation = await readFile(
-      path.join(tempRoot, "output", ".deepagents/generation-validation.json"),
+      path.join(tempRoot, "output", ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -5960,15 +6206,15 @@ test("generateApplication allows next.config.ts changes when planSpec declares P
     });
 
     const planSpec = JSON.parse(
-      await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/plan-spec.json"), "utf8"),
     ) as PlanSpec;
     const nextConfig = await readFile(path.join(result.outputDirectory, "next.config.ts"), "utf8");
     const generatePrompt = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generate-system-prompt.md"),
+      path.join(result.outputDirectory, ".workspace/generate-system-prompt.md"),
       "utf8",
     );
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -6010,7 +6256,7 @@ test("generateApplication rejects mini-app menu anchors that do not use next Lin
     );
 
     const generationValidation = JSON.parse(
-      await readFile(path.join(tempRoot, "output", ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(tempRoot, "output", ".workspace/generation-validation.json"), "utf8"),
     ) as { valid: boolean; reasons: string[] };
 
     assert.equal(generationValidation.valid, false);
@@ -6037,19 +6283,19 @@ test("generateApplication retries the plan phase until plan-spec.json is valid",
     assert.equal(generator.planAttempts, 1);
     assert.equal(generator.planRepairAttempts, 1);
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/prd-analysis.md"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/prd-analysis.md"), "utf8"),
       /重试后的分析稿/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generated-spec.md"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generated-spec.md"), "utf8"),
       /重试后的详细 Spec/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/plan-spec.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/plan-spec.json"), "utf8"),
       /"version": 1/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/error.log"), "utf8"),
       /artifacts\.planSpec|artifactsWritten/,
     );
   } finally {
@@ -6071,19 +6317,19 @@ test("generateApplication persists structured plan artifacts before plan validat
     });
 
     const persistedPlanSpecContents = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-spec.json"),
+      path.join(result.outputDirectory, ".workspace/plan-spec.json"),
       "utf8",
     );
     const persistedPlanSpec = JSON.parse(persistedPlanSpecContents) as PlanSpec;
     const validation = validatePlanSpec(persistedPlanSpec);
     const persistedInteractionContractContents = await readFile(
-      path.join(result.outputDirectory, ".deepagents/interaction-contract.json"),
+      path.join(result.outputDirectory, ".workspace/interaction-contract.json"),
       "utf8",
     );
     const persistedInteractionContract = JSON.parse(persistedInteractionContractContents) as InteractionContract;
     const interactionValidation = validateInteractionContract(persistedInteractionContract);
     const planValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-validation.json"),
+      path.join(result.outputDirectory, ".workspace/plan-validation.json"),
       "utf8",
     );
 
@@ -6111,11 +6357,11 @@ test("generateApplication normalizes common plan-spec consistency errors before 
     });
 
     const normalizedPlanSpec = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-spec.json"),
+      path.join(result.outputDirectory, ".workspace/plan-spec.json"),
       "utf8",
     );
     const planValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-validation.json"),
+      path.join(result.outputDirectory, ".workspace/plan-validation.json"),
       "utf8",
     );
 
@@ -6148,11 +6394,11 @@ test("generateApplication recovers when plan repair writes valid artifacts but m
     });
 
     const planValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-validation.json"),
+      path.join(result.outputDirectory, ".workspace/plan-validation.json"),
       "utf8",
     );
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -6206,9 +6452,9 @@ test("generateApplication retries missing structured generate responses before e
 
     const pageSource = await readFile(path.join(result.outputDirectory, "app/(admin)/page.tsx"), "utf8");
     const retryMarker = await readFile(path.join(result.outputDirectory, "generated/retry-marker.txt"), "utf8");
-    const errorLog = await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8");
+    const errorLog = await readFile(path.join(result.outputDirectory, ".workspace/error.log"), "utf8");
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -6239,7 +6485,7 @@ test("generateApplication recovers when generate phase writes valid artifacts bu
     });
 
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -6267,7 +6513,7 @@ test("generateApplication recovers when generate repair writes valid artifacts b
     });
 
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -6298,7 +6544,7 @@ test("generateApplication retries the generate phase without rerunning planning"
     assert.equal(generator.generationAttempts, 1);
     assert.equal(generator.generationRepairAttempts, 1);
     assert.match(
-      await readFile(path.join(tempRoot, "output", ".deepagents/error.log"), "utf8"),
+      await readFile(path.join(tempRoot, "output", ".workspace/error.log"), "utf8"),
       /尚未完整落盘：WorkOrder|尚未落盘：\/work-orders|尚未落盘：\/app\/api\/work-orders\/route\.ts/,
     );
   } finally {
@@ -6322,15 +6568,15 @@ test("generateApplication hands runtime validation failures back to generateRepa
 
     assert.equal(generator.generationRepairAttempts, 1);
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"name": "pnpm db:init"/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"name": "pnpm dev"/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/runtime-validation.log"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/runtime-validation.log"), "utf8"),
       /=== pnpm dev ===/,
     );
     assert.match(
@@ -6367,11 +6613,11 @@ test("generateApplication can skip the final validation phase", async () => {
     });
 
     const config = JSON.parse(
-      await readFile(path.join(result.outputDirectory, ".deepagents/config.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/config.json"), "utf8"),
     ) as { workflow?: { phase?: string; completedPhases?: string[] } };
     assert.equal(config.workflow?.phase, "complete");
     assert.deepEqual(config.workflow?.completedPhases, ["plan", "generate"]);
-    await assert.rejects(() => access(path.join(result.outputDirectory, ".deepagents/runtime-interaction-validation.json")));
+    await assert.rejects(() => access(path.join(result.outputDirectory, ".workspace/runtime-interaction-validation.json")));
   } finally {
     process.chdir(previousCwd);
     await rm(tempRoot, { recursive: true, force: true });
@@ -6411,14 +6657,14 @@ test("generateApplication runs enabled interactive validation and repairs inside
     });
 
     const interactionArtifact = await readFile(
-      path.join(result.outputDirectory, ".deepagents/runtime-interaction-validation.json"),
+      path.join(result.outputDirectory, ".workspace/runtime-interaction-validation.json"),
       "utf8",
     );
     const runtimeLog = await readFile(
-      path.join(result.outputDirectory, ".deepagents/runtime-validation.log"),
+      path.join(result.outputDirectory, ".workspace/runtime-validation.log"),
       "utf8",
     );
-    const config = await readFile(path.join(result.outputDirectory, ".deepagents/config.json"), "utf8");
+    const config = await readFile(path.join(result.outputDirectory, ".workspace/config.json"), "utf8");
 
     assert.equal(generator.generationRepairAttempts, 1);
     assert.match(interactionArtifact, /"valid": true/);
@@ -6464,9 +6710,9 @@ test("generateApplication repairs first interactive runtime failure even when ge
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const errorLog = await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8");
+    const errorLog = await readFile(path.join(result.outputDirectory, ".workspace/error.log"), "utf8");
     const interactionArtifact = await readFile(
-      path.join(result.outputDirectory, ".deepagents/runtime-interaction-validation.json"),
+      path.join(result.outputDirectory, ".workspace/runtime-interaction-validation.json"),
       "utf8",
     );
 
@@ -6511,9 +6757,9 @@ test("generateApplication stops failing interactive dev server and repairs even 
       validator: new SuccessfulRuntimeValidator(),
     });
 
-    const errorLog = await readFile(path.join(result.outputDirectory, ".deepagents/error.log"), "utf8");
+    const errorLog = await readFile(path.join(result.outputDirectory, ".workspace/error.log"), "utf8");
     const interactionArtifact = await readFile(
-      path.join(result.outputDirectory, ".deepagents/runtime-interaction-validation.json"),
+      path.join(result.outputDirectory, ".workspace/runtime-interaction-validation.json"),
       "utf8",
     );
 
@@ -6540,7 +6786,7 @@ test("generateApplication validates generated coverage from actual files instead
     });
 
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"valid": true/,
     );
   } finally {
@@ -6561,7 +6807,7 @@ test("generateApplication ignores dedicated page/api coverage for indirect resou
     });
 
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -6586,7 +6832,7 @@ test("generateApplication accepts colon-style page routes when files are written
     });
 
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -6613,7 +6859,7 @@ test("generateApplication accepts plan pages written under arbitrary App Router 
     });
 
     const generationValidation = await readFile(
-      path.join(result.outputDirectory, ".deepagents/generation-validation.json"),
+      path.join(result.outputDirectory, ".workspace/generation-validation.json"),
       "utf8",
     );
 
@@ -6637,11 +6883,11 @@ test("generateApplication allows API-only support resources during plan validati
     });
 
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/plan-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/plan-validation.json"), "utf8"),
       /"valid": true/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents/generation-validation.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace/generation-validation.json"), "utf8"),
       /"valid": true/,
     );
   } finally {
@@ -6661,15 +6907,15 @@ test("generateApplication relocates host artifacts that were mistakenly written 
     });
 
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents", "prd-analysis.md"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace", "prd-analysis.md"), "utf8"),
       /Misplaced 分析稿/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents", "generated-spec.md"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace", "generated-spec.md"), "utf8"),
       /Misplaced Spec/,
     );
     assert.match(
-      await readFile(path.join(result.outputDirectory, ".deepagents", "plan-spec.json"), "utf8"),
+      await readFile(path.join(result.outputDirectory, ".workspace", "plan-spec.json"), "utf8"),
       /"version": 1/,
     );
     assert.match(
@@ -6677,7 +6923,7 @@ test("generateApplication relocates host artifacts that were mistakenly written 
       /Misplaced Report/,
     );
     await assert.rejects(() =>
-      access(path.join(result.outputDirectory, "app", ".deepagents", "plan-spec.json")),
+      access(path.join(result.outputDirectory, "app", ".workspace", "plan-spec.json")),
     );
     await assert.rejects(() =>
       access(path.join(result.outputDirectory, "app", "app-builder-report.md")),
@@ -6699,7 +6945,7 @@ test("generateApplication accepts REST APIs split by method under the same route
     });
 
     const planValidationSnapshot = await readFile(
-      path.join(result.outputDirectory, ".deepagents/plan-validation.json"),
+      path.join(result.outputDirectory, ".workspace/plan-validation.json"),
       "utf8",
     );
 
@@ -7063,18 +7309,70 @@ test("generateApplication creates a session workspace under .out by default", as
     assert.match(result.outputDirectory, /[\\/]\.out[\\/][^\\/]+$/);
     assert.equal(path.basename(result.outputDirectory), result.sessionId);
 
-    const deepagentsConfig = await readFile(
-      path.join(result.outputDirectory, ".deepagents/config.json"),
+    const workspaceConfig = await readFile(
+      path.join(result.outputDirectory, WORKSPACE_DIR_NAME, "config.json"),
       "utf8",
     );
     const outputEntries = await readdir(result.outputDirectory);
 
-    assert.match(deepagentsConfig, new RegExp(result.sessionId));
-    assert.match(deepagentsConfig, /"phase": "complete"/);
-    assert.match(deepagentsConfig, /"completedPhases": \[/);
+    assert.match(workspaceConfig, new RegExp(result.sessionId));
+    assert.match(workspaceConfig, /"phase": "complete"/);
+    assert.match(workspaceConfig, /"completedPhases": \[/);
+    assert.equal(outputEntries.includes(WORKSPACE_DIR_NAME), true);
+    assert.equal(outputEntries.includes(LEGACY_WORKSPACE_DIR_NAME), false);
     assert.equal(outputEntries.includes(".git"), true);
   } finally {
     process.chdir(previousCwd);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("prepareOutputWorkspace creates the host workspace artifact contract", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-workspace-contract-"));
+  const outputDirectory = path.join(tempRoot, "generated-app");
+
+  try {
+    const workspace = await prepareOutputWorkspace({ outputDirectory });
+    const artifacts = createWorkspaceArtifactPaths(outputDirectory);
+    const outputEntries = await readdir(outputDirectory);
+    const workspaceEntries = await readdir(artifacts.workspaceDirectory);
+
+    assert.equal(workspace.deepagentsDirectory, artifacts.workspaceDirectory);
+    assert.equal(workspace.deepagentsPlanSpecPath, artifacts.planSpecPath);
+    assert.equal(workspace.deepagentsRuntimeValidationLogPath, artifacts.runtimeValidationLogPath);
+    assert.equal(outputEntries.includes(WORKSPACE_DIR_NAME), true);
+    assert.equal(outputEntries.includes(LEGACY_WORKSPACE_DIR_NAME), false);
+    assert.equal(workspaceEntries.includes("AGENTS.md"), true);
+    assert.equal(workspaceEntries.includes("references"), true);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("validateSessionPhase rejects legacy .deepagents-only sessions without migration", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-legacy-workspace-"));
+  const sessionId = "legacy-session";
+  const outputDirectory = path.join(tempRoot, ".out", sessionId);
+  const legacyDirectory = path.join(outputDirectory, LEGACY_WORKSPACE_DIR_NAME);
+
+  try {
+    await mkdir(legacyDirectory, { recursive: true });
+
+    await assert.rejects(
+      () => validateSessionPhase({ sessionId, cwd: tempRoot, generator: new StubTextGenerator() }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /legacy \.deepagents workspace/);
+        assert.match(error.message, /\.workspace/);
+        assert.match(error.message, /automatic legacy workspace migration is not supported/);
+        return true;
+      },
+    );
+
+    const outputEntries = await readdir(outputDirectory);
+    assert.equal(outputEntries.includes(LEGACY_WORKSPACE_DIR_NAME), true);
+    assert.equal(outputEntries.includes(WORKSPACE_DIR_NAME), false);
+  } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
@@ -7146,7 +7444,7 @@ test("generateApplication persists sanitized role model metadata", async () => {
       generator: new StubTextGenerator(),
     });
 
-    const configRaw = await readFile(path.join(outputDirectory, ".deepagents/config.json"), "utf8");
+    const configRaw = await readFile(path.join(outputDirectory, ".workspace/config.json"), "utf8");
     const config = JSON.parse(configRaw) as {
       model?: string;
       models?: {
@@ -7307,14 +7605,14 @@ test("planning payload passes plan-spec and locked env validation as blocking ha
   };
 
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactKey, "artifacts.planSpec");
-  assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactPath, "/.deepagents/plan-spec.json");
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactPath, "/.workspace/plan-spec.json");
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.blocking, true);
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.required, true);
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /空字符串/);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /项目配置变更/);
   assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactKey, "artifacts.planSpec");
-  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactPath, "/.deepagents/plan-spec.json");
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactPath, "/.workspace/plan-spec.json");
   assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.blockedPlanSpecPath, "environmentVariables[*].name");
   assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.blocking, true);
   assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.required, true);
@@ -7326,24 +7624,24 @@ test("planning payload passes plan-spec and locked env validation as blocking ha
   assert.match(payload.hardConstraints.environmentVariablePolicyValidation.rules.join("\n"), /DATABASE_URL, NEXT_PUBLIC_APP_NAME/);
   assert.match(payload.hardConstraints.environmentVariablePolicyValidation.rules.join("\n"), /优先级高于 PRD/);
   assert.ok(payload.planSpecSchema);
-  assert.equal(payload.artifacts.interactionContract, "/.deepagents/interaction-contract.json");
+  assert.equal(payload.artifacts.interactionContract, "/.workspace/interaction-contract.json");
   assert.equal(
     payload.hardConstraints.interactionContractValidation.artifactKey,
     "artifacts.interactionContract",
   );
   assert.equal(
     payload.hardConstraints.interactionContractValidation.artifactPath,
-    "/.deepagents/interaction-contract.json",
+    "/.workspace/interaction-contract.json",
   );
   assert.equal(payload.hardConstraints.interactionContractValidation.blocking, true);
-  assert.equal(payload.artifacts.referenceManifest, "/.deepagents/references/reference-manifest.json");
+  assert.equal(payload.artifacts.referenceManifest, "/.workspace/references/reference-manifest.json");
   assert.equal(
     payload.hardConstraints.referenceUsageValidation.artifactKey,
     "artifacts.referenceManifest",
   );
   assert.equal(
     payload.hardConstraints.referenceUsageValidation.artifactPath,
-    "/.deepagents/references/reference-manifest.json",
+    "/.workspace/references/reference-manifest.json",
   );
   assert.equal(payload.hardConstraints.referenceUsageValidation.blocking, true);
   assert.equal(payload.hardConstraints.referenceUsageValidation.required, true);
@@ -7421,46 +7719,85 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
   };
 
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactKey, "artifacts.planSpec");
-  assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactPath, "/.deepagents/plan-spec.json");
+  assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactPath, "/.workspace/plan-spec.json");
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.blocking, true);
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.required, true);
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.mustValidateBeforeResponse, true);
   assert.match(payload.hardConstraints.planSpecSchemaValidation.rules.join("\n"), /非空字符串/);
   assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactKey, "artifacts.planSpec");
-  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactPath, "/.deepagents/plan-spec.json");
+  assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.artifactPath, "/.workspace/plan-spec.json");
   assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.blockedPlanSpecPath, "environmentVariables[*].name");
   assert.equal(payload.hardConstraints.environmentVariablePolicyValidation.blocking, true);
   assert.deepEqual(payload.hardConstraints.environmentVariablePolicyValidation.lockedKeys, ["DATABASE_URL"]);
   assert.match(payload.hardConstraints.environmentVariablePolicyValidation.rules.join("\n"), /DATABASE_URL/);
   assert.ok(payload.planSpecSchema);
-  assert.equal(payload.artifacts.interactionContract, "/.deepagents/interaction-contract.json");
+  assert.equal(payload.artifacts.interactionContract, "/.workspace/interaction-contract.json");
   assert.equal(
     payload.hardConstraints.interactionContractValidation.artifactKey,
     "artifacts.interactionContract",
   );
-  assert.equal(payload.artifacts.referenceManifest, "/.deepagents/references/reference-manifest.json");
+  assert.equal(payload.artifacts.referenceManifest, "/.workspace/references/reference-manifest.json");
   assert.equal(payload.hardConstraints.referenceUsageValidation.artifactKey, "artifacts.referenceManifest");
-  assert.equal(payload.hardConstraints.referenceUsageValidation.artifactPath, "/.deepagents/references/reference-manifest.json");
+  assert.equal(payload.hardConstraints.referenceUsageValidation.artifactPath, "/.workspace/references/reference-manifest.json");
   assert.equal(payload.hardConstraints.referenceUsageValidation.blocking, true);
   assert.match(payload.hardConstraints.referenceUsageValidation.rules.join("\n"), /不能凭模型记忆/);
 });
 
-test("host policy and DeepAgents permissions block model writes to host-materialized artifacts", () => {
+test("hard cutover source scan keeps public surfaces on Pi Agent and .workspace", async () => {
+  const publicSurfaceFiles = [
+    "README.md",
+    "AGENTS.md",
+    "src/lib/cli.ts",
+    "src/lib/session-policy.ts",
+    ...await collectFilesWithExtensions("templates", new Set([".md", ".json"])),
+  ];
+
+  for (const filePath of publicSurfaceFiles) {
+    const contents = await readFile(filePath, "utf8");
+    assert.doesNotMatch(contents, /\bdeepagents\b|DeepAgents|\.deepagents/i, `${filePath} still exposes a DeepAgents-era term`);
+  }
+
+  const sourceFiles = [
+    ...await collectFilesWithExtensions("src", new Set([".ts"])),
+    ...await collectFilesWithExtensions("scripts", new Set([".mjs"])),
+  ];
+  const legacyLiteralMatches: Array<{ filePath: string; line: string }> = [];
+  for (const filePath of sourceFiles) {
+    const lines = (await readFile(filePath, "utf8")).split("\n");
+    lines.forEach((line, index) => {
+      if (/["'`]\/?\.deepagents|\/\.deepagents|\.deepagents\//.test(line)) {
+        legacyLiteralMatches.push({ filePath, line: `${index + 1}:${line.trim()}` });
+      }
+    });
+  }
+
+  assert.deepEqual(legacyLiteralMatches, [
+    {
+      filePath: "src/lib/workspace-artifacts.ts",
+      line: "4:export const LEGACY_WORKSPACE_DIR_NAME = \".deepagents\";",
+    },
+  ]);
+});
+
+test("host policy and Pi/compat permissions block model writes to host-materialized artifacts", () => {
   const policy = buildSessionPolicyDocument();
   const permissions = buildHostManagedArtifactPermissions();
   const protectedPaths: string[] = [...HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS];
 
   assert.match(policy, /Host-materialized JSON, validation, runtime, config, prompt snapshot, and source mirror artifacts are read-only to model file tools/);
   assert.match(policy, /This write-protection does not apply to `artifacts\.analysis` or `artifacts\.generatedSpec`/);
+  assert.match(policy, /`artifacts\.todo` = `\/\.workspace\/todo\.md`/);
+  assert.match(policy, /host monitors it and uses it as the live todo board/);
   assert.equal(permissions.length, 1);
   assert.deepEqual(permissions[0]?.operations, ["write"]);
   assert.equal(permissions[0]?.mode, "deny");
   assert.deepEqual(permissions[0]?.paths, protectedPaths);
-  assert.ok(protectedPaths.includes("/.deepagents/plan-spec.json"));
-  assert.ok(protectedPaths.includes("/.deepagents/interaction-contract.json"));
-  assert.ok(protectedPaths.includes("/.deepagents/plan-validation.json"));
-  assert.equal(protectedPaths.includes("/.deepagents/prd-analysis.md"), false);
-  assert.equal(protectedPaths.includes("/.deepagents/generated-spec.md"), false);
+  assert.ok(protectedPaths.includes("/.workspace/plan-spec.json"));
+  assert.ok(protectedPaths.includes("/.workspace/interaction-contract.json"));
+  assert.ok(protectedPaths.includes("/.workspace/plan-validation.json"));
+  assert.equal(protectedPaths.includes("/.workspace/todo.md"), false);
+  assert.equal(protectedPaths.includes("/.workspace/prd-analysis.md"), false);
+  assert.equal(protectedPaths.includes("/.workspace/generated-spec.md"), false);
 });
 
 test("host-managed artifact write guard soft-blocks protected file writes", async () => {
@@ -7478,7 +7815,7 @@ test("host-managed artifact write guard soft-blocks protected file writes", asyn
         id: "call-plan-spec",
         name: "write_file",
         args: {
-          file_path: "/.deepagents/plan-spec.json",
+          file_path: "/.workspace/plan-spec.json",
           content: "{}",
         },
       },
@@ -7497,8 +7834,8 @@ test("host-managed artifact write guard soft-blocks protected file writes", asyn
   assert.equal(result.status, "error");
   assert.equal(result.tool_call_id, "call-plan-spec");
   assert.match(String(result.content), /host-managed artifact write blocked/);
-  assert.equal(isHostManagedWriteProtectedArtifactPath("/.deepagents/plan-spec.json"), true);
-  assert.equal(isHostManagedWriteProtectedArtifactPath("/.deepagents/prd-analysis.md"), false);
+  assert.equal(isHostManagedWriteProtectedArtifactPath("/.workspace/plan-spec.json"), true);
+  assert.equal(isHostManagedWriteProtectedArtifactPath("/.workspace/prd-analysis.md"), false);
 });
 
 test("host-managed artifact write guard allows model-owned planning markdown writes", async () => {
@@ -7517,7 +7854,7 @@ test("host-managed artifact write guard allows model-owned planning markdown wri
         id: "call-analysis",
         name: "write_file",
         args: {
-          file_path: "/.deepagents/prd-analysis.md",
+          file_path: "/.workspace/prd-analysis.md",
           content: "# Analysis\n",
         },
       },
@@ -7596,17 +7933,18 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planPromptSource, /禁止执行：调用任何子代理/);
   assert.match(planPromptSource, /必须先调用一次 `write_todos`/);
   assert.match(planPromptSource, /必须持续更新 todo 状态/);
-  assert.match(planPromptSource, /`\/\.deepagents\/source-prd\.md`/);
+  assert.match(planPromptSource, /`\/\.workspace\/todo\.md`/);
+  assert.match(planPromptSource, /`\/\.workspace\/source-prd\.md`/);
   assert.match(planPromptSource, /`sourcePrdMarkdown` 为主事实来源/);
   assert.match(planPromptSource, /只有在 `sourcePrdMarkdown` 缺失、截断或明显不可用时，才允许读取 `artifacts\.sourcePrd`/);
   assert.match(planPromptSource, /严禁对同一文件、同一区间做重复读取循环/);
   assert.match(planPromptSource, /对当前尚不存在的 `artifacts\.analysis`、`artifacts\.generatedSpec`，应直接创建/);
   assert.match(planPromptSource, /最终结构化响应必须包含 `planSpec` 字段/);
-  assert.match(planPromptSource, /`\/\.deepagents\/prd-analysis\.md`/);
+  assert.match(planPromptSource, /`\/\.workspace\/prd-analysis\.md`/);
   assert.match(planPromptSource, /`hardConstraints\.planSpecSchemaValidation`/);
   assert.match(planPromptSource, /`hardConstraints\.environmentVariablePolicyValidation`/);
   assert.match(planPromptSource, /空字符串/);
-  assert.match(planPromptSource, /把 `\/\.deepagents\/\.\.\.` 改成 `\/deepagents\/\.\.\.`/);
+  assert.match(planPromptSource, /把 `\/\.workspace\/\.\.\.` 改成 `\/workspace\/\.\.\.`/);
   assert.match(planPromptSource, /planSpec\.references/);
   assert.match(planPromptSource, /优先级高于 PRD 环境变量覆盖请求/);
   assert.match(planPromptSource, /计划阶段必须省略该变量/);
@@ -7627,9 +7965,10 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /implementedPages/);
   assert.match(generatePromptSource, /必须先调用一次 `write_todos`/);
   assert.match(generatePromptSource, /必须持续更新 todo 状态/);
-  assert.match(generatePromptSource, /必须先读取 `\/\.deepagents\/references\/generated-app-architecture\.md`/);
+  assert.match(generatePromptSource, /`\/\.workspace\/todo\.md`/);
+  assert.match(generatePromptSource, /必须先读取 `\/\.workspace\/references\/generated-app-architecture\.md`/);
   assert.match(generatePromptSource, /route groups、shell、context、sidebar 和鉴权约定/);
-  assert.match(generatePromptSource, /`\/\.deepagents\/plan-spec\.json`/);
+  assert.match(generatePromptSource, /`\/\.workspace\/plan-spec\.json`/);
   assert.match(generatePromptSource, /`\/app-builder-report\.md`/);
   assert.match(generatePromptSource, /持久化、鉴权或启动契约/);
   assert.match(generatePromptSource, /Prisma 配置、schema、seed、脚本/);
@@ -7649,7 +7988,7 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planRepairPromptSource, /空字符串/);
   assert.match(planRepairPromptSource, /禁止执行：调用任何子代理/);
   assert.match(planRepairPromptSource, /只补齐缺失或错误部分/);
-  assert.match(planRepairPromptSource, /`\/\.deepagents\/source-prd\.md`/);
+  assert.match(planRepairPromptSource, /`\/\.workspace\/source-prd\.md`/);
   assert.match(planRepairPromptSource, /planSpec\.references/);
   assert.match(planRepairPromptSource, /必须从 `planSpec\.environmentVariables` 删除对应条目/);
   assert.match(generateRepairPromptSource, /validationFailures/);
@@ -7667,8 +8006,8 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generateRepairPromptSource, /不要修改 `\.env`\/`\.env\.example` 或应用代码来绕过锁定/);
   assert.match(generateRepairPromptSource, /`references` 不是宿主强制验收项/);
   assert.match(generateRepairPromptSource, /页面修复必须严格以 `planSpec\.pages\[\*\]\.route` 为准/);
-  assert.match(generateRepairPromptSource, /`\/\.deepagents\/generation-validation\.json`/);
-  assert.match(generateRepairPromptSource, /`\/\.deepagents\/runtime-validation\.log`/);
+  assert.match(generateRepairPromptSource, /`\/\.workspace\/generation-validation\.json`/);
+  assert.match(generateRepairPromptSource, /`\/\.workspace\/runtime-validation\.log`/);
   assert.match(generateRepairPromptSource, /非交互式、交互式或 smoke 运行验证/);
   assert.match(generateRepairPromptSource, /持久化、鉴权或启动契约被局部改坏/);
   assert.match(generateRepairPromptSource, /Prisma 配置、schema、seed、脚本/);

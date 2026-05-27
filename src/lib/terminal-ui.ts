@@ -7,6 +7,7 @@ import { Box, Text, render, renderToString, type Instance } from "ink";
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
 import { collectPageRoutePatterns, normalizeRoutePattern } from "./app-router.js";
 import type { RuntimeStatus, RuntimeUsageSummary, StdoutMode } from "./types.js";
+import { WORKSPACE_DIR_NAME, WORKSPACE_TODO_FILE_NAME, workspaceRelativePath } from "./workspace-artifacts.js";
 
 export type WorkflowStage = "计划阶段" | "生成阶段" | "运行验证阶段" | "完成阶段";
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -229,7 +230,7 @@ async function pathExists(filePath: string): Promise<boolean> {
 }
 
 async function loadPlanSpecFromOutput(outputDirectory: string): Promise<PlanSpec | null> {
-  const planSpecPath = path.join(outputDirectory, ".deepagents", "plan-spec.json");
+  const planSpecPath = path.join(outputDirectory, WORKSPACE_DIR_NAME, "plan-spec.json");
   try {
     const contents = await fs.readFile(planSpecPath, "utf8");
     const parsed = JSON.parse(contents);
@@ -270,7 +271,7 @@ async function monitorArtifactItems(state: TodoBoardState): Promise<ArtifactItem
       continue;
     }
 
-    if (artifact.label.startsWith(".deepagents/")) {
+    if (artifact.label.startsWith(`${WORKSPACE_DIR_NAME}/`)) {
       const artifactPath = path.join(state.outputDirectory, normalizeRelativePath(artifact.label));
       const exists = await pathExists(artifactPath);
       monitoredArtifacts.push({
@@ -319,6 +320,71 @@ async function monitorArtifactItems(state: TodoBoardState): Promise<ArtifactItem
   }
 
   return monitoredArtifacts;
+}
+
+function todoStatusFromMarkdownMarker(marker: string, content: string): TodoStatus {
+  const normalized = marker.trim().toLowerCase();
+  if (normalized === "x" || normalized === "✓" || normalized === "✔") {
+    return "completed";
+  }
+
+  if (normalized === "~" || normalized === "-" || normalized === "/" || normalized === ">" || normalized === ".") {
+    return "in_progress";
+  }
+
+  if (/^(?:in_progress|in-progress|progress|doing|active|进行中)$/.test(normalized)) {
+    return "in_progress";
+  }
+
+  if (/^(?:completed|complete|done|finished|已完成)$/.test(normalized)) {
+    return "completed";
+  }
+
+  if (/^(?:pending|todo|open|待办)$/.test(normalized)) {
+    return "pending";
+  }
+
+  return /^正在|^进行中|^🚧|^✳️/.test(content.trim()) ? "in_progress" : "pending";
+}
+
+export function parseTodoMarkdown(markdown: string): TodoItem[] | null {
+  const todos: TodoItem[] = [];
+  const taskLinePattern = /^\s*(?:[-*+]|\d+[.)])\s+\[([^\]]*)\]\s+(.+?)\s*$/;
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const match = line.match(taskLinePattern);
+    if (!match) {
+      continue;
+    }
+
+    const content = (match[2] ?? "")
+      .replace(/\s+<!--.*?-->\s*$/g, "")
+      .trim();
+    if (!content) {
+      continue;
+    }
+
+    todos.push({
+      content,
+      status: todoStatusFromMarkdownMarker(match[1] ?? "", content),
+    });
+  }
+
+  return todos.length > 0 ? todos : null;
+}
+
+async function monitorTodoItems(state: TodoBoardState): Promise<TodoItem[]> {
+  if (!state.outputDirectory) {
+    return state.todos;
+  }
+
+  const todoPath = path.join(state.outputDirectory, WORKSPACE_DIR_NAME, WORKSPACE_TODO_FILE_NAME);
+  try {
+    const contents = await fs.readFile(todoPath, "utf8");
+    return parseTodoMarkdown(contents) ?? state.todos;
+  } catch {
+    return state.todos;
+  }
 }
 
 function detectWorkflowLogPrefix(content: string): { prefix: string; color: WorkflowLogPrefixColor } {
@@ -958,11 +1024,11 @@ export function createStepItemsForLifecycle(stage: WorkflowStage, lifecycle: Art
 
 export function createArtifactItemsForStage(stage: WorkflowStage, status: ArtifactStatus): ArtifactItem[] {
   const planArtifacts: ArtifactItem[] = [
-    { label: ".deepagents/prd-analysis.md", status: stage === "计划阶段" ? status : "verified" },
-    { label: ".deepagents/generated-spec.md", status: stage === "计划阶段" ? status : "verified" },
-    { label: ".deepagents/plan-spec.json", status: stage === "计划阶段" ? status : "verified" },
-    { label: ".deepagents/interaction-contract.json", status: stage === "计划阶段" ? status : "verified" },
-    { label: ".deepagents/plan-validation.json", status: stage === "计划阶段" ? status : "verified" },
+    { label: workspaceRelativePath("prd-analysis.md"), status: stage === "计划阶段" ? status : "verified" },
+    { label: workspaceRelativePath("generated-spec.md"), status: stage === "计划阶段" ? status : "verified" },
+    { label: workspaceRelativePath("plan-spec.json"), status: stage === "计划阶段" ? status : "verified" },
+    { label: workspaceRelativePath("interaction-contract.json"), status: stage === "计划阶段" ? status : "verified" },
+    { label: workspaceRelativePath("plan-validation.json"), status: stage === "计划阶段" ? status : "verified" },
   ];
 
   const generationArtifactStatus = stage === "计划阶段" ? "pending" : stage === "运行验证阶段" ? "verified" : stage === "完成阶段" ? "verified" : status;
@@ -970,11 +1036,11 @@ export function createArtifactItemsForStage(stage: WorkflowStage, status: Artifa
     { label: "app/api/**", status: generationArtifactStatus },
     { label: "app/** 页面与布局", status: generationArtifactStatus },
     { label: "app-builder-report.md", status: generationArtifactStatus },
-    { label: ".deepagents/generation-validation.json", status: generationArtifactStatus },
+    { label: workspaceRelativePath("generation-validation.json"), status: generationArtifactStatus },
   ];
 
   const runtimeValidationArtifacts: ArtifactItem[] = stage === "运行验证阶段"
-    ? [{ label: ".deepagents/runtime-interaction-validation.json", status }]
+    ? [{ label: workspaceRelativePath("runtime-interaction-validation.json"), status }]
     : [];
 
   return [...planArtifacts, ...generationArtifacts, ...runtimeValidationArtifacts];
@@ -1675,6 +1741,7 @@ async function renderActiveWorkflowState(forceArtifactRefresh = false): Promise<
     (activeWorkflowStartedAt === null ? 0 : Date.now() - activeWorkflowStartedAt);
 
   let artifacts = activeWorkflowRenderedArtifacts ?? activeWorkflowState.artifacts;
+  const todos = await monitorTodoItems(activeWorkflowState);
 
   if (forceArtifactRefresh && !artifactRefreshInFlight) {
     artifactRefreshInFlight = true;
@@ -1693,6 +1760,7 @@ async function renderActiveWorkflowState(forceArtifactRefresh = false): Promise<
   const renderState: TodoBoardState = {
     ...activeWorkflowState,
     elapsedMs,
+    todos,
     artifacts,
     logs: activeWorkflowLogs,
   };

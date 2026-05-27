@@ -30,12 +30,14 @@ import { loadProjectEnv, parseDotEnv } from "../src/lib/env.js";
 import {
   DEFAULT_MODEL_MAX_TOKENS,
   DEFAULT_MODEL_NAME,
+  PI_MODELS_JSON_ENV,
   resolveModelRoleConfigs,
   sanitizeModelRoleConfigs,
 } from "../src/lib/model-config.js";
 import {
   createTodoBoardRenderer,
   mergeWorkflowRuntimeStatus,
+  parseTodoMarkdown,
   releaseWorkflowInputStream,
   resolveWorkflowStdoutMode,
   setWorkflowStdoutMode,
@@ -45,6 +47,7 @@ import {
   buildRuntimeStatus,
   buildGenerationSubagents,
   buildTodoBoardLines,
+  createPiModelRegistry,
   createArtifactItemsForStage,
   createStepItemsForLifecycle,
   estimateRenderedRows,
@@ -56,6 +59,7 @@ import {
   mergeRuntimeStatus,
   modelRoleForRuntimePhase,
   normalizeWriteTodosToolCallArgs,
+  resolvePiModelsJsonPath,
   renderArtifactStatus,
   formatElapsedTime,
   resolveDeepagentsStreamModes,
@@ -188,6 +192,185 @@ test("resolveModelRoleConfigs accepts Google provider credentials without app-bu
   for (const role of ["plan", "generate", "repair"] as const) {
     assert.equal(configs[role].apiKey, undefined);
     assert.equal(configs[role].usesProviderAuth, true);
+  }
+});
+
+test("resolvePiModelsJsonPath trims optional custom Pi models path", () => {
+  assert.equal(resolvePiModelsJsonPath({}), undefined);
+  assert.equal(resolvePiModelsJsonPath({ APP_BUILDER_PI_MODELS_JSON: "  /tmp/models.json  " }), "/tmp/models.json");
+});
+
+test("createPiModelRegistry loads custom Pi models from APP_BUILDER_PI_MODELS_JSON", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-pi-models-"));
+  const modelsJsonPath = path.join(tempRoot, "models.json");
+  const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
+
+  await writeFile(
+    modelsJsonPath,
+    JSON.stringify({
+      providers: {
+        google: {
+          models: [
+            {
+              id: "gemini-3-flash-agent",
+              name: "Gemini 3 Flash Agent",
+              api: "google-generative-ai",
+              reasoning: true,
+              input: ["text", "image"],
+              contextWindow: 1048576,
+              maxTokens: 65536,
+              cost: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+              },
+            },
+          ],
+        },
+      },
+    }),
+  );
+
+  try {
+    process.env[PI_MODELS_JSON_ENV] = modelsJsonPath;
+
+    const { modelRegistry } = createPiModelRegistry({
+      role: "generate",
+      protocol: "google",
+      modelName: "google:gemini-3-flash-agent",
+      baseURL: "https://proxy.example/google/v1beta",
+      apiKey: "google-proxy-key",
+    });
+    const model = modelRegistry.find("google", "gemini-3-flash-agent");
+
+    assert.ok(model);
+    assert.equal(model.name, "Gemini 3 Flash Agent");
+    assert.equal(model.api, "google-generative-ai");
+    assert.equal(model.baseUrl, "https://proxy.example/google/v1beta");
+    assert.equal(model.contextWindow, 1048576);
+    assert.equal(model.maxTokens, 65536);
+    assert.equal(modelRegistry.hasConfiguredAuth(model), true);
+  } finally {
+    if (previousModelsJsonPath === undefined) {
+      delete process.env[PI_MODELS_JSON_ENV];
+    } else {
+      process.env[PI_MODELS_JSON_ENV] = previousModelsJsonPath;
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("createPiModelRegistry auto-registers missing Google models when no Pi models file is configured", () => {
+  const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
+
+  try {
+    delete process.env[PI_MODELS_JSON_ENV];
+
+    const { modelRegistry } = createPiModelRegistry({
+      role: "generate",
+      protocol: "google",
+      modelName: "google:gemini-3-flash-agent",
+      baseURL: "https://proxy.example/google/v1beta",
+      apiKey: "google-proxy-key",
+      maxInputTokens: 1048576,
+      maxTokens: 65536,
+    });
+    const model = modelRegistry.find("google", "gemini-3-flash-agent");
+
+    assert.ok(model);
+    assert.equal(model.name, "gemini-3-flash-agent");
+    assert.equal(model.api, "google-generative-ai");
+    assert.equal(model.baseUrl, "https://proxy.example/google/v1beta");
+    assert.equal(model.contextWindow, 1048576);
+    assert.equal(model.maxTokens, 65536);
+    assert.equal(modelRegistry.hasConfiguredAuth(model), true);
+  } finally {
+    if (previousModelsJsonPath === undefined) {
+      delete process.env[PI_MODELS_JSON_ENV];
+    } else {
+      process.env[PI_MODELS_JSON_ENV] = previousModelsJsonPath;
+    }
+  }
+});
+
+test("createPiModelRegistry auto-registers missing OpenAI protocol models", () => {
+  const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
+
+  try {
+    delete process.env[PI_MODELS_JSON_ENV];
+
+    const { modelRegistry } = createPiModelRegistry({
+      role: "generate",
+      protocol: "openai",
+      modelName: "openai:gateway-coder",
+      baseURL: "https://proxy.example/v1",
+      apiKey: "openai-proxy-key",
+      maxInputTokens: 262144,
+      maxTokens: 32768,
+    });
+    const model = modelRegistry.find("openai", "gateway-coder");
+
+    assert.ok(model);
+    assert.equal(model.api, "openai-responses");
+    assert.equal(model.baseUrl, "https://proxy.example/v1");
+    assert.equal(model.contextWindow, 262144);
+    assert.equal(model.maxTokens, 32768);
+  } finally {
+    if (previousModelsJsonPath === undefined) {
+      delete process.env[PI_MODELS_JSON_ENV];
+    } else {
+      process.env[PI_MODELS_JSON_ENV] = previousModelsJsonPath;
+    }
+  }
+});
+
+test("createPiModelRegistry accepts gemini model prefix as a google alias for auto-registration", () => {
+  const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
+
+  try {
+    delete process.env[PI_MODELS_JSON_ENV];
+
+    const { modelRegistry } = createPiModelRegistry({
+      role: "generate",
+      protocol: "google",
+      modelName: "gemini:gemini-3-flash-agent",
+      baseURL: "https://proxy.example/google/v1beta",
+      apiKey: "google-proxy-key",
+    });
+
+    assert.ok(modelRegistry.find("google", "gemini-3-flash-agent"));
+    assert.equal(modelRegistry.find("google", "gemini:gemini-3-flash-agent"), undefined);
+  } finally {
+    if (previousModelsJsonPath === undefined) {
+      delete process.env[PI_MODELS_JSON_ENV];
+    } else {
+      process.env[PI_MODELS_JSON_ENV] = previousModelsJsonPath;
+    }
+  }
+});
+
+test("createPiModelRegistry does not auto-register model names with conflicting provider prefixes", () => {
+  const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
+
+  try {
+    delete process.env[PI_MODELS_JSON_ENV];
+
+    const { modelRegistry } = createPiModelRegistry({
+      role: "generate",
+      protocol: "google",
+      modelName: "openai:gpt-4.1-mini",
+      baseURL: "https://proxy.example/google/v1beta",
+      apiKey: "google-proxy-key",
+    });
+
+    assert.equal(modelRegistry.find("google", "openai:gpt-4.1-mini"), undefined);
+  } finally {
+    if (previousModelsJsonPath === undefined) {
+      delete process.env[PI_MODELS_JSON_ENV];
+    } else {
+      process.env[PI_MODELS_JSON_ENV] = previousModelsJsonPath;
+    }
   }
 });
 
@@ -384,7 +567,7 @@ test("buildGenerationSubagents exposes subagents only for generation phases", ()
     generateSubagents.map((subagent) => subagent.name),
     ["frontend-implementer", "backend-implementer", "integration-verifier"],
   );
-  assert.deepEqual(generateSubagents[0]?.skills, ["/.deepagents/skills"]);
+  assert.deepEqual(generateSubagents[0]?.skills, ["/.workspace/skills"]);
   assert.match(String(generateSubagents[0]?.description), /parallel/);
   assert.match(String(generateSubagents[0]?.systemPrompt), /throughput optimization/);
   assert.match(String(generateSubagents[0]?.systemPrompt), /Do not edit files outside your assigned ownership/);
@@ -1064,14 +1247,14 @@ test("createTodoBoardRenderer can stream incremental logs in tty log mode", asyn
       ...baseState,
       logs: [
         ...baseState.logs,
-        "[12:00:01] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）",
+        "[12:00:01] [READ] 读取文件：.workspace/source-prd.md（1-1000行）",
       ],
     });
     await renderer.update({
       ...baseState,
       logs: [
         ...baseState.logs,
-        "[12:00:01] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）",
+        "[12:00:01] [READ] 读取文件：.workspace/source-prd.md（1-1000行）",
       ],
     });
     await renderer.stop();
@@ -1081,7 +1264,7 @@ test("createTodoBoardRenderer can stream incremental logs in tty log mode", asyn
 
   assert.deepEqual(writes, [
     "[12:00:00] [FLOW] 进入计划阶段，开始流式生成。\n",
-    "[12:00:01] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）\n",
+    "[12:00:01] [READ] 读取文件：.workspace/source-prd.md（1-1000行）\n",
   ]);
 });
 
@@ -1089,8 +1272,8 @@ test("toVirtualWorkspacePath anchors files at the virtual workspace root", () =>
   const outputDirectory = path.resolve("tmp", "app-builder-output");
 
   assert.equal(
-    toVirtualWorkspacePath(outputDirectory, path.join(outputDirectory, ".deepagents", "plan-spec.json")),
-    "/.deepagents/plan-spec.json",
+    toVirtualWorkspacePath(outputDirectory, path.join(outputDirectory, ".workspace", "plan-spec.json")),
+    "/.workspace/plan-spec.json",
   );
   assert.equal(
     toVirtualWorkspacePath(outputDirectory, path.join(outputDirectory, "app-builder-report.md")),
@@ -1114,6 +1297,26 @@ test("renderTodoStatus uses static todo markers", () => {
   assert.equal(renderTodoStatus("pending"), "✴️");
   assert.equal(renderTodoStatus("completed"), "✅");
   assert.equal(renderTodoStatus("in_progress"), "✳️");
+});
+
+test("parseTodoMarkdown reads the host-monitored workspace todo board", () => {
+  assert.deepEqual(
+    parseTodoMarkdown([
+      "# App Builder TODO",
+      "",
+      "- [x] 读取 PRD",
+      "- [~] 组装计划",
+      "- [ ] 等待校验",
+      "- [in_progress] 修复失败项",
+    ].join("\n")),
+    [
+      { content: "读取 PRD", status: "completed" },
+      { content: "组装计划", status: "in_progress" },
+      { content: "等待校验", status: "pending" },
+      { content: "修复失败项", status: "in_progress" },
+    ],
+  );
+  assert.equal(parseTodoMarkdown("# empty\n"), null);
 });
 
 test("formatTodoHeader uses completed and total counts", () => {
@@ -1152,15 +1355,15 @@ test("createArtifactItemsForStage returns key artifacts for each workflow stage"
       status: item.status,
     })),
     [
-      { label: ".deepagents/prd-analysis.md", status: "generating" },
-      { label: ".deepagents/generated-spec.md", status: "generating" },
-      { label: ".deepagents/plan-spec.json", status: "generating" },
-      { label: ".deepagents/interaction-contract.json", status: "generating" },
-      { label: ".deepagents/plan-validation.json", status: "generating" },
+      { label: ".workspace/prd-analysis.md", status: "generating" },
+      { label: ".workspace/generated-spec.md", status: "generating" },
+      { label: ".workspace/plan-spec.json", status: "generating" },
+      { label: ".workspace/interaction-contract.json", status: "generating" },
+      { label: ".workspace/plan-validation.json", status: "generating" },
       { label: "app/api/**", status: "pending" },
       { label: "app/** 页面与布局", status: "pending" },
       { label: "app-builder-report.md", status: "pending" },
-      { label: ".deepagents/generation-validation.json", status: "pending" },
+      { label: ".workspace/generation-validation.json", status: "pending" },
     ],
   );
 
@@ -1170,15 +1373,15 @@ test("createArtifactItemsForStage returns key artifacts for each workflow stage"
       status: item.status,
     })),
     [
-      { label: ".deepagents/prd-analysis.md", status: "verified" },
-      { label: ".deepagents/generated-spec.md", status: "verified" },
-      { label: ".deepagents/plan-spec.json", status: "verified" },
-      { label: ".deepagents/interaction-contract.json", status: "verified" },
-      { label: ".deepagents/plan-validation.json", status: "verified" },
+      { label: ".workspace/prd-analysis.md", status: "verified" },
+      { label: ".workspace/generated-spec.md", status: "verified" },
+      { label: ".workspace/plan-spec.json", status: "verified" },
+      { label: ".workspace/interaction-contract.json", status: "verified" },
+      { label: ".workspace/plan-validation.json", status: "verified" },
       { label: "app/api/**", status: "verified" },
       { label: "app/** 页面与布局", status: "verified" },
       { label: "app-builder-report.md", status: "verified" },
-      { label: ".deepagents/generation-validation.json", status: "verified" },
+      { label: ".workspace/generation-validation.json", status: "verified" },
     ],
   );
 
@@ -1188,15 +1391,15 @@ test("createArtifactItemsForStage returns key artifacts for each workflow stage"
       status: item.status,
     })),
     [
-      { label: ".deepagents/prd-analysis.md", status: "verified" },
-      { label: ".deepagents/generated-spec.md", status: "verified" },
-      { label: ".deepagents/plan-spec.json", status: "verified" },
-      { label: ".deepagents/interaction-contract.json", status: "verified" },
-      { label: ".deepagents/plan-validation.json", status: "verified" },
+      { label: ".workspace/prd-analysis.md", status: "verified" },
+      { label: ".workspace/generated-spec.md", status: "verified" },
+      { label: ".workspace/plan-spec.json", status: "verified" },
+      { label: ".workspace/interaction-contract.json", status: "verified" },
+      { label: ".workspace/plan-validation.json", status: "verified" },
       { label: "app/api/**", status: "verified" },
       { label: "app/** 页面与布局", status: "verified" },
       { label: "app-builder-report.md", status: "verified" },
-      { label: ".deepagents/generation-validation.json", status: "verified" },
+      { label: ".workspace/generation-validation.json", status: "verified" },
     ],
   );
 
@@ -1206,16 +1409,16 @@ test("createArtifactItemsForStage returns key artifacts for each workflow stage"
       status: item.status,
     })),
     [
-      { label: ".deepagents/prd-analysis.md", status: "verified" },
-      { label: ".deepagents/generated-spec.md", status: "verified" },
-      { label: ".deepagents/plan-spec.json", status: "verified" },
-      { label: ".deepagents/interaction-contract.json", status: "verified" },
-      { label: ".deepagents/plan-validation.json", status: "verified" },
+      { label: ".workspace/prd-analysis.md", status: "verified" },
+      { label: ".workspace/generated-spec.md", status: "verified" },
+      { label: ".workspace/plan-spec.json", status: "verified" },
+      { label: ".workspace/interaction-contract.json", status: "verified" },
+      { label: ".workspace/plan-validation.json", status: "verified" },
       { label: "app/api/**", status: "verified" },
       { label: "app/** 页面与布局", status: "verified" },
       { label: "app-builder-report.md", status: "verified" },
-      { label: ".deepagents/generation-validation.json", status: "verified" },
-      { label: ".deepagents/runtime-interaction-validation.json", status: "validating" },
+      { label: ".workspace/generation-validation.json", status: "verified" },
+      { label: ".workspace/runtime-interaction-validation.json", status: "validating" },
     ],
   );
 });
@@ -1246,7 +1449,7 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
     elapsedMs: 65_000,
     logs: [
       "[12:34:56] [FLOW] 进入计划阶段，开始流式生成。",
-      "[12:34:57] [READ] 读取文件：.deepagents/source-prd.md（1-1000行）",
+      "[12:34:57] [READ] 读取文件：.workspace/source-prd.md（1-1000行）",
       "[12:34:58] [CHECK] 正在校验计划阶段产出物。",
     ],
     runtimeStatus: {
@@ -1283,7 +1486,7 @@ test("renderTodoBoardToString preserves todo progress and current action in Ink 
   assert.doesNotMatch(output, /暂无修复进展/);
   assert.match(output, /\[12:34:56\] \[FLOW\] 进入计划阶段/);
   assert.match(output, /\[12:34:57\] \[READ\]/);
-  assert.match(output, /读取文件：\.deepagents\/source-prd\.md（1-1000行）/);
+  assert.match(output, /读取文件：\.workspace\/source-prd\.md（1-1000行）/);
   assert.match(output, /\[12:34:58\] \[CHECK\] 正在校验计划阶段产出物/);
   assert.match(output, /model: gpt-5\.4 \| effort: high \| token used: 1\.2K total \(.+\) \| context used: 900/);
   assert.match(output, /reasoning 120/);
@@ -1789,9 +1992,9 @@ test("summarizeDeepAgentsAction exposes concrete tool events", () => {
     summarizeDeepAgentsAction("tools", {
       event: "on_tool_start",
       name: "read_file",
-      input: "{\"file_path\":\".deepagents/source-prd.md\",\"offset\":0,\"limit\":1000}",
+      input: "{\"file_path\":\".workspace/source-prd.md\",\"offset\":0,\"limit\":1000}",
     }),
-    "读取文件：.deepagents/source-prd.md（1-1000行）",
+    "读取文件：.workspace/source-prd.md（1-1000行）",
   );
 
   assert.equal(
@@ -1851,9 +2054,9 @@ test("summarizeDeepAgentsAction marks whole-file reads explicitly", () => {
     summarizeDeepAgentsAction("tools", {
       event: "on_tool_start",
       name: "read_file",
-      input: "{\"file_path\":\".deepagents/plan-system-prompt.md\"}",
+      input: "{\"file_path\":\".workspace/plan-system-prompt.md\"}",
     }),
-    "读取文件：.deepagents/plan-system-prompt.md（全量）",
+    "读取文件：.workspace/plan-system-prompt.md（全量）",
   );
 });
 

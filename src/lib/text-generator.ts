@@ -3,16 +3,29 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { inspect } from "node:util";
 
-import { createMiddleware, ToolMessage, toolStrategy } from "langchain";
+import {
+  AuthStorage,
+  DefaultResourceLoader,
+  ModelRegistry,
+  SessionManager,
+  SettingsManager,
+  createAgentSession,
+  defineTool,
+  type AgentSession,
+  type AgentSessionEvent,
+  type ExtensionAPI,
+  type ResourceLoader,
+  type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import { createMiddleware, ToolMessage } from "langchain";
 import { z } from "zod";
 
-import { StableAnthropicToolCallChatModel } from "./anthropic-tool-stream.js";
-import { createGoogleModel } from "./google-model.js";
 import { type PlanSpec, planSpecSchema } from "./plan-spec.js";
 import { interactionContractSchema } from "./interaction-contract.js";
-import { createOpenAICompatibleModel } from "./openai-compatible.js";
 import {
+  DEFAULT_MODEL_MAX_TOKENS,
   DEFAULT_MODEL_NAME,
+  PI_MODELS_JSON_ENV,
   resolveModelRoleConfigs,
   type ModelProtocol,
   type ModelRole,
@@ -50,6 +63,7 @@ import {
   buildWorkflowMetricRecord,
   type WorkflowMetricPhase,
 } from "./workflow-metrics.js";
+import { WORKSPACE_DIR_NAME, WORKSPACE_TODO_FILE_NAME, workspaceRelativePath } from "./workspace-artifacts.js";
 
 export {
   buildTodoBoardLines,
@@ -92,21 +106,21 @@ const referenceMarkdownConversionSchema = z.object({
 });
 
 export const HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS = [
-  "/.deepagents/AGENTS.md",
-  "/.deepagents/source-prd.md",
-  "/.deepagents/plan-spec.json",
-  "/.deepagents/interaction-contract.json",
-  "/.deepagents/plan-validation.json",
-  "/.deepagents/generation-validation.json",
-  "/.deepagents/runtime-validation.log",
-  "/.deepagents/runtime-interaction-validation.json",
-  "/.deepagents/error.log",
-  "/.deepagents/config.json",
-  "/.deepagents/plan-system-prompt.md",
-  "/.deepagents/plan-repair-system-prompt.md",
-  "/.deepagents/generate-system-prompt.md",
-  "/.deepagents/generate-repair-system-prompt.md",
-  "/.deepagents/references/reference-manifest.json",
+  `/${workspaceRelativePath("AGENTS.md")}`,
+  `/${workspaceRelativePath("source-prd.md")}`,
+  `/${workspaceRelativePath("plan-spec.json")}`,
+  `/${workspaceRelativePath("interaction-contract.json")}`,
+  `/${workspaceRelativePath("plan-validation.json")}`,
+  `/${workspaceRelativePath("generation-validation.json")}`,
+  `/${workspaceRelativePath("runtime-validation.log")}`,
+  `/${workspaceRelativePath("runtime-interaction-validation.json")}`,
+  `/${workspaceRelativePath("error.log")}`,
+  `/${workspaceRelativePath("config.json")}`,
+  `/${workspaceRelativePath("plan-system-prompt.md")}`,
+  `/${workspaceRelativePath("plan-repair-system-prompt.md")}`,
+  `/${workspaceRelativePath("generate-system-prompt.md")}`,
+  `/${workspaceRelativePath("generate-repair-system-prompt.md")}`,
+  `/${workspaceRelativePath("references/reference-manifest.json")}`,
 ] as const;
 
 type DeepagentsFilesystemPermission = {
@@ -240,7 +254,7 @@ const PRD_ANALYSIS_SYSTEM_PROMPT = [
   "",
   "## Boundary",
   "",
-  "- 只分析输入 PRD，并只写入 `artifacts.analysis` 指向的 `/.deepagents/prd-analysis.md`。",
+  "- 只分析输入 PRD，并只写入 `artifacts.analysis` 指向的 `/.workspace/prd-analysis.md`。",
   "- 不要写入、读取或修补 `artifacts.generatedSpec`、`artifacts.planSpec`、`artifacts.interactionContract`。",
   "- 不要等待外部参考资料转换完成；宿主会与本阶段并行下载/转换 references。",
   "- 你可以把 `externalReferences` 中的 URL 和上下文作为依赖线索写入分析稿，但不要凭 URL 猜测 API 细节。",
@@ -257,7 +271,7 @@ const PRD_ANALYSIS_SYSTEM_PROMPT = [
   "",
   "- 写入有效中文 Markdown 分析稿到 `artifacts.analysis`。",
   "- 返回结构化结果：`summary`、`artifactsWritten`、`planSpecVersion: 1`、`notes`。",
-  "- `artifactsWritten` 应只列出 `.deepagents/prd-analysis.md`，除非你实际写入了其他允许的计划分析产物。",
+  "- `artifactsWritten` 应只列出 `.workspace/prd-analysis.md`，除非你实际写入了其他允许的计划分析产物。",
 ].join("\n");
 
 const PRD_ASSEMBLY_SYSTEM_PROMPT = [
@@ -289,21 +303,28 @@ const PRD_ASSEMBLY_SYSTEM_PROMPT = [
   "",
   "- 自检结构化响应中的 `planSpec` 和 `interactionContract` 满足 schema，且 reference localPath 已同步到 generatedSpec 与 planSpec.references。",
   "- 返回结构化结果：`summary`、`artifactsWritten`、`planSpecVersion: 1`、`planSpec`、`interactionContract`、`notes`。",
-  "- `artifactsWritten` 按实际落盘顺序列出本阶段写入的计划产物，并包含 `.deepagents/plan-spec.json` 与 `.deepagents/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件。",
+  "- `artifactsWritten` 按实际落盘顺序列出本阶段写入的计划产物，并包含 `.workspace/plan-spec.json` 与 `.workspace/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件。",
 ].join("\n");
 
-const SANDBOX_ALPHA_WARNING =
-  "langsmith/experimental/sandbox is in alpha. This feature is experimental, and breaking changes are expected.";
 const DEEPAGENTS_IDLE_TIMEOUT_MS = 600_000;
 const DEEPAGENTS_STREAM_COMPAT_RETRY_LIMIT = 1;
 const DEFAULT_DEEPAGENTS_STREAM_MODES = ["updates", "messages", "tools", "values"] as const;
 const VALID_DEEPAGENTS_STREAM_MODES = new Set<string>(DEFAULT_DEEPAGENTS_STREAM_MODES);
+const PI_AGENT_IDLE_TIMEOUT_MS = DEEPAGENTS_IDLE_TIMEOUT_MS;
+const PI_AGENT_STRUCTURED_RESPONSE_TOOL_NAME = "app_builder_structured_response";
+const PI_AGENT_WRITE_TODOS_TOOL_NAME = "write_todos";
+const PI_AGENT_DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+const WORKSPACE_TODO_RELATIVE_PATH = workspaceRelativePath(WORKSPACE_TODO_FILE_NAME);
 
 type DeepAgentRunner = {
   stream: (
     state: unknown,
     options: { streamMode: string[] },
   ) => AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
+};
+
+export type PiStructuredResponseBox = {
+  value?: unknown;
 };
 
 type StreamProgressSummary = {
@@ -320,22 +341,6 @@ type TodoTimingEntry = {
   completedReported: boolean;
   openReported: boolean;
 };
-
-async function loadDeepagentsModule() {
-  const originalWarn = console.warn;
-  console.warn = (...args: unknown[]) => {
-    if (args.length === 1 && args[0] === SANDBOX_ALPHA_WARNING) {
-      return;
-    }
-    originalWarn(...args);
-  };
-
-  try {
-    return await import("deepagents");
-  } finally {
-    console.warn = originalWarn;
-  }
-}
 
 async function loadSystemPrompt(
   runtime: Pick<TextGeneratorRuntime, "deepagentsAgentsPath">,
@@ -1307,6 +1312,30 @@ function normalizeTodoListCandidate(value: unknown, depth = 0): TodoItem[] | nul
   }
 }
 
+function markdownMarkerForTodoStatus(status: TodoStatus): string {
+  switch (status) {
+    case "completed":
+      return "x";
+    case "in_progress":
+      return "~";
+    default:
+      return " ";
+  }
+}
+
+function formatTodosMarkdown(todos: TodoItem[]): string {
+  const lines = [
+    "# App Builder TODO",
+    "",
+    "<!-- Host-monitored progress file. Use write_todos to update this file. -->",
+    "",
+    ...todos.map((todo) => `- [${markdownMarkerForTodoStatus(todo.status)}] ${todo.content.trim()}`),
+    "",
+  ];
+
+  return lines.join("\n");
+}
+
 export function normalizeWriteTodosToolCallArgs(args: unknown): Record<string, unknown> | null {
   let record: Record<string, unknown> | null = null;
 
@@ -1337,7 +1366,7 @@ function normalizeWriteTodosToolCall(toolCall: unknown): unknown {
   }
 
   const record = toolCall as Record<string, unknown>;
-  if (record.name !== "write_todos") {
+  if (record.name !== PI_AGENT_WRITE_TODOS_TOOL_NAME) {
     return toolCall;
   }
 
@@ -1424,7 +1453,8 @@ function summarizeWriteTodosEvent(record: Record<string, unknown>, event: string
   const parsedInput = parseToolInput(record.input);
   const todos =
     extractTodosFromPayload(parsedInput) ??
-    extractTodosFromToolOutput(record.output);
+    extractTodosFromToolOutput(record.output) ??
+    extractTodosFromToolOutput(record.result);
 
   if (!todos) {
     return null;
@@ -1523,7 +1553,9 @@ function extractTodosFromToolEventPayload(value: unknown): TodoItem[] | null {
 
   const record = value as Record<string, unknown>;
   const parsedInput = parseToolInput(record.input);
-  return extractTodosFromPayload(parsedInput) ?? extractTodosFromToolOutput(record.output);
+  return extractTodosFromPayload(parsedInput) ??
+    extractTodosFromToolOutput(record.output) ??
+    extractTodosFromToolOutput(record.result);
 }
 
 function extractTodosForBoard(value: unknown): TodoItem[] | null {
@@ -1759,7 +1791,7 @@ function compactToolDetail(value: string, maxLength = 96): string {
 }
 
 function describeToolTargetFromInput(toolName: string, input: Record<string, unknown> | null): string | null {
-  if (toolName === "write_todos") {
+  if (toolName === PI_AGENT_WRITE_TODOS_TOOL_NAME) {
     return null;
   }
 
@@ -1810,7 +1842,7 @@ function humanizeToolName(toolName: string): string {
       return "写入文件";
     case "edit_file":
       return "编辑文件";
-    case "write_todos":
+    case PI_AGENT_WRITE_TODOS_TOOL_NAME:
       return "更新 todo";
     case "task":
       return "启动子任务";
@@ -1836,7 +1868,7 @@ function summarizeToolEvent(payload: unknown): string | null {
     return null;
   }
 
-  if (toolName === "write_todos") {
+  if (toolName === PI_AGENT_WRITE_TODOS_TOOL_NAME) {
     return summarizeWriteTodosEvent(record, event);
   }
 
@@ -2579,6 +2611,214 @@ export async function runDeepAgentWithLogs(
   }
 }
 
+function mapPiToolNameForTrace(toolName: string): string {
+  switch (toolName) {
+    case "read":
+      return "read_file";
+    case "write":
+      return "write_file";
+    case "edit":
+      return "edit_file";
+    case "ls":
+      return "list_dir";
+    case "grep":
+    case "find":
+      return "glob_search";
+    default:
+      return toolName;
+  }
+}
+
+async function logPiSessionEvent(
+  event: AgentSessionEvent,
+  trace: DeepAgentsTraceState,
+  runtime: TextGeneratorRuntime,
+): Promise<readonly unknown[] | undefined> {
+  if (event.type === "message_update") {
+    const assistantEvent = event.assistantMessageEvent;
+    if (assistantEvent.type === "text_delta" && assistantEvent.delta.trim()) {
+      await logDeepAgentsChunk("messages", assistantEvent.delta, trace, runtime);
+    } else if (assistantEvent.type === "toolcall_end") {
+      await logDeepAgentsChunk(
+        "messages",
+        {
+          tool_calls: [{
+            id: assistantEvent.toolCall.id,
+            name: mapPiToolNameForTrace(assistantEvent.toolCall.name),
+            args: assistantEvent.toolCall.arguments,
+          }],
+        },
+        trace,
+        runtime,
+      );
+    }
+    return undefined;
+  }
+
+  if (event.type === "tool_execution_start") {
+    await logDeepAgentsChunk(
+      "tools",
+      {
+        event: "on_tool_start",
+        id: event.toolCallId,
+        name: mapPiToolNameForTrace(event.toolName),
+        input: event.args,
+        status: "started",
+      },
+      trace,
+      runtime,
+    );
+    return undefined;
+  }
+
+  if (event.type === "tool_execution_update") {
+    await logDeepAgentsChunk(
+      "tools",
+      {
+        event: "on_tool_update",
+        id: event.toolCallId,
+        name: mapPiToolNameForTrace(event.toolName),
+        input: event.args,
+        output: event.partialResult,
+        status: "running",
+      },
+      trace,
+      runtime,
+    );
+    return undefined;
+  }
+
+  if (event.type === "tool_execution_end") {
+    await logDeepAgentsChunk(
+      "tools",
+      {
+        event: "on_tool_end",
+        id: event.toolCallId,
+        name: mapPiToolNameForTrace(event.toolName),
+        result: event.result,
+        status: event.isError ? "error" : "completed",
+      },
+      trace,
+      runtime,
+    );
+    return undefined;
+  }
+
+  if (event.type === "agent_end") {
+    await logDeepAgentsChunk("values", { messages: event.messages }, trace, runtime);
+    return event.messages;
+  }
+
+  return undefined;
+}
+
+export async function runPiAgentWithLogs<T>(options: {
+  session: AgentSession;
+  structuredResponse: PiStructuredResponseBox;
+  prompt: string;
+  responseSchema: z.ZodType<T>;
+  runtime: TextGeneratorRuntime;
+  runtimePhase: RuntimeStatusPhase;
+  timeoutLabel: string;
+  fallbackModelName?: string | undefined;
+  leaderUserAgent?: string | undefined;
+}): Promise<unknown> {
+  const workflowStage = runtimePhaseToWorkflowStage(options.runtimePhase);
+  const trace: DeepAgentsTraceState = {
+    stage: workflowStage,
+    todos: defaultTodosForStage(workflowStage),
+    todoTimings: new Map(),
+    lastNarrative: "等待 Pi Agent 开始处理。",
+    logFilePath: options.runtime.deepagentsLogPath,
+    runtimeStatus: buildRuntimeStatus({
+      runtime: options.runtime,
+      phase: options.runtimePhase,
+      fallbackModelName: options.fallbackModelName,
+    }),
+    agentStatuses: buildDefaultAgentStatuses(options.runtimePhase, options.leaderUserAgent),
+    seenRuntimeUsageSignatures: new Set(),
+    modelOutputStarted: false,
+    receivedOutputTokens: 0,
+    receivedOutputTokensEstimated: false,
+  };
+  let signalActivityRef = () => {};
+  let eventQueue = Promise.resolve();
+  let eventError: unknown;
+  let finalMessages: readonly unknown[] = [];
+
+  const unsubscribe = options.session.subscribe((event) => {
+    signalActivityRef();
+    eventQueue = eventQueue
+      .then(async () => {
+        const messages = await logPiSessionEvent(event, trace, options.runtime);
+        if (messages) {
+          finalMessages = messages;
+        }
+      })
+      .catch((error: unknown) => {
+        eventError = eventError ?? error;
+      });
+  });
+
+  await appendWorkflowLog(`[lifecycle] 进入${trace.stage}，启动 Pi Agent。`);
+  await updateWorkflowBoard({
+    stage: trace.stage,
+    todos: trace.todos,
+    artifacts: createArtifactItemsForStage(trace.stage, "generating"),
+    narrative: trace.lastNarrative,
+    sessionId: options.runtime.sessionId,
+    outputDirectory: options.runtime.outputDirectory,
+    runtimeStatus: trace.runtimeStatus,
+    agentStatuses: trace.agentStatuses,
+  });
+
+  try {
+    await withActivityTimeout(
+      async (signalActivity) => {
+        signalActivityRef = signalActivity;
+        signalActivity();
+        await options.session.prompt(options.prompt, { source: "extension" });
+        await eventQueue;
+      },
+      PI_AGENT_IDLE_TIMEOUT_MS,
+      options.timeoutLabel,
+    );
+
+    if (eventError) {
+      throw eventError;
+    }
+
+    const structured =
+      options.responseSchema.safeParse(options.structuredResponse.value).success
+        ? options.structuredResponse.value
+        : extractStructuredResponseFromPiText(finalMessages, options.responseSchema);
+
+    if (structured === null || structured === undefined) {
+      throw new Error(`${options.timeoutLabel} did not return a valid structured response.`);
+    }
+
+    trace.lastNarrative = "Pi Agent 生成流程结束。";
+    trace.agentStatuses = markActiveAgentsDone(trace.agentStatuses);
+    await recordOpenModelTodoMetrics(trace, options.runtime, "pi_agent_end");
+    await appendWorkflowLog("[lifecycle] Pi Agent 本轮生成结束，等待宿主后续处理。");
+    writeSystemTraceEvent(trace.logFilePath, "lifecycle", { structuredResponse: structured }, "Pi Agent 生成流程结束。");
+    await updateWorkflowBoard({
+      stage: trace.stage,
+      todos: trace.todos,
+      artifacts: createArtifactItemsForStage(trace.stage, "generating"),
+      narrative: trace.lastNarrative,
+      sessionId: options.runtime.sessionId,
+      outputDirectory: options.runtime.outputDirectory,
+      runtimeStatus: trace.runtimeStatus,
+      agentStatuses: trace.agentStatuses,
+    });
+
+    return { structuredResponse: structured };
+  } finally {
+    unsubscribe();
+  }
+}
+
 async function runDeepAgentForStructuredResponse(
   agent: DeepAgentRunner,
   state: unknown,
@@ -2637,44 +2877,16 @@ function extractStructuredResponse<T>(result: unknown, schema: z.ZodType<T>): T 
 
 function normalizeProtocolModelName(modelName: string, protocol: ModelProtocol): string {
   const prefix = `${protocol}:`;
-  return modelName.startsWith(prefix) ? modelName.slice(prefix.length) : modelName;
+  if (modelName.startsWith(prefix)) {
+    return modelName.slice(prefix.length);
+  }
+  if (protocol === "google" && modelName.startsWith("gemini:")) {
+    return modelName.slice("gemini:".length);
+  }
+  return modelName;
 }
 
-async function resolveModel(config: ModelRoleConfig, effort?: TemplatePhaseEffort) {
-  if (config.protocol === "anthropic") {
-    return new StableAnthropicToolCallChatModel({
-      model: normalizeProtocolModelName(config.modelName, config.protocol),
-      temperature: 0,
-      ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
-      ...(effort ? { outputConfig: { effort } } : {}),
-      ...(config.baseURL ? { anthropicApiUrl: config.baseURL } : {}),
-      ...(config.userAgent ? { clientOptions: { defaultHeaders: { "User-Agent": config.userAgent } } } : {}),
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-    });
-  }
-
-  if (config.protocol === "google") {
-    return createGoogleModel({
-      modelName: normalizeProtocolModelName(config.modelName, config.protocol),
-      ...(effort ? { effort } : {}),
-      ...(config.baseURL ? { baseURL: config.baseURL } : {}),
-      ...(config.userAgent ? { userAgent: config.userAgent } : {}),
-      ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-    });
-  }
-
-  return createOpenAICompatibleModel({
-    modelName: normalizeProtocolModelName(config.modelName, config.protocol),
-    ...(effort ? { effort } : {}),
-    ...(config.baseURL ? { baseURL: config.baseURL } : {}),
-    ...(config.userAgent ? { userAgent: config.userAgent } : {}),
-    ...(config.maxTokens ? { maxTokens: config.maxTokens } : {}),
-    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-  });
-}
-
-type DeepAgentsTextGeneratorOptions =
+type PiTextGeneratorOptions =
   | string
   | ModelRoleConfigMap
   | {
@@ -2694,7 +2906,7 @@ function isModelRoleConfigMap(value: unknown): value is ModelRoleConfigMap {
   );
 }
 
-function resolveConstructorModelRoles(options?: DeepAgentsTextGeneratorOptions): ModelRoleConfigMap {
+function resolveConstructorModelRoles(options?: PiTextGeneratorOptions): ModelRoleConfigMap {
   if (typeof options === "string") {
     return resolveModelRoleConfigs({
       ...process.env,
@@ -2713,6 +2925,532 @@ function resolveConstructorModelRoles(options?: DeepAgentsTextGeneratorOptions):
   return resolveModelRoleConfigs();
 }
 
+function resolvePiProvider(config: ModelRoleConfig): string {
+  return config.protocol;
+}
+
+function resolvePiModelName(config: ModelRoleConfig): string {
+  return normalizeProtocolModelName(config.modelName, config.protocol);
+}
+
+export function resolvePiModelsJsonPath(env: Record<string, string | undefined> = process.env): string | undefined {
+  const value = env[PI_MODELS_JSON_ENV];
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+type PiProviderConfigInput = Parameters<ModelRegistry["registerProvider"]>[1];
+type PiProviderModelConfig = NonNullable<PiProviderConfigInput["models"]>[number];
+type PiWriteTodosToolDetails = {
+  path?: string;
+  todos: TodoItem[];
+};
+
+const PI_PROVIDER_ENV_API_KEYS = {
+  anthropic: "ANTHROPIC_API_KEY",
+  google: "GOOGLE_API_KEY",
+  openai: "OPENAI_API_KEY",
+} as const satisfies Record<ModelProtocol, string>;
+
+const MODEL_NAME_PROVIDER_PREFIXES = new Set(["anthropic", "gemini", "google", "openai"]);
+
+function modelNameHasConflictingProviderPrefix(modelName: string, protocol: ModelProtocol): boolean {
+  const [prefix, ...rest] = modelName.split(":");
+  if (!prefix || rest.length === 0) {
+    return false;
+  }
+
+  const acceptedPrefixes = protocol === "google" ? new Set(["google", "gemini"]) : new Set([protocol]);
+  return MODEL_NAME_PROVIDER_PREFIXES.has(prefix) && !acceptedPrefixes.has(prefix);
+}
+
+function shouldAutoRegisterPiModel(config: ModelRoleConfig, modelName: string): boolean {
+  return !modelNameHasConflictingProviderPrefix(config.modelName, config.protocol) &&
+    !modelNameHasConflictingProviderPrefix(modelName, config.protocol);
+}
+
+function resolvePiProviderApiKeyConfig(config: ModelRoleConfig): string {
+  return config.apiKey ?? PI_PROVIDER_ENV_API_KEYS[config.protocol];
+}
+
+function createDynamicPiModelConfig(
+  config: ModelRoleConfig,
+  modelName: string,
+  providerDefault: ReturnType<ModelRegistry["getAll"]>[number] | undefined,
+): PiProviderModelConfig {
+  return {
+    id: modelName,
+    name: modelName,
+    reasoning: providerDefault?.reasoning ?? false,
+    input: providerDefault?.input ?? ["text"],
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    contextWindow: config.maxInputTokens ?? providerDefault?.contextWindow ?? 128000,
+    maxTokens: config.maxTokens ?? providerDefault?.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
+  };
+}
+
+function autoRegisterMissingPiModel(options: {
+  modelRegistry: ModelRegistry;
+  config: ModelRoleConfig;
+  modelName: string;
+  provider: string;
+}): void {
+  if (options.modelRegistry.find(options.provider, options.modelName)) {
+    return;
+  }
+
+  if (!shouldAutoRegisterPiModel(options.config, options.modelName)) {
+    return;
+  }
+
+  const providerDefault = options.modelRegistry.getAll().find((candidate) => candidate.provider === options.provider);
+  const baseUrl = options.config.baseURL ?? providerDefault?.baseUrl;
+  const api = providerDefault?.api;
+
+  if (!baseUrl || !api) {
+    return;
+  }
+
+  const providerConfig: PiProviderConfigInput = {
+    baseUrl,
+    apiKey: resolvePiProviderApiKeyConfig(options.config),
+    api,
+    models: [createDynamicPiModelConfig(options.config, options.modelName, providerDefault)],
+  };
+
+  if (options.config.userAgent) {
+    providerConfig.headers = { "User-Agent": options.config.userAgent };
+  }
+
+  options.modelRegistry.registerProvider(options.provider, providerConfig);
+}
+
+function resolvePiThinkingLevel(effort?: TemplatePhaseEffort): "low" | "medium" | "high" | "xhigh" {
+  switch (effort) {
+    case "low":
+      return "low";
+    case "high":
+      return "high";
+    case "max":
+      return "xhigh";
+    case "medium":
+    default:
+      return "medium";
+  }
+}
+
+function resolveEffortForRuntimePhase(runtime: TextGeneratorRuntime, runtimePhase: RuntimeStatusPhase): TemplatePhaseEffort | undefined {
+  switch (runtimePhase) {
+    case "plan":
+      return runtime.templatePhases.plan?.effort;
+    case "planRepair":
+    case "plan_repair":
+      return runtime.templatePhases.planRepair?.effort;
+    case "generate":
+      return runtime.templatePhases.generate?.effort;
+    case "generateRepair":
+    case "generate_repair":
+      return runtime.templatePhases.generateRepair?.effort;
+    default:
+      return undefined;
+  }
+}
+
+function normalizePiVirtualPath(filePath: string): string {
+  const normalized = normalizeDeepagentsVirtualPath(filePath);
+  return normalized.startsWith("/") ? normalized : `/${normalized}`;
+}
+
+function isWorkspaceEscapeCandidate(filePath: string): boolean {
+  return filePath === ".." || filePath.startsWith("../") || path.isAbsolute(filePath);
+}
+
+function normalizeTodoPathAlias(filePath: string): string {
+  const normalized = normalizeWorkspaceRelativePath(filePath);
+  const lower = normalized.toLowerCase();
+  return lower === WORKSPACE_TODO_FILE_NAME ||
+      lower === `${WORKSPACE_DIR_NAME}/${WORKSPACE_TODO_FILE_NAME}` ||
+      lower === `${WORKSPACE_DIR_NAME}/todo.md`
+    ? WORKSPACE_TODO_RELATIVE_PATH
+    : normalized;
+}
+
+export function mapPiToolPathToWorkspaceRelative(rawPath: string, outputDirectory: string): string {
+  const trimmed = rawPath.trim();
+  if (!trimmed) {
+    return rawPath;
+  }
+
+  if (path.isAbsolute(trimmed)) {
+    const relativeToOutput = path.relative(outputDirectory, trimmed);
+    if (!isWorkspaceEscapeCandidate(relativeToOutput)) {
+      return normalizeTodoPathAlias(relativeToOutput || ".");
+    }
+  }
+
+  const slashPath = trimmed.replace(/\\/g, "/");
+  return normalizeTodoPathAlias(slashPath.replace(/^\/+/, ""));
+}
+
+export function rewritePiToolPathInput(
+  input: Record<string, unknown>,
+  outputDirectory: string,
+): { blockedReason?: string } {
+  const rawPath = input.path;
+  if (typeof rawPath !== "string" || rawPath.trim() === "") {
+    return {};
+  }
+
+  const workspacePath = mapPiToolPathToWorkspaceRelative(rawPath, outputDirectory);
+  if (isWorkspaceEscapeCandidate(workspacePath)) {
+    return { blockedReason: `Path "${rawPath}" escapes the generated app workspace.` };
+  }
+
+  input.path = workspacePath;
+  return {};
+}
+
+function createPiRuntimeGuardExtension(runtime: TextGeneratorRuntime): (pi: ExtensionAPI) => void {
+  return (pi) => {
+    pi.on("tool_call", (event) => {
+      const input = event.input as Record<string, unknown>;
+      const rawPath = typeof input.path === "string" ? input.path : undefined;
+      if (rawPath) {
+        const virtualPath = normalizePiVirtualPath(mapPiToolPathToWorkspaceRelative(rawPath, runtime.outputDirectory));
+        if (
+          (event.toolName === "write" || event.toolName === "edit") &&
+          isHostManagedWriteProtectedArtifactPath(virtualPath)
+        ) {
+          return {
+            block: true,
+            reason: [
+              `Host-managed artifact write blocked for ${virtualPath}.`,
+              "Return the corresponding structured response fields instead; app-builder will materialize the artifact.",
+            ].join(" "),
+          };
+        }
+      }
+
+      const rewritten = rewritePiToolPathInput(input, runtime.outputDirectory);
+      return rewritten.blockedReason ? { block: true, reason: rewritten.blockedReason } : undefined;
+    });
+  };
+}
+
+function createPiStructuredResponseTool<T>(
+  schema: z.ZodType<T>,
+  structuredResponse: PiStructuredResponseBox,
+): ToolDefinition {
+  const responseSchema = z.toJSONSchema(schema) as Record<string, unknown>;
+  return defineTool({
+    name: PI_AGENT_STRUCTURED_RESPONSE_TOOL_NAME,
+    label: "App Builder Structured Response",
+    description: "Return the final app-builder structured response for the current phase.",
+    promptSnippet: "Return the final app-builder structured response and terminate the phase",
+    promptGuidelines: [
+      `Use ${PI_AGENT_STRUCTURED_RESPONSE_TOOL_NAME} as the final action for this phase.`,
+      "Put the complete phase result in the response field. Do not finish with plain text only.",
+    ],
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        response: responseSchema,
+      },
+      required: ["response"],
+    } as never,
+    prepareArguments: (args: unknown) => {
+      if (args && typeof args === "object" && !Array.isArray(args) && "response" in args) {
+        return args as never;
+      }
+      return { response: args } as never;
+    },
+    async execute(_toolCallId, params) {
+      const record = params as { response?: unknown };
+      structuredResponse.value = record.response;
+      return {
+        content: [{ type: "text", text: "App Builder structured response captured." }],
+        details: structuredResponse.value,
+        terminate: true,
+      };
+    },
+  });
+}
+
+function createPiWriteTodosTool(runtime: TextGeneratorRuntime): ToolDefinition {
+  return defineTool({
+    name: PI_AGENT_WRITE_TODOS_TOOL_NAME,
+    label: "Write Todos",
+    description: "Update the current app-builder phase todo list. This persists the live todo board to /.workspace/todo.md.",
+    promptSnippet: "Update the current phase todo list and persist it to /.workspace/todo.md",
+    promptGuidelines: [
+      `Call ${PI_AGENT_WRITE_TODOS_TOOL_NAME} before substantive work in every phase.`,
+      "Keep exactly one todo item in_progress whenever work is active; mark completed items promptly.",
+      "Do not create TODO.md at the app root. The host-monitored todo file is /.workspace/todo.md.",
+    ],
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        todos: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              content: { type: "string", minLength: 1 },
+              status: { type: "string", enum: ["pending", "in_progress", "completed"] },
+            },
+            required: ["content", "status"],
+          },
+        },
+      },
+      required: ["todos"],
+    } as never,
+    prepareArguments: (args: unknown) => {
+      const normalized = normalizeWriteTodosToolCallArgs(args);
+      return (normalized ?? { todos: [] }) as never;
+    },
+    async execute(_toolCallId, params) {
+      const normalized = normalizeWriteTodosToolCallArgs(params);
+      const todos = normalized?.todos as TodoItem[] | undefined;
+      if (!todos || todos.length === 0) {
+        const details: PiWriteTodosToolDetails = { todos: [] };
+        return {
+          content: [{ type: "text", text: "No valid todos were provided." }],
+          details,
+        };
+      }
+
+      await fs.mkdir(path.dirname(runtime.deepagentsTodoPath), { recursive: true });
+      await fs.writeFile(runtime.deepagentsTodoPath, formatTodosMarkdown(todos), "utf8");
+      const details: PiWriteTodosToolDetails = {
+        path: `/${WORKSPACE_TODO_RELATIVE_PATH}`,
+        todos,
+      };
+
+      return {
+        content: [{ type: "text", text: `Updated todo list at /${WORKSPACE_TODO_RELATIVE_PATH}.` }],
+        details,
+      };
+    },
+  });
+}
+
+function createPiResourceLoader(options: {
+  runtime: TextGeneratorRuntime;
+  systemPrompt: string;
+  settingsManager: SettingsManager;
+  skillsDirectory?: string | undefined;
+}): ResourceLoader {
+  return new DefaultResourceLoader({
+    cwd: options.runtime.outputDirectory,
+    agentDir: path.join(options.runtime.deepagentsDirectory, "pi-agent"),
+    settingsManager: options.settingsManager,
+    noExtensions: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    noSkills: true,
+    systemPrompt: options.systemPrompt,
+    additionalSkillPaths: options.skillsDirectory ? [options.skillsDirectory] : [],
+    extensionFactories: [createPiRuntimeGuardExtension(options.runtime)],
+  });
+}
+
+export function createPiModelRegistry(config: ModelRoleConfig): { authStorage: AuthStorage; modelRegistry: ModelRegistry } {
+  const authStorage = AuthStorage.inMemory();
+  const modelsJsonPath = resolvePiModelsJsonPath();
+  const modelRegistry = modelsJsonPath ? ModelRegistry.create(authStorage, modelsJsonPath) : ModelRegistry.inMemory(authStorage);
+  const loadError = modelRegistry.getError();
+  const provider = resolvePiProvider(config);
+
+  if (loadError) {
+    throw new Error(`Failed to load ${PI_MODELS_JSON_ENV} from ${modelsJsonPath}: ${loadError}`);
+  }
+
+  if (config.apiKey) {
+    authStorage.setRuntimeApiKey(provider, config.apiKey);
+  }
+
+  if (config.baseURL || config.userAgent || config.apiKey) {
+    const providerPatch: Parameters<ModelRegistry["registerProvider"]>[1] = {};
+    if (config.baseURL) {
+      providerPatch.baseUrl = config.baseURL;
+    }
+    if (config.apiKey) {
+      providerPatch.apiKey = config.apiKey;
+    }
+    if (config.userAgent) {
+      providerPatch.headers = { "User-Agent": config.userAgent };
+    }
+    modelRegistry.registerProvider(provider, providerPatch);
+  }
+
+  if (!modelsJsonPath) {
+    autoRegisterMissingPiModel({
+      modelRegistry,
+      config,
+      provider,
+      modelName: resolvePiModelName(config),
+    });
+  }
+
+  return { authStorage, modelRegistry };
+}
+
+async function createPiSessionForPhase<T>(options: {
+  runtime: TextGeneratorRuntime;
+  systemPrompt: string;
+  responseSchema: z.ZodType<T>;
+  modelConfig: ModelRoleConfig;
+  effort?: TemplatePhaseEffort | undefined;
+  skillsDirectory?: string | undefined;
+}): Promise<{ session: AgentSession; structuredResponse: PiStructuredResponseBox }> {
+  const structuredResponse: PiStructuredResponseBox = {};
+  const settingsManager = SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: true, maxRetries: 2 },
+    defaultProvider: resolvePiProvider(options.modelConfig),
+    defaultModel: resolvePiModelName(options.modelConfig),
+    defaultThinkingLevel: resolvePiThinkingLevel(options.effort),
+    terminal: { showTerminalProgress: false },
+  });
+  const { authStorage, modelRegistry } = createPiModelRegistry(options.modelConfig);
+  const modelName = resolvePiModelName(options.modelConfig);
+  const provider = resolvePiProvider(options.modelConfig);
+  const model =
+    modelRegistry.find(provider, modelName) ??
+    modelRegistry.getAll().find((candidate) => candidate.id === modelName);
+
+  if (!model) {
+    throw new Error(
+      `Pi Agent model not found for ${provider}:${modelName}. Set APP_BUILDER_MODEL/APP_BUILDER_PROTOCOL to a Pi-supported model.`,
+    );
+  }
+
+  const resourceLoader = createPiResourceLoader({
+    runtime: options.runtime,
+    systemPrompt: options.systemPrompt,
+    settingsManager,
+    ...(options.skillsDirectory ? { skillsDirectory: options.skillsDirectory } : {}),
+  });
+  await resourceLoader.reload();
+
+  const result = await createAgentSession({
+    cwd: options.runtime.outputDirectory,
+    agentDir: path.join(options.runtime.deepagentsDirectory, "pi-agent"),
+    authStorage,
+    modelRegistry,
+    model,
+    thinkingLevel: resolvePiThinkingLevel(options.effort),
+    resourceLoader,
+    settingsManager,
+    sessionManager: SessionManager.inMemory(options.runtime.outputDirectory),
+    tools: [...PI_AGENT_DEFAULT_TOOLS, PI_AGENT_WRITE_TODOS_TOOL_NAME, PI_AGENT_STRUCTURED_RESPONSE_TOOL_NAME],
+    customTools: [
+      createPiWriteTodosTool(options.runtime),
+      createPiStructuredResponseTool(options.responseSchema, structuredResponse),
+    ],
+  });
+
+  return { session: result.session, structuredResponse };
+}
+
+export function buildPiStructuredPrompt<T>(payload: Record<string, unknown>, schema: z.ZodType<T>): string {
+  return [
+    "Execute the app-builder phase using the JSON payload below.",
+    "",
+    "Filesystem rules:",
+    "- The current working directory is the generated app root.",
+    "- Treat paths beginning with `/` in the payload as app-root-relative virtual paths.",
+    "- Do not write host-managed `.workspace` JSON/config/validation artifacts directly; return their data through the structured response.",
+    "- The live todo file is `/.workspace/todo.md`; use `write_todos` for todo updates and never create `/TODO.md` in the app root.",
+    "",
+    `Finish by calling the \`${PI_AGENT_STRUCTURED_RESPONSE_TOOL_NAME}\` tool with a response matching the JSON schema. Do not end with plain text only.`,
+    "",
+    "Payload JSON:",
+    "```json",
+    JSON.stringify(payload, null, 2),
+    "```",
+    "",
+    "Response JSON schema:",
+    "```json",
+    JSON.stringify(z.toJSONSchema(schema), null, 2),
+    "```",
+  ].join("\n");
+}
+
+function extractPiAssistantText(messages: readonly unknown[]): string {
+  return messages
+    .flatMap((message) => {
+      if (!message || typeof message !== "object" || Array.isArray(message)) {
+        return [];
+      }
+      const record = message as Record<string, unknown>;
+      if (record.role !== "assistant" || !Array.isArray(record.content)) {
+        return [];
+      }
+      return record.content.flatMap((part) => {
+        if (!part || typeof part !== "object" || Array.isArray(part)) {
+          return [];
+        }
+        const partRecord = part as Record<string, unknown>;
+        return partRecord.type === "text" && typeof partRecord.text === "string" ? [partRecord.text] : [];
+      });
+    })
+    .join("\n")
+    .trim();
+}
+
+function parseJsonLikeText(value: string): unknown | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const candidates = [
+    trimmed,
+    ...Array.from(trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)).map((match) => match[1]?.trim() ?? ""),
+  ].filter(Boolean);
+  const firstObjectIndex = trimmed.indexOf("{");
+  const lastObjectIndex = trimmed.lastIndexOf("}");
+  if (firstObjectIndex >= 0 && lastObjectIndex > firstObjectIndex) {
+    candidates.push(trimmed.slice(firstObjectIndex, lastObjectIndex + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return undefined;
+}
+
+export function extractStructuredResponseFromPiText<T>(messages: readonly unknown[], schema: z.ZodType<T>): T | null {
+  const parsed = parseJsonLikeText(extractPiAssistantText(messages));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const response = "structuredResponse" in record
+    ? record.structuredResponse
+    : "response" in record
+      ? record.response
+      : parsed;
+  const validation = schema.safeParse(response);
+  return validation.success ? validation.data : null;
+}
+
 export function buildGenerationSubagents(
   runtimePhase: RuntimeStatusPhase,
   includeTemplateSkills: boolean,
@@ -2723,7 +3461,7 @@ export function buildGenerationSubagents(
     return [];
   }
 
-  const skills = includeTemplateSkills ? ["/.deepagents/skills"] : undefined;
+  const skills = includeTemplateSkills ? [`/${workspaceRelativePath("skills")}`] : undefined;
   const basePrompt = [
     "You are a bounded implementation subagent for the app-builder generation workflow.",
     "Only accept work when the main agent gives you an explicit non-overlapping file/path or responsibility scope.",
@@ -2759,27 +3497,10 @@ export function buildGenerationSubagents(
   ];
 }
 
-function buildGeneralPurposeCompatibilitySubagent(
-  deepagents: Record<string, unknown>,
-  middleware: readonly unknown[],
-  includeTemplateSkills: boolean,
-): Record<string, unknown> | null {
-  const generalPurpose = deepagents.GENERAL_PURPOSE_SUBAGENT;
-  if (!generalPurpose || typeof generalPurpose !== "object" || Array.isArray(generalPurpose)) {
-    return null;
-  }
-
-  return {
-    ...(generalPurpose as Record<string, unknown>),
-    middleware,
-    ...(includeTemplateSkills ? { skills: ["/.deepagents/skills"] } : {}),
-  };
-}
-
-export class DeepAgentsTextGenerator implements TextGenerator {
+export class PiTextGenerator implements TextGenerator {
   private readonly modelRoles: ModelRoleConfigMap;
 
-  constructor(options?: DeepAgentsTextGeneratorOptions) {
+  constructor(options?: PiTextGeneratorOptions) {
     this.modelRoles = resolveConstructorModelRoles(options);
   }
 
@@ -2796,8 +3517,6 @@ export class DeepAgentsTextGenerator implements TextGenerator {
       timeoutLabel: string;
     },
   ): Promise<T> {
-    const deepagents = await loadDeepagentsModule();
-    const createDeepAgent = deepagents.createDeepAgent;
     const runtimePhase = options.runtimePhase ?? (
       options.stage === "plan_analysis" || options.stage === "plan"
         ? "plan"
@@ -2809,14 +3528,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
     );
     const modelRole = modelRoleForRuntimePhase(runtimePhase);
     const modelConfig = modelRole ? (runtime.modelRoles?.[modelRole] ?? this.modelRoles[modelRole]) : this.modelRoles.plan;
-    const resolvedModel = await resolveModel(
-      modelConfig,
-      runtimePhase === "plan" || runtimePhase === "generate"
-        ? runtime.templatePhases[runtimePhase]?.effort
-        : runtimePhase === "planRepair" || runtimePhase === "plan_repair"
-          ? runtime.templatePhases.planRepair?.effort
-          : runtime.templatePhases.generateRepair?.effort,
-    );
+    const effort = resolveEffortForRuntimePhase(runtime, runtimePhase);
     const payloadPlanSpec = planSpecSchema.safeParse(options.payload.planSpec);
     const projectConfigGuardPrompt = buildProjectConfigGuardPrompt(
       runtime,
@@ -2833,64 +3545,30 @@ export class DeepAgentsTextGenerator implements TextGenerator {
 
     await fs.writeFile(options.promptSnapshotPath, systemPrompt, "utf8");
 
-    const agentOptions: any = {
-      model: resolvedModel,
-      responseFormat: toolStrategy(options.responseSchema),
-      systemPrompt,
-      permissions: buildHostManagedArtifactPermissions(),
-    };
-    const hostManagedArtifactWriteGuardMiddleware = createHostManagedArtifactWriteGuardMiddleware();
-    const writeTodosCompatibilityMiddleware = createWriteTodosCompatibilityMiddleware();
-    agentOptions.middleware = [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware];
-
     const hasTemplateSkills = await pathExists(skillsDirectory);
-    if (hasTemplateSkills) {
-      agentOptions.skills = ["/.deepagents/skills"];
-    }
 
-    const generationSubagents = buildGenerationSubagents(
-      runtimePhase,
-      hasTemplateSkills,
-      projectConfigGuardPrompt,
-      [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware],
-    );
-    const generalPurposeSubagent = buildGeneralPurposeCompatibilitySubagent(
-      deepagents as Record<string, unknown>,
-      [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware],
-      hasTemplateSkills,
-    );
-    const subagents = [
-      ...(generalPurposeSubagent ? [generalPurposeSubagent] : []),
-      ...generationSubagents,
-    ];
-    if (subagents.length > 0) {
-      agentOptions.subagents = subagents;
-    }
-
-    agentOptions.backend = new deepagents.FilesystemBackend({
-      rootDir: runtime.outputDirectory,
-      virtualMode: true,
+    const { session, structuredResponse } = await createPiSessionForPhase({
+      runtime,
+      systemPrompt,
+      responseSchema: options.responseSchema,
+      modelConfig,
+      effort,
+      ...(hasTemplateSkills ? { skillsDirectory } : {}),
     });
 
-    const agent = createDeepAgent(agentOptions);
-    const state = {
-      messages: [
-        {
-          role: "user",
-          content: JSON.stringify(options.payload),
-        },
-      ],
-    };
-
-    const result = await runDeepAgentWithLogs(
-      agent as any,
-      state,
+    const result = await runPiAgentWithLogs({
+      session,
+      structuredResponse,
+      prompt: buildPiStructuredPrompt(options.payload, options.responseSchema),
+      responseSchema: options.responseSchema,
       runtime,
       runtimePhase,
-      options.timeoutLabel,
-      modelConfig.modelName,
-      modelConfig.userAgent,
-    );
+      timeoutLabel: options.timeoutLabel,
+      fallbackModelName: modelConfig.modelName,
+      leaderUserAgent: modelConfig.userAgent,
+    }).finally(() => {
+      session.dispose();
+    });
 
     const structured = extractStructuredResponse(result, options.responseSchema);
     if (!structured) {
@@ -2905,59 +3583,42 @@ export class DeepAgentsTextGenerator implements TextGenerator {
     runtime: TextGeneratorRuntime,
   ): Promise<ReferenceMarkdownConversionResult> {
     try {
-      const deepagents = await loadDeepagentsModule();
-      const createDeepAgent = deepagents.createDeepAgent;
       const modelConfig = runtime.modelRoles?.plan ?? this.modelRoles.plan;
-      const resolvedModel = await resolveModel(modelConfig, runtime.templatePhases.plan?.effort);
-      const hostManagedArtifactWriteGuardMiddleware = createHostManagedArtifactWriteGuardMiddleware();
-      const writeTodosCompatibilityMiddleware = createWriteTodosCompatibilityMiddleware();
-      const agentOptions: any = {
-        model: resolvedModel,
-        middleware: [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware],
-        responseFormat: toolStrategy(referenceMarkdownConversionSchema),
+      const { session, structuredResponse } = await createPiSessionForPhase({
+        runtime,
         systemPrompt: REFERENCE_MARKDOWN_CONVERSION_SYSTEM_PROMPT,
-        permissions: buildHostManagedArtifactPermissions(),
-        backend: new deepagents.FilesystemBackend({
-          rootDir: runtime.outputDirectory,
-          virtualMode: true,
-        }),
-      };
-      const generalPurposeSubagent = buildGeneralPurposeCompatibilitySubagent(
-        deepagents as Record<string, unknown>,
-        [hostManagedArtifactWriteGuardMiddleware, writeTodosCompatibilityMiddleware],
-        false,
-      );
-      if (generalPurposeSubagent) {
-        agentOptions.subagents = [generalPurposeSubagent];
-      }
-      const agent = createDeepAgent(agentOptions);
-      const state = {
-        messages: [
-          {
-            role: "user",
-            content: JSON.stringify({
-              stage: "reference_markdown_conversion",
-              source: {
-                url: input.url,
-                name: input.name,
-                type: input.type,
-                contentType: input.contentType,
-              },
-              rawDocument: input.body,
-            }),
-          },
-        ],
+        responseSchema: referenceMarkdownConversionSchema,
+        modelConfig,
+        effort: runtime.templatePhases.plan?.effort,
+      });
+      const payload = {
+        stage: "reference_markdown_conversion",
+        source: {
+          url: input.url,
+          name: input.name,
+          type: input.type,
+          contentType: input.contentType,
+        },
+        rawDocument: input.body,
       };
 
       await appendWorkflowLog(`[host] 开始将参考资料转换为 Markdown：${input.url}`);
-      const result = await runDeepAgentForStructuredResponse(
-        agent as any,
-        state,
-        "deepagents reference markdown conversion",
-      );
+      const result = await runPiAgentWithLogs({
+        session,
+        structuredResponse,
+        prompt: buildPiStructuredPrompt(payload, referenceMarkdownConversionSchema),
+        responseSchema: referenceMarkdownConversionSchema,
+        runtime,
+        runtimePhase: "plan",
+        timeoutLabel: "pi agent reference markdown conversion",
+        fallbackModelName: modelConfig.modelName,
+        leaderUserAgent: modelConfig.userAgent,
+      }).finally(() => {
+        session.dispose();
+      });
       const structured = extractStructuredResponse(result, referenceMarkdownConversionSchema);
       if (!structured) {
-        throw new Error("deepagents reference markdown conversion did not return a valid structured response.");
+        throw new Error("pi agent reference markdown conversion did not return a valid structured response.");
       }
       await appendWorkflowLog(`[host] 参考资料 Markdown 转换完成：${input.url}`);
       return structured;
@@ -2975,7 +3636,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         responseSchema: planResultSchema,
         stage: "plan_analysis",
         runtimePhase: "plan",
-        timeoutLabel: "deepagents PRD analysis",
+        timeoutLabel: "pi agent PRD analysis",
         payload: {
           ...buildPlanProjectPayload(spec, runtime),
           planningPipeline: {
@@ -3001,7 +3662,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         responseSchema: planDeliveryResultSchema,
         stage: "plan",
         runtimePhase: "plan",
-        timeoutLabel: "deepagents PRD assembly",
+        timeoutLabel: "pi agent PRD assembly",
         payload: {
           ...buildPlanProjectPayload(spec, runtime),
           planningPipeline: {
@@ -3028,7 +3689,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         promptSnapshotPath: runtime.deepagentsPlanPromptSnapshotPath,
         responseSchema: planDeliveryResultSchema,
         stage: "plan",
-        timeoutLabel: "deepagents planning",
+        timeoutLabel: "pi agent planning",
         payload: buildPlanProjectPayload(spec, runtime),
       });
     } catch (error) {
@@ -3048,7 +3709,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         promptSnapshotPath: runtime.deepagentsPlanRepairPromptSnapshotPath,
         responseSchema: planDeliveryResultSchema,
         stage: "plan_repair",
-        timeoutLabel: "deepagents plan repair",
+        timeoutLabel: "pi agent plan repair",
         payload: buildPlanRepairPayload(runtime),
       });
     } catch (error) {
@@ -3068,7 +3729,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         promptSnapshotPath: runtime.deepagentsGeneratePromptSnapshotPath,
         responseSchema: generatedProjectSchema,
         stage: "generate",
-        timeoutLabel: "deepagents generation",
+        timeoutLabel: "pi agent generation",
         payload: {
           stage: "生成阶段",
           planSpec,
@@ -3123,7 +3784,7 @@ export class DeepAgentsTextGenerator implements TextGenerator {
         promptSnapshotPath: runtime.deepagentsGenerateRepairPromptSnapshotPath,
         responseSchema: generatedProjectSchema,
         stage: "generate_repair",
-        timeoutLabel: "deepagents generation repair",
+        timeoutLabel: "pi agent generation repair",
         payload: {
           stage: "生成修复阶段",
           planSpec,

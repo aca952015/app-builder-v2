@@ -46,7 +46,7 @@ function metric(input) {
 }
 
 async function writeSession(root, sessionId, records, extras = {}) {
-  const deepagentsDir = path.join(root, ".out", sessionId, ".deepagents");
+  const deepagentsDir = path.join(root, ".out", sessionId, ".workspace");
   await mkdir(deepagentsDir, { recursive: true });
   await writeFile(
     path.join(deepagentsDir, "metrics.jsonl"),
@@ -183,7 +183,7 @@ test("--all markdown ranks sessions by total wall-clock and aggregates phases", 
 test("malformed JSONL lines are skipped and reported in JSON output", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-metrics-malformed-"));
   const sessionId = "malformed-session";
-  const deepagentsDir = path.join(tempRoot, ".out", sessionId, ".deepagents");
+  const deepagentsDir = path.join(tempRoot, ".out", sessionId, ".workspace");
 
   try {
     await mkdir(deepagentsDir, { recursive: true });
@@ -281,8 +281,8 @@ test("session prefix errors are clear for no match and ambiguous match", async (
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-metrics-prefix-"));
 
   try {
-    await mkdir(path.join(tempRoot, ".out", "abc-one", ".deepagents"), { recursive: true });
-    await mkdir(path.join(tempRoot, ".out", "abc-two", ".deepagents"), { recursive: true });
+    await mkdir(path.join(tempRoot, ".out", "abc-one", ".workspace"), { recursive: true });
+    await mkdir(path.join(tempRoot, ".out", "abc-two", ".workspace"), { recursive: true });
 
     const missing = await runAnalyzer(["missing"], tempRoot);
     assert.notEqual(missing.code, 0);

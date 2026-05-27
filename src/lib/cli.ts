@@ -145,6 +145,7 @@ Environment:
   APP_BUILDER_MAX_INPUT_TOKENS Optional input/context window token budget fallback for all model roles
   APP_BUILDER_MAX_TOKENS Optional output token cap fallback for all model roles
   APP_BUILDER_MODEL Optional model fallback for all roles
+  APP_BUILDER_PI_MODELS_JSON Optional Pi models.json path for custom model metadata; missing model IDs auto-register when unset
   APP_BUILDER_PLAN_MODEL / APP_BUILDER_GENERATE_MODEL / APP_BUILDER_REPAIR_MODEL Optional role model overrides
   APP_BUILDER_PLAN_BASE_URL / APP_BUILDER_GENERATE_BASE_URL / APP_BUILDER_REPAIR_BASE_URL Optional role base URLs
   APP_BUILDER_PLAN_USER_AGENT / APP_BUILDER_GENERATE_USER_AGENT / APP_BUILDER_REPAIR_USER_AGENT Optional role User-Agent headers
@@ -152,7 +153,6 @@ Environment:
   APP_BUILDER_PLAN_MAX_INPUT_TOKENS / APP_BUILDER_GENERATE_MAX_INPUT_TOKENS / APP_BUILDER_REPAIR_MAX_INPUT_TOKENS Optional role input/context window token budgets
   APP_BUILDER_PLAN_MAX_TOKENS / APP_BUILDER_GENERATE_MAX_TOKENS / APP_BUILDER_REPAIR_MAX_TOKENS Optional role output token caps
   APP_BUILDER_PLAN_API_KEY / APP_BUILDER_GENERATE_API_KEY / APP_BUILDER_REPAIR_API_KEY Optional role API keys
-  APP_BUILDER_STREAM_MODES Optional comma-separated deepagents stream modes
   APP_BUILDER_STDOUT  Optional TTY stdout renderer override: dashboard or log
 `;
 }

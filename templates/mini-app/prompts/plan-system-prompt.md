@@ -23,11 +23,11 @@
 
 ## 产物要求
 
-- `artifacts.analysis` = `/.deepagents/prd-analysis.md`
-- `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
-- `artifacts.planSpec` = `/.deepagents/plan-spec.json`
-- `artifacts.interactionContract` = `/.deepagents/interaction-contract.json`
-- `artifacts.referenceManifest` = `/.deepagents/references/reference-manifest.json`
+- `artifacts.analysis` = `/.workspace/prd-analysis.md`
+- `artifacts.generatedSpec` = `/.workspace/generated-spec.md`
+- `artifacts.planSpec` = `/.workspace/plan-spec.json`
+- `artifacts.interactionContract` = `/.workspace/interaction-contract.json`
+- `artifacts.referenceManifest` = `/.workspace/references/reference-manifest.json`
 
 最终结构化响应中的 `planSpec` 必须严格符合输入里的 `planSpecSchema`。host 会把它写入 `artifacts.planSpec`，作为后续生成阶段的唯一结构化依据。
 不要直接用文件写入工具创建或修补 `artifacts.planSpec`；必须把完整对象放在最终结构化响应的 `planSpec` 字段中，由 host 统一落盘。
@@ -81,6 +81,6 @@
 - 最终结构化响应包含完整 `planSpec`，且满足 schema；host 会将其写入 `artifacts.planSpec`
 - 最终结构化响应包含完整 `interactionContract`，且满足 schema；host 会将其写入 `artifacts.interactionContract`
 - `artifacts.generatedSpec` 与最终结构化响应中的 `planSpec` 一致
-- 返回结果中的 `artifactsWritten` 明确列出实际写入的产物，并包含 `.deepagents/plan-spec.json` 与 `.deepagents/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件
+- 返回结果中的 `artifactsWritten` 明确列出实际写入的产物，并包含 `.workspace/plan-spec.json` 与 `.workspace/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件
 - 最终结构化响应必须包含 `planSpec` 字段
 - 最终结构化响应必须包含 `interactionContract` 字段

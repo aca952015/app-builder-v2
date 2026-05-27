@@ -21,15 +21,15 @@
 ## 路径锁定
 
 - 虚拟工作区根目录固定是 `/`。生成修复阶段关键路径固定如下：
-  - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
-  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
-  - `artifacts.generationValidation` = `/.deepagents/generation-validation.json`
-  - `artifacts.runtimeValidationLog` = `/.deepagents/runtime-validation.log`
-  - `artifacts.runtimeInteractionValidation` = `/.deepagents/runtime-interaction-validation.json`
+  - `artifacts.planSpec` = `/.workspace/plan-spec.json`
+  - `artifacts.planValidation` = `/.workspace/plan-validation.json`
+  - `artifacts.generationValidation` = `/.workspace/generation-validation.json`
+  - `artifacts.runtimeValidationLog` = `/.workspace/runtime-validation.log`
+  - `artifacts.runtimeInteractionValidation` = `/.workspace/runtime-interaction-validation.json`
   - `artifacts.report` = `/app-builder-report.md`
 - 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
 - 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
-  - 把 `/.deepagents/...` 改成 `/deepagents/...`
+  - 把 `/.workspace/...` 改成 `/workspace/...`
   - 把 `/app-builder-report.md` 改成 `/app/app-builder-report.md`
   - 把任何宿主托管 artifact 改写到 `/app/...`
   - 省略前导 `.` 或额外补出 `/app/`

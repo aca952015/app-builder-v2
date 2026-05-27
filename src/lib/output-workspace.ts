@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { ensureEmptyOutputDirectory } from "./project-writer.js";
 import { buildSessionPolicyDocument } from "./session-policy.js";
 import { OutputWorkspace } from "./types.js";
+import { createWorkspaceArtifactPaths } from "./workspace-artifacts.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,42 +39,41 @@ export async function prepareOutputWorkspace(options: {
   await ensureEmptyOutputDirectory(outputDirectory, options.force ?? false);
   await initializeGitRepository(outputDirectory);
 
-  const deepagentsDirectory = path.join(outputDirectory, ".deepagents");
-  await fs.mkdir(deepagentsDirectory, { recursive: true });
-  const deepagentsAgentsPath = path.join(deepagentsDirectory, "AGENTS.md");
-  const deepagentsReferencesDirectory = path.join(deepagentsDirectory, "references");
-  await fs.mkdir(deepagentsReferencesDirectory, { recursive: true });
-  await fs.writeFile(deepagentsAgentsPath, `${buildSessionPolicyDocument()}\n`, "utf8");
+  const artifacts = createWorkspaceArtifactPaths(outputDirectory);
+  await fs.mkdir(artifacts.workspaceDirectory, { recursive: true });
+  await fs.mkdir(artifacts.referencesDirectory, { recursive: true });
+  await fs.writeFile(artifacts.agentsPath, `${buildSessionPolicyDocument()}\n`, "utf8");
 
   return {
     sessionId,
     outputDirectory,
-    deepagentsDirectory,
-    deepagentsAgentsPath,
-    deepagentsLogPath: path.join(deepagentsDirectory, "trace.log"),
-    deepagentsErrorLogPath: path.join(deepagentsDirectory, "error.log"),
-    deepagentsMetricsLogPath: path.join(deepagentsDirectory, "metrics.jsonl"),
-    deepagentsRuntimeValidationLogPath: path.join(deepagentsDirectory, "runtime-validation.log"),
-    deepagentsRuntimeInteractionValidationPath: path.join(deepagentsDirectory, "runtime-interaction-validation.json"),
-    deepagentsInteractionContractPath: path.join(deepagentsDirectory, "interaction-contract.json"),
-    deepagentsReferenceManifestPath: path.join(deepagentsReferencesDirectory, "reference-manifest.json"),
-    deepagentsConfigPath: path.join(deepagentsDirectory, "config.json"),
-    deepagentsPlanPromptSnapshotPath: path.join(deepagentsDirectory, "plan-system-prompt.md"),
-    deepagentsPlanRepairPromptSnapshotPath: path.join(deepagentsDirectory, "plan-repair-system-prompt.md"),
-    deepagentsGeneratePromptSnapshotPath: path.join(deepagentsDirectory, "generate-system-prompt.md"),
-    deepagentsGenerateRepairPromptSnapshotPath: path.join(deepagentsDirectory, "generate-repair-system-prompt.md"),
-    deepagentsTemplateDirectory: deepagentsDirectory,
-    templateLockPath: path.join(outputDirectory, "template-lock.json"),
-    sourcePrdSnapshotPath: path.join(deepagentsDirectory, "source-prd.md"),
-    deepagentsAnalysisPath: path.join(deepagentsDirectory, "prd-analysis.md"),
-    deepagentsDetailedSpecPath: path.join(deepagentsDirectory, "generated-spec.md"),
-    deepagentsPlanSpecPath: path.join(deepagentsDirectory, "plan-spec.json"),
-    deepagentsPlanValidationPath: path.join(deepagentsDirectory, "plan-validation.json"),
-    deepagentsGenerationValidationPath: path.join(deepagentsDirectory, "generation-validation.json"),
+    deepagentsDirectory: artifacts.workspaceDirectory,
+    deepagentsAgentsPath: artifacts.agentsPath,
+    deepagentsLogPath: artifacts.logPath,
+    deepagentsErrorLogPath: artifacts.errorLogPath,
+    deepagentsMetricsLogPath: artifacts.metricsLogPath,
+    deepagentsRuntimeValidationLogPath: artifacts.runtimeValidationLogPath,
+    deepagentsRuntimeInteractionValidationPath: artifacts.runtimeInteractionValidationPath,
+    deepagentsTodoPath: artifacts.todoPath,
+    deepagentsInteractionContractPath: artifacts.interactionContractPath,
+    deepagentsReferenceManifestPath: artifacts.referenceManifestPath,
+    deepagentsConfigPath: artifacts.configPath,
+    deepagentsPlanPromptSnapshotPath: artifacts.planPromptSnapshotPath,
+    deepagentsPlanRepairPromptSnapshotPath: artifacts.planRepairPromptSnapshotPath,
+    deepagentsGeneratePromptSnapshotPath: artifacts.generatePromptSnapshotPath,
+    deepagentsGenerateRepairPromptSnapshotPath: artifacts.generateRepairPromptSnapshotPath,
+    deepagentsTemplateDirectory: artifacts.templateDirectory,
+    templateLockPath: artifacts.templateLockPath,
+    sourcePrdSnapshotPath: artifacts.sourcePrdSnapshotPath,
+    deepagentsAnalysisPath: artifacts.analysisPath,
+    deepagentsDetailedSpecPath: artifacts.detailedSpecPath,
+    deepagentsPlanSpecPath: artifacts.planSpecPath,
+    deepagentsPlanValidationPath: artifacts.planValidationPath,
+    deepagentsGenerationValidationPath: artifacts.generationValidationPath,
   };
 }
 
-export async function writeDeepagentsConfig(
+export async function writeWorkspaceConfig(
   workspace: OutputWorkspace,
   config: Record<string, unknown>,
 ): Promise<void> {
@@ -83,3 +83,5 @@ export async function writeDeepagentsConfig(
     "utf8",
   );
 }
+
+export const writeDeepagentsConfig = writeWorkspaceConfig;

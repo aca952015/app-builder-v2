@@ -21,16 +21,16 @@
 ## 路径锁定
 
 - 虚拟工作区根目录固定是 `/`。生成阶段关键路径固定如下：
-  - `artifacts.analysis` = `/.deepagents/prd-analysis.md`
-  - `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
-  - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
-  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
-  - `artifacts.generationValidation` = `/.deepagents/generation-validation.json`
-  - `artifacts.runtimeValidationLog` = `/.deepagents/runtime-validation.log`
+  - `artifacts.analysis` = `/.workspace/prd-analysis.md`
+  - `artifacts.generatedSpec` = `/.workspace/generated-spec.md`
+  - `artifacts.planSpec` = `/.workspace/plan-spec.json`
+  - `artifacts.planValidation` = `/.workspace/plan-validation.json`
+  - `artifacts.generationValidation` = `/.workspace/generation-validation.json`
+  - `artifacts.runtimeValidationLog` = `/.workspace/runtime-validation.log`
   - `artifacts.report` = `/app-builder-report.md`
 - 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
 - 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
-  - 把 `/.deepagents/...` 改成 `/deepagents/...`
+  - 把 `/.workspace/...` 改成 `/workspace/...`
   - 把 `/app-builder-report.md` 改成 `/app/app-builder-report.md`
   - 把任何宿主托管 artifact 改写到 `/app/...`
   - 省略前导 `.` 或额外补出 `/app/`
@@ -40,9 +40,10 @@
 
 - 当前阶段必须使用 todo 模式推进，不允许直接进入无计划实现。
 - 在开始任何代码修改前，必须先调用一次 `write_todos`，生成“生成阶段”专属的中文 todo 列表。
-- 在开始任何代码修改前，必须先读取 `/.deepagents/references/generated-app-architecture.md`，并把它当作当前 starter 架构的权威参考。
+- 在开始任何代码修改前，必须先读取 `/.workspace/references/generated-app-architecture.md`，并把它当作当前 starter 架构的权威参考。
 - todo 只能包含生成阶段工作，不允许回退到需求分析或重新定义模型。
 - 在工作推进过程中，必须持续更新 todo 状态，明确标记 `pending`、`in_progress`、`completed`。
+- todo 的持久化文件固定为 `/.workspace/todo.md`；禁止在应用根目录创建 `/TODO.md` 或 `/todo.md`。
 - 每完成一个关键实现步骤后，都要回报当前进度，并同步更新 todo，而不是静默继续。
 - 在所有 `planSpec.resources`、`planSpec.pages`、`planSpec.apis` 和 `app-builder-report.md` 都落盘并自检通过前，不允许停止维护 todo。
 - 如果发生错误、补写或重试，必须把修复动作纳入 todo，并继续更新进度。
@@ -60,10 +61,10 @@
 ## 实现要求
 
 - 当前工作目录根目录就是最终生成项目根目录。
-- 应用源码必须直接写入根目录，不要写进 `.deepagents/`。
-- 必须先读取 `.deepagents/references/generated-app-architecture.md`，确认当前 starter 的 route groups、shell、context、sidebar 和鉴权约定后，再读取和修改具体文件。
+- 应用源码必须直接写入根目录，不要写进 `.workspace/`。
+- 必须先读取 `.workspace/references/generated-app-architecture.md`，确认当前 starter 的 route groups、shell、context、sidebar 和鉴权约定后，再读取和修改具体文件。
 - 如果输入的 `artifacts.design` 存在，必须在开始页面、组件、样式或交互实现前先读取该路径（通常为 `/DESIGN.md`），并按其中的 design system 约束实现界面。
-- 读取 starter 文件时，以 `.deepagents/references/generated-app-architecture.md` 记录的结构为准，沿用现有 Next.js App Router + TailAdmin 管理台结构。
+- 读取 starter 文件时，以 `.workspace/references/generated-app-architecture.md` 记录的结构为准，沿用现有 Next.js App Router + TailAdmin 管理台结构。
 - 默认业务交互模式是 `REST API`，按 `planSpec.apis` 实现。
 - 页面实现必须严格以 `planSpec.pages[*].route` 为准生成对应路由入口；禁止擅自改名、改路径、补别名页、拆分成近似路径，或用其他 route 替代 `planSpec` 中声明的页面路径。
 - 所有承载业务数据的页面必须对接 `planSpec.apis` 中定义的 Route Handlers 获取或提交真实数据；禁止在页面组件中用 mock 数据、演示数组、硬编码业务统计、`Math.random()` 模拟刷新或其他静态占位逻辑替代 API 接线。

@@ -18,17 +18,17 @@
 ## 路径锁定
 
 - 虚拟工作区根目录固定是 `/`。宿主托管的计划修复关键路径固定如下：
-  - `artifacts.sourcePrd` = `/.deepagents/source-prd.md`
-  - `artifacts.analysis` = `/.deepagents/prd-analysis.md`
-  - `artifacts.generatedSpec` = `/.deepagents/generated-spec.md`
-  - `artifacts.planSpec` = `/.deepagents/plan-spec.json`
-  - `artifacts.interactionContract` = `/.deepagents/interaction-contract.json`
-  - `artifacts.planValidation` = `/.deepagents/plan-validation.json`
+  - `artifacts.sourcePrd` = `/.workspace/source-prd.md`
+  - `artifacts.analysis` = `/.workspace/prd-analysis.md`
+  - `artifacts.generatedSpec` = `/.workspace/generated-spec.md`
+  - `artifacts.planSpec` = `/.workspace/plan-spec.json`
+  - `artifacts.interactionContract` = `/.workspace/interaction-contract.json`
+  - `artifacts.planValidation` = `/.workspace/plan-validation.json`
 - `hardConstraints.planSpecSchemaValidation`
 - `hardConstraints.referenceUsageValidation`
 - 输入里的 `artifacts.*` 路径是唯一事实来源。每次读写前，先逐字比对目标路径与输入值；只有完全一致才允许继续。
 - 严禁自行推断、改写、简化或“修正”这些路径。尤其禁止：
-  - 把 `/.deepagents/...` 改成 `/deepagents/...`
+  - 把 `/.workspace/...` 改成 `/workspace/...`
   - 把任何宿主托管 artifact 改写到 `/app/...`
   - 读取 `/app/source-prd.md`
   - 省略前导 `.` 或额外补出 `/app/`
@@ -100,7 +100,7 @@
 - 最终只能返回结构化响应。
 - 不要输出 `<think>`、思维链、自然语言总结、Markdown 代码块，或任何包裹在结构化响应之外的文本。
 - 如果已经完成落盘，必须立刻返回结构化响应；不要先输出“Returning structured response:”之类的说明文字。
-- `artifactsWritten` 必须按实际落盘顺序列出本轮修补过的计划阶段文件相对路径，并包含 `.deepagents/plan-spec.json` 与 `.deepagents/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件。
+- `artifactsWritten` 必须按实际落盘顺序列出本轮修补过的计划阶段文件相对路径，并包含 `.workspace/plan-spec.json` 与 `.workspace/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件。
 - `planSpecVersion` 固定写 `1`。
 - 最终结构化响应必须包含修补后的 `planSpec` 字段。
 - 最终结构化响应必须包含修补后的 `interactionContract` 字段。

@@ -13,7 +13,7 @@ This file applies to the whole repository.
 ## Host Phase Boundaries
 
 - Host-side phase orchestration lives primarily in `src/lib/generator.ts`.
-- DeepAgents runtime wiring and event summarization live in `src/lib/text-generator.ts`.
+- Pi Agent runtime wiring and event summarization live in `src/lib/text-generator.ts`.
 - Terminal progress rendering lives in `src/lib/terminal-ui.ts`.
 - Shared phase/runtime contracts live in `src/lib/types.ts` and `src/lib/plan-spec.ts`.
 - Template prompts and template-local skills live under `templates/full-stack/`.

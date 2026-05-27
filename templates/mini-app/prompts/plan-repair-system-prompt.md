@@ -58,6 +58,6 @@
 - `artifacts.analysis`、`artifacts.generatedSpec` 与最终结构化响应中的 `planSpec` 仍然一致
 - 最终结构化响应中的 `planSpec` 满足 schema；host 会将其写入 `artifacts.planSpec`
 - 最终结构化响应中的 `interactionContract` 已按关键交互、内部 API 映射和外部操作同步修补；host 会将其写入 `artifacts.interactionContract`
-- 返回结果中的 `artifactsWritten` 明确列出本轮实际修补的计划产物，并包含 `.deepagents/plan-spec.json` 与 `.deepagents/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件
+- 返回结果中的 `artifactsWritten` 明确列出本轮实际修补的计划产物，并包含 `.workspace/plan-spec.json` 与 `.workspace/interaction-contract.json` 表示 host 将从结构化响应落盘这两个文件
 - 最终结构化响应必须包含修补后的 `planSpec` 字段
 - 最终结构化响应必须包含修补后的 `interactionContract` 字段
