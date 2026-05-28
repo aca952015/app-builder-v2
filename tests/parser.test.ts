@@ -47,6 +47,21 @@ test("normalizeSpec assembles external references from parsed PRD sections", () 
   assert.equal(normalized.externalReferences[0]?.required, true);
 });
 
+test("normalizeSpec preserves bracketed IPv6 external reference URLs", () => {
+  const markdown = [
+    "# Internal Docs Console",
+    "",
+    "## References",
+    "- Internal API docs: http://[::1]:1/private-notes for endpoint parameters.",
+    "",
+  ].join("\n");
+  const parsed = parsePrd(markdown);
+  const normalized = normalizeSpec(parsed, markdown);
+
+  assert.equal(normalized.externalReferences.length, 1);
+  assert.equal(normalized.externalReferences[0]?.url, "http://[::1]:1/private-notes");
+});
+
 test("normalizeSpec skips image resources when extracting external references", () => {
   const markdown = [
     "# Visual Weather Console",
@@ -65,6 +80,16 @@ test("normalizeSpec skips image resources when extracting external references", 
     normalized.externalReferences.map((reference) => reference.url),
     ["https://docs.example.com/weather/current"],
   );
+});
+
+test("normalizeSpec handles one-line narrative PRDs without detected entities", () => {
+  const markdown = "做一个可以展示天气、搜索城市、查看未来预报的极简天气单页应用。";
+  const parsed = parsePrd(markdown);
+  const normalized = normalizeSpec(parsed, markdown);
+
+  assert.equal(normalized.entities.length, 0);
+  assert.ok(normalized.flows.length > 0);
+  assert.ok(normalized.warnings.includes("No explicit user flows were identified in the PRD."));
 });
 
 test("parsePrd recognizes OCR-style Chinese energy PRDs", async () => {

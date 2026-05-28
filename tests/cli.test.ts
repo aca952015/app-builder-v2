@@ -7,6 +7,7 @@ import path from "node:path";
 import { runCli } from "../src/lib/cli.js";
 import { generateApplication } from "../src/lib/generator.js";
 import { type PlanSpec } from "../src/lib/plan-spec.js";
+import { type InteractionContract } from "../src/lib/interaction-contract.js";
 import {
   type GeneratedAppValidator,
   type GeneratedProject,
@@ -102,10 +103,45 @@ function buildPlanSpec(): PlanSpec {
   };
 }
 
+function buildValidInteractionContract(planSpec: PlanSpec = buildPlanSpec()): InteractionContract {
+  const firstPage = planSpec.pages[0]?.route ?? "/";
+  const firstApi = planSpec.apis[0];
+  return {
+    flows: planSpec.flows.map((flow) => ({
+      name: flow.name,
+      critical: true,
+      triggerControl: `Open ${firstPage}`,
+      fallbackTrigger: "Use sidebar navigation.",
+      loadingState: "Show a loading state.",
+      emptyState: "Show an empty state.",
+      errorState: "Show an error message.",
+    })),
+    internalOperations: firstApi
+      ? [
+          {
+            name: `${firstApi.name} request`,
+            pageRoute: firstPage,
+            triggerControl: "Primary action",
+            apiPath: firstApi.path,
+            method: firstApi.methods[0] ?? "GET",
+          },
+        ]
+      : [],
+    externalOperations: [],
+  };
+}
+
 async function writeEmptyInteractionContract(runtime: TextGeneratorRuntime): Promise<void> {
+  let planSpec = buildPlanSpec();
+  try {
+    planSpec = JSON.parse(await readFile(runtime.deepagentsPlanSpecPath, "utf8")) as PlanSpec;
+  } catch {
+    planSpec = buildPlanSpec();
+  }
+
   await writeFile(
     runtime.deepagentsInteractionContractPath,
-    `${JSON.stringify({ flows: [], internalOperations: [], externalOperations: [] }, null, 2)}\n`,
+    `${JSON.stringify(buildValidInteractionContract(planSpec), null, 2)}\n`,
     "utf8",
   );
 }

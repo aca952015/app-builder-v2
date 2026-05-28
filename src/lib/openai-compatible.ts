@@ -508,7 +508,6 @@ class OpenAICompatibleReasoningContentChatOpenAICompletions<
         completion: choice.index ?? 0,
       };
       if (typeof chunk.content !== "string") {
-        console.log("[WARNING]: Received non-string content from OpenAI. This is currently not supported.");
         continue;
       }
 

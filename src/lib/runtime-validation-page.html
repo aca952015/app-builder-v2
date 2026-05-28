@@ -130,6 +130,7 @@
     const requirementInput = document.getElementById("implementation-requirement");
     const submitRequestButton = document.getElementById("submit-request");
     const cancelRequestButton = document.getElementById("cancel-request");
+    const validationToken = "__APP_BUILDER_VALIDATION_TOKEN__";
 
     completeButton.addEventListener("click", async () => {
       completeButton.disabled = true;
@@ -137,7 +138,10 @@
       try {
         const response = await fetch("__APP_BUILDER_MANUAL_COMPLETE_PATH__", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "x-app-builder-validation-token": validationToken
+          },
           body: JSON.stringify({ completedAt: new Date().toISOString() })
         });
         if (!response.ok) {
@@ -180,7 +184,10 @@
       try {
         const response = await fetch("__APP_BUILDER_IMPLEMENTATION_REQUEST_PATH__", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "x-app-builder-validation-token": validationToken
+          },
           body: JSON.stringify({
             requirement,
             requestedAt: new Date().toISOString()

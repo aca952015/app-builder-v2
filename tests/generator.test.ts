@@ -33,13 +33,25 @@ import {
 } from "../src/lib/interactive-runtime-validation.js";
 import { resolveModelRoleConfigs } from "../src/lib/model-config.js";
 import { planSpecSchema, validatePlanSpec, type PlanSpec } from "../src/lib/plan-spec.js";
-import { validateInteractionContract, type InteractionContract } from "../src/lib/interaction-contract.js";
-import { filterRedundantValidationDetailLines, generateApplication, resolveSpawnCommand, validateSessionPhase } from "../src/lib/generator.js";
+import {
+  validateInteractionContract,
+  validateInteractionContractForPlanSpec,
+  type InteractionContract,
+} from "../src/lib/interaction-contract.js";
+import {
+  filterRedundantValidationDetailLines,
+  generateApplication,
+  materializeRuntimeEnv,
+  resolveSpawnCommand,
+  validateSessionPhase,
+} from "../src/lib/generator.js";
 import { prepareOutputWorkspace } from "../src/lib/output-workspace.js";
 import { buildSessionPolicyDocument } from "../src/lib/session-policy.js";
 import {
+  DEFAULT_GENERATE_SUBAGENT_PARALLELISM,
   buildHostManagedArtifactPermissions,
   buildGenerationSubagents,
+  buildPiHostParallelGenerationBoardState,
   buildPiParallelGenerationTaskItems,
   buildPiStructuredPrompt,
   buildPlanProjectPayload,
@@ -52,6 +64,7 @@ import {
   mapPiToolPathToWorkspaceRelative,
   normalizePiTaskToolCallArgs,
   PiTextGenerator,
+  resolveGenerateSubagentParallelism,
   runDeepAgentWithLogs,
   runPiAgentWithLogs,
   rewritePiToolPathInput,
@@ -502,10 +515,45 @@ function buildEmptyInteractionContract(): InteractionContract {
   };
 }
 
+function buildValidInteractionContract(planSpec: PlanSpec = buildPlanSpec()): InteractionContract {
+  const firstPage = planSpec.pages[0]?.route ?? "/";
+  const firstApi = planSpec.apis[0];
+  return {
+    flows: planSpec.flows.map((flow) => ({
+      name: flow.name,
+      critical: true,
+      triggerControl: `Open ${firstPage}`,
+      fallbackTrigger: "Use sidebar navigation.",
+      loadingState: "Show a loading state.",
+      emptyState: "Show an empty state.",
+      errorState: "Show an error message.",
+    })),
+    internalOperations: firstApi
+      ? [
+          {
+            name: `${firstApi.name} request`,
+            pageRoute: firstPage,
+            triggerControl: "Primary action",
+            apiPath: firstApi.path,
+            method: firstApi.methods[0] ?? "GET",
+          },
+        ]
+      : [],
+    externalOperations: [],
+  };
+}
+
 async function writeEmptyInteractionContract(runtime: TextGeneratorRuntime): Promise<void> {
+  let planSpec = buildPlanSpec();
+  try {
+    planSpec = JSON.parse(await readFile(runtime.deepagentsPlanSpecPath, "utf8")) as PlanSpec;
+  } catch {
+    planSpec = buildPlanSpec();
+  }
+
   await writeFile(
     runtime.deepagentsInteractionContractPath,
-    `${JSON.stringify(buildEmptyInteractionContract(), null, 2)}\n`,
+    `${JSON.stringify(buildValidInteractionContract(planSpec), null, 2)}\n`,
     "utf8",
   );
 }
@@ -547,6 +595,7 @@ function buildTestRuntime(overrides: Partial<TextGeneratorRuntime> = {}): TextGe
     maxPlanRetries: 10,
     generateAttempt: 1,
     maxGenerateRetries: 10,
+    generateSubagentParallelism: DEFAULT_GENERATE_SUBAGENT_PARALLELISM,
     retryReasons: [],
     templatePhases: {
       plan: { effort: "high" },
@@ -681,9 +730,16 @@ async function requestLocalResponse(
   url: string,
   method = "GET",
   body?: string,
+  headers: Record<string, string> = {},
 ): Promise<{ status: number; body: string }> {
   return await new Promise<{ status: number; body: string }>((resolve, reject) => {
     const parsed = new URL(url);
+    const requestHeaders: Record<string, string | number> = { ...headers };
+    if (body) {
+      requestHeaders["content-type"] = requestHeaders["content-type"] ?? "application/json";
+      requestHeaders["content-length"] = Buffer.byteLength(body);
+    }
+
     const req = httpRequest(
       {
         host: parsed.hostname,
@@ -691,14 +747,7 @@ async function requestLocalResponse(
         path: `${parsed.pathname}${parsed.search}`,
         method,
         timeout: 2_000,
-        ...(body
-          ? {
-              headers: {
-                "content-type": "application/json",
-                "content-length": Buffer.byteLength(body),
-              },
-            }
-          : {}),
+        headers: requestHeaders,
       },
       (response) => {
         const chunks: Buffer[] = [];
@@ -722,6 +771,12 @@ async function requestLocalResponse(
     }
     req.end();
   });
+}
+
+function extractValidationToken(html: string): string {
+  const match = html.match(/const validationToken = "([^"]+)";/);
+  assert.ok(match, "validation page should include a validation token");
+  return match[1] ?? "";
 }
 
 type FakeSmokeBrowserBehavior = {
@@ -1414,16 +1469,78 @@ test("buildPiParallelGenerationTaskItems creates default backend frontend and ve
   });
   const tasks = buildPiParallelGenerationTaskItems(buildPlanSpec(), runtime);
 
-  assert.deepEqual(tasks.map((task) => task.agent), [
-    "backend-implementer",
-    "frontend-implementer",
-    "integration-verifier",
-  ]);
+  assert.equal(tasks.length, 9);
+  assert.deepEqual(
+    tasks.reduce<Record<string, number>>((counts, task) => {
+      counts[task.agent] = (counts[task.agent] ?? 0) + 1;
+      return counts;
+    }, {}),
+    {
+      "backend-implementer": 3,
+      "frontend-implementer": 3,
+      "integration-verifier": 3,
+    },
+  );
+  assert.deepEqual(tasks.map((task) => task.instanceIndex), [1, 2, 3, 1, 2, 3, 1, 2, 3]);
+  assert.ok(tasks.every((task) => task.instanceCount === 3));
   assert.match(tasks[0]?.task ?? "", /app\/api\/work-orders\/route\.ts/);
-  assert.match(tasks[1]?.task ?? "", /\/work-orders/);
-  assert.match(tasks[1]?.task ?? "", /Do not edit Prisma schema/);
-  assert.match(tasks[2]?.task ?? "", /Inspect integration coverage/);
-  assert.match(tasks[2]?.task ?? "", /Do not run shell validation commands/);
+  assert.match(tasks[1]?.task ?? "", /backend-implementer instance 2\/3/);
+  assert.match(tasks[3]?.task ?? "", /\/work-orders/);
+  assert.match(tasks[4]?.task ?? "", /Do not edit shared shell\/style\/navigation files/);
+  assert.match(tasks[6]?.task ?? "", /Inspect integration coverage/);
+  assert.match(tasks[6]?.task ?? "", /Do not run shell validation commands/);
+});
+
+test("buildPiParallelGenerationTaskItems allows explicit per-role parallelism", () => {
+  const runtime = buildTestRuntimeForOutput("/virtual-output");
+  const tasks = buildPiParallelGenerationTaskItems(buildPlanSpec(), runtime, { parallelism: 2 });
+
+  assert.equal(tasks.length, 6);
+  assert.deepEqual(tasks.map((task) => task.shardLabel), [
+    "backend-implementer#1",
+    "backend-implementer#2",
+    "frontend-implementer#1",
+    "frontend-implementer#2",
+    "integration-verifier#1",
+    "integration-verifier#2",
+  ]);
+  assert.equal(resolveGenerateSubagentParallelism(""), 3);
+  assert.equal(resolveGenerateSubagentParallelism("2"), 2);
+  assert.throws(() => resolveGenerateSubagentParallelism("0"), /APP_BUILDER_GENERATE_SUBAGENT_PARALLELISM/);
+});
+
+test("buildPiHostParallelGenerationBoardState switches visible phase before subagents start", () => {
+  const runtime = buildTestRuntimeForOutput("/virtual-output", {
+    designPath: "/virtual-output/DESIGN.md",
+  });
+  const tasks = buildPiParallelGenerationTaskItems(buildPlanSpec(), runtime);
+  const modelConfig = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "test-key",
+    APP_BUILDER_MODEL: "test-generate-model",
+    APP_BUILDER_USER_AGENT: "test-agent",
+  }).generate;
+  const state = buildPiHostParallelGenerationBoardState({ runtime, modelConfig, tasks });
+
+  assert.equal(state.stage, "生成阶段");
+  assert.equal(state.runtimeStatus?.phase, "generate");
+  assert.equal(state.runtimeStatus?.subagentCount, 9);
+  assert.match(state.narrative, /计划阶段已通过门禁/);
+  assert.match(state.narrative, /每类 3 个实例/);
+  assert.deepEqual(state.todos.map((todo) => todo.status), ["completed", "in_progress", "pending", "pending"]);
+  assert.deepEqual(
+    state.agentStatuses?.map((agent) => ({
+      name: agent.name,
+      status: agent.status,
+      activeInstanceCount: agent.activeInstanceCount,
+      userAgent: agent.userAgent,
+    })),
+    [
+      { name: "leader", status: "working", activeInstanceCount: undefined, userAgent: "test-agent" },
+      { name: "backend-implementer", status: "working", activeInstanceCount: 3, userAgent: undefined },
+      { name: "frontend-implementer", status: "working", activeInstanceCount: 3, userAgent: undefined },
+      { name: "integration-verifier", status: "working", activeInstanceCount: 3, userAgent: undefined },
+    ],
+  );
 });
 
 test("Pi task compatibility tool delegates DeepAgents-style task calls and blocks non-generation phases", async () => {
@@ -1538,13 +1655,30 @@ test("Pi path adapter keeps tool paths inside the generated workspace", () => {
   assert.deepEqual(rewritePiToolPathInput(relativeInput, outputDirectory), {});
   assert.equal(relativeInput.path, "app/page.tsx");
 
+  const normalizedInput: Record<string, unknown> = { path: "app/../app/page.tsx" };
+  assert.deepEqual(rewritePiToolPathInput(normalizedInput, outputDirectory), {});
+  assert.equal(normalizedInput.path, "app/page.tsx");
+
   const parentEscape: Record<string, unknown> = { path: "../outside.txt" };
   assert.match(rewritePiToolPathInput(parentEscape, outputDirectory).blockedReason ?? "", /escapes/);
   assert.equal(parentEscape.path, "../outside.txt");
 
+  const embeddedParentEscape: Record<string, unknown> = { path: "app/../../outside.txt" };
+  assert.match(rewritePiToolPathInput(embeddedParentEscape, outputDirectory).blockedReason ?? "", /escapes/);
+  assert.equal(embeddedParentEscape.path, "app/../../outside.txt");
+
   const windowsEscape: Record<string, unknown> = { path: "..\\outside.txt" };
   assert.match(rewritePiToolPathInput(windowsEscape, outputDirectory).blockedReason ?? "", /escapes/);
   assert.equal(windowsEscape.path, "..\\outside.txt");
+});
+
+test("interaction contract semantic validation requires plan flow coverage", () => {
+  const issues = validateInteractionContractForPlanSpec(buildEmptyInteractionContract(), buildPlanSpec());
+
+  assert.ok(issues.length > 0);
+  assert.match(issues.join("\n"), /flows 不能为空/);
+  assert.match(issues.join("\n"), /工单跟踪/);
+  assert.deepEqual(validateInteractionContractForPlanSpec(buildValidInteractionContract(), buildPlanSpec()), []);
 });
 
 test("resolveSpawnCommand finds Windows command shims through PATHEXT", async (context) => {
@@ -2270,8 +2404,17 @@ test("interactive runtime validate page can manually complete without coverage p
         assert.match(validationPage.body, /<iframe[^>]+allowfullscreen/);
         assert.match(validationPage.body, /验证完成/);
         assert.match(validationPage.body, /\/__app_builder_validate_complete/);
+        const validationToken = extractValidationToken(validationPage.body);
 
-        const completeResponse = await requestLocalResponse(`${proxyUrl}/__app_builder_validate_complete`, "POST");
+        const rejectedCompleteResponse = await requestLocalResponse(`${proxyUrl}/__app_builder_validate_complete`, "POST");
+        assert.equal(rejectedCompleteResponse.status, 403);
+
+        const completeResponse = await requestLocalResponse(
+          `${proxyUrl}/__app_builder_validate_complete`,
+          "POST",
+          undefined,
+          { "x-app-builder-validation-token": validationToken },
+        );
         assert.equal(completeResponse.status, 200);
         assert.match(completeResponse.body, /"manualCompleted":true/);
       },
@@ -2361,11 +2504,20 @@ test("interactive runtime validate page can submit implementation requests for r
         assert.match(validationPage.body, /提交问题/);
         assert.match(validationPage.body, /输入你希望 Agent 修改或补充的要求/);
         assert.match(validationPage.body, /\/__app_builder_validate_request/);
+        const validationToken = extractValidationToken(validationPage.body);
+
+        const rejectedRequestResponse = await requestLocalResponse(
+          `${proxyUrl}/__app_builder_validate_request`,
+          "POST",
+          JSON.stringify({ requirement, requestedAt: "2026-04-29T00:00:00.000Z" }),
+        );
+        assert.equal(rejectedRequestResponse.status, 403);
 
         const requestResponse = await requestLocalResponse(
           `${proxyUrl}/__app_builder_validate_request`,
           "POST",
           JSON.stringify({ requirement, requestedAt: "2026-04-29T00:00:00.000Z" }),
+          { "x-app-builder-validation-token": validationToken },
         );
         assert.equal(requestResponse.status, 200);
         assert.match(requestResponse.body, /"implementationRequested":true/);
@@ -3280,7 +3432,7 @@ class MiniAppMenuAnchorTextGenerator extends StubTextGenerator {
 class StructuredPlanSpecResultTextGenerator extends StubTextGenerator {
   override async planProject(_spec: NormalizedSpec, runtime: TextGeneratorRuntime): Promise<PlanResult> {
     const planSpec = buildPlanSpec();
-    const interactionContract = buildEmptyInteractionContract();
+    const interactionContract = buildValidInteractionContract(planSpec);
 
     await writeFile(runtime.deepagentsAnalysisPath, "# Structured Plan Analysis\n\n使用结构化响应交付计划规格。\n", "utf8");
     await writeFile(runtime.deepagentsDetailedSpecPath, "# Structured Plan Spec\n\n结构化响应中的 planSpec 是权威来源。\n", "utf8");
@@ -5110,7 +5262,7 @@ class MisplacedArtifactTextGenerator implements TextGenerator {
     );
     await writeFile(
       path.join(misplacedDeepagentsDirectory, "interaction-contract.json"),
-      `${JSON.stringify({ flows: [], internalOperations: [], externalOperations: [] }, null, 2)}\n`,
+      `${JSON.stringify(buildValidInteractionContract(planSpec), null, 2)}\n`,
       "utf8",
     );
 
@@ -5459,6 +5611,20 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
   }
 });
 
+test("runtime env materializer replaces placeholder session secret", () => {
+  const envExample = [
+    "DATABASE_URL=\"file:./prisma/dev.db\"",
+    "SESSION_SECRET=replace-this-with-a-long-random-string",
+    "",
+  ].join("\n");
+  const env = materializeRuntimeEnv(envExample);
+
+  assert.match(envExample, /^SESSION_SECRET=replace-this-with-a-long-random-string$/m);
+  assert.match(env, /^SESSION_SECRET="[A-Za-z0-9_-]{32,}"$/m);
+  assert.doesNotMatch(env, /replace-this-with-a-long-random-string/);
+  assert.equal(materializeRuntimeEnv("DATABASE_URL=file:./dev.db\n"), "DATABASE_URL=file:./dev.db\n");
+});
+
 
 test("generateApplication resolves PRD API docs into local reference artifacts before planning", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-refs-"));
@@ -5524,6 +5690,60 @@ test("generateApplication resolves PRD API docs into local reference artifacts b
     assert.equal(planSpec.references?.[0]?.localPath, generator.observedLocalReferences?.[0]?.localPath);
     assert.equal(planSpec.references?.[0]?.retrievalStatus, "downloaded");
     assert.match(await readFile(path.join(result.outputDirectory, ".workspace/generated-spec.md"), "utf8"), new RegExp(localPath!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("generateApplication blocks private-network external reference downloads", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-private-ref-"));
+  const specPath = path.join(tempRoot, "private-ref-prd.md");
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+
+  try {
+    await writeFile(
+      specPath,
+      [
+        "# Internal Notes App",
+        "",
+        "See http://127.0.0.1:1/private-notes for optional background notes.",
+        "See http://[::1]:1/private-notes for optional IPv6 background notes.",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      throw new Error("fetch should not be called for private references");
+    }) as typeof fetch;
+
+    const result = await generateApplication({
+      specPath,
+      outputDirectory: path.join(tempRoot, "output"),
+      generator: new StubTextGenerator(),
+      validator: new SuccessfulRuntimeValidator(),
+    });
+
+    const manifestPath = path.join(result.outputDirectory, ".workspace/references/reference-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      entries: Array<{ url: string; retrievalStatus: string; error?: string }>;
+    };
+
+    assert.equal(fetchCalled, false);
+    assert.equal(manifest.entries.length, 2);
+    for (const entry of manifest.entries) {
+      assert.equal(entry.retrievalStatus, "failed");
+      assert.match(entry.error ?? "", /host is not allowed/);
+    }
+    assert.deepEqual(
+      manifest.entries.map((entry) => entry.url).sort(),
+      [
+        "http://127.0.0.1:1/private-notes",
+        "http://[::1]:1/private-notes",
+      ],
+    );
   } finally {
     globalThis.fetch = originalFetch;
     await rm(tempRoot, { recursive: true, force: true });
@@ -7511,6 +7731,26 @@ test("prepareOutputWorkspace creates the host workspace artifact contract", asyn
   }
 });
 
+test("prepareOutputWorkspace force clears stale output contents", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-workspace-force-"));
+  const outputDirectory = path.join(tempRoot, "generated-app");
+
+  try {
+    await mkdir(path.join(outputDirectory, "stale"), { recursive: true });
+    await writeFile(path.join(outputDirectory, "stale", "old.txt"), "old\n", "utf8");
+
+    const workspace = await prepareOutputWorkspace({ outputDirectory, force: true });
+    const outputEntries = await readdir(outputDirectory);
+
+    assert.equal(outputEntries.includes("stale"), false);
+    assert.equal(outputEntries.includes(WORKSPACE_DIR_NAME), true);
+    assert.equal(outputEntries.includes(".git"), true);
+    assert.equal(workspace.outputDirectory, outputDirectory);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("validateSessionPhase rejects legacy .deepagents-only sessions without migration", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-legacy-workspace-"));
   const sessionId = "legacy-session";
@@ -7534,6 +7774,19 @@ test("validateSessionPhase rejects legacy .deepagents-only sessions without migr
     const outputEntries = await readdir(outputDirectory);
     assert.equal(outputEntries.includes(LEGACY_WORKSPACE_DIR_NAME), true);
     assert.equal(outputEntries.includes(WORKSPACE_DIR_NAME), false);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("validateSessionPhase rejects session ids with path traversal", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-session-traversal-"));
+
+  try {
+    await assert.rejects(
+      () => validateSessionPhase({ sessionId: "../outside", cwd: tempRoot, generator: new StubTextGenerator() }),
+      /Session id "\.\.\/outside" is invalid/,
+    );
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -7684,6 +7937,16 @@ test("starter sidebar source explicitly guards against third-level navigation", 
   assert.match(sidebarSource, /import sidebarMenu from "\.\/sidebar-menu\.json"/);
 });
 
+test("full-stack starter login form does not prefill demo credentials", async () => {
+  const loginSource = await readFile(
+    path.resolve(process.cwd(), "templates/full-stack/starter/app/(full-width-pages)/login/page.tsx"),
+    "utf8",
+  );
+
+  assert.doesNotMatch(loginSource, /defaultValue="demo@example\.com"/);
+  assert.doesNotMatch(loginSource, /defaultValue="demo12345"/);
+});
+
 test("generated app architecture reference matches the TailAdmin starter skeleton", async () => {
   const architectureSource = await readFile(
     path.resolve(process.cwd(), "templates/full-stack/references/generated-app-architecture.md"),
@@ -7723,6 +7986,7 @@ test("planning payload passes plan-spec and locked env validation as blocking ha
   };
 
   const payload = buildPlanProjectPayload(spec, runtime) as {
+    stage: string;
     hardConstraints: {
       planSpecSchemaValidation: {
         artifactKey: string;
@@ -7766,6 +8030,7 @@ test("planning payload passes plan-spec and locked env validation as blocking ha
     };
   };
 
+  assert.equal(payload.stage, "计划阶段");
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactKey, "artifacts.planSpec");
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactPath, "/.workspace/plan-spec.json");
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.blocking, true);
@@ -7832,11 +8097,12 @@ test("plan-spec JSON schema avoids const for Gemini tool declarations", () => {
 test("plan-repair payload preserves the blocking hard constraint for plan-spec schema validation", () => {
   const payload = buildPlanRepairPayload(buildTestRuntime({
     planAttempt: 2,
-    retryReasons: ["artifacts.planSpec 鏍￠獙澶辫触锛歱ages.0.resourceName"],
+    retryReasons: ["artifacts.planSpec 校验失败：pages.0.resourceName"],
     templateEnvironmentPolicy: {
       lockedKeys: ["DATABASE_URL"],
     },
   })) as {
+    stage: string;
     hardConstraints: {
       planSpecSchemaValidation: {
         artifactKey: string;
@@ -7880,6 +8146,7 @@ test("plan-repair payload preserves the blocking hard constraint for plan-spec s
     };
   };
 
+  assert.equal(payload.stage, "计划修复阶段");
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactKey, "artifacts.planSpec");
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.artifactPath, "/.workspace/plan-spec.json");
   assert.equal(payload.hardConstraints.planSpecSchemaValidation.blocking, true);
@@ -8113,6 +8380,10 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(planPromptSource, /不要求也不提供 `relatedApis`/);
   assert.match(generatePromptSource, /`planSpec` 是唯一事实来源/);
   assert.match(generatePromptSource, /不能重新分析原始 PRD/);
+  assert.match(generatePromptSource, /`artifacts\.interactionContract` 是页面交互/);
+  assert.match(generatePromptSource, /必须读取 `artifacts\.interactionContract`/);
+  assert.match(generatePromptSource, /internalOperations\[\*\]/);
+  assert.match(generatePromptSource, /interaction contract trace/);
   assert.match(generatePromptSource, /planSpec\.references/);
   assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
   assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
@@ -8165,6 +8436,9 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generateRepairPromptSource, /修补切片可以真正并行推进/);
   assert.match(generateRepairPromptSource, /并行不会缩短总修复时间，必须由主代理直接修补/);
   assert.match(generateRepairPromptSource, /只补齐缺失实现或错误接线/);
+  assert.match(generateRepairPromptSource, /必须先读取 `artifacts\.interactionContract`/);
+  assert.match(generateRepairPromptSource, /flows\/internalOperations\/externalOperations/);
+  assert.match(generateRepairPromptSource, /interaction contract trace/);
   assert.match(generateRepairPromptSource, /planSpec\.references/);
   assert.match(generateRepairPromptSource, /声明 locked key 或锁定变量冲突，这是计划规格问题/);
   assert.match(generateRepairPromptSource, /不要修改 `\.env`\/`\.env\.example` 或应用代码来绕过锁定/);

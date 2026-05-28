@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   createServer as createHttpServer,
   request as httpRequest,
@@ -237,6 +238,7 @@ const IMPLEMENTATION_REQUEST_PATH = "/__app_builder_validate_request";
 const VALIDATION_PAGE_TEMPLATE_FILENAME = "runtime-validation-page.html";
 const MANUAL_VALIDATION_COMPLETE_PATH_PLACEHOLDER = "__APP_BUILDER_MANUAL_COMPLETE_PATH__";
 const IMPLEMENTATION_REQUEST_PATH_PLACEHOLDER = "__APP_BUILDER_IMPLEMENTATION_REQUEST_PATH__";
+const VALIDATION_TOKEN_PLACEHOLDER = "__APP_BUILDER_VALIDATION_TOKEN__";
 
 const DEV_SERVER_ERROR_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bblocked cross-origin request\b/i, label: "跨源资源阻止" },
@@ -1449,11 +1451,12 @@ async function readValidationPageTemplate(): Promise<string> {
   throw new Error(`Could not find ${VALIDATION_PAGE_TEMPLATE_FILENAME}.`);
 }
 
-async function buildValidationPageHtml(): Promise<string> {
+async function buildValidationPageHtml(validationToken: string): Promise<string> {
   const template = await readValidationPageTemplate();
   return template
     .replaceAll(MANUAL_VALIDATION_COMPLETE_PATH_PLACEHOLDER, MANUAL_VALIDATION_COMPLETE_PATH)
-    .replaceAll(IMPLEMENTATION_REQUEST_PATH_PLACEHOLDER, IMPLEMENTATION_REQUEST_PATH);
+    .replaceAll(IMPLEMENTATION_REQUEST_PATH_PLACEHOLDER, IMPLEMENTATION_REQUEST_PATH)
+    .replaceAll(VALIDATION_TOKEN_PLACEHOLDER, validationToken);
 }
 
 function writeValidationPageResponse(response: ServerResponse, html: string): void {
@@ -1478,6 +1481,20 @@ function writeJsonResponse(response: ServerResponse, status: number, body: Recor
     "cache-control": "no-store",
   });
   response.end(JSON.stringify(body));
+}
+
+function hasValidValidationToken(request: IncomingMessage, validationToken: string): boolean {
+  const rawHeader = request.headers["x-app-builder-validation-token"];
+  return Array.isArray(rawHeader)
+    ? rawHeader.includes(validationToken)
+    : rawHeader === validationToken;
+}
+
+function writeForbiddenValidationResponse(response: ServerResponse): void {
+  writeJsonResponse(response, 403, {
+    ok: false,
+    error: "Invalid validation token.",
+  });
 }
 
 async function readJsonRequestBody(request: IncomingMessage, maxBytes: number): Promise<unknown> {
@@ -1588,7 +1605,8 @@ async function startDevServerProxy(options: {
   onImplementationRequest: (implementationRequest: RuntimeInteractionImplementationRequest) => void;
   onRecordedRequest: () => void;
 }): Promise<{ server: HttpServer; proxyUrl: string }> {
-  const validationPageHtml = await buildValidationPageHtml();
+  const validationToken = randomBytes(24).toString("base64url");
+  const validationPageHtml = await buildValidationPageHtml(validationToken);
   const server = createHttpServer((request, response) => {
     const startedAt = Date.now();
     const method = (request.method ?? "GET").toUpperCase();
@@ -1625,6 +1643,11 @@ async function startDevServerProxy(options: {
         request.resume();
         return;
       }
+      if (!hasValidValidationToken(request, validationToken)) {
+        writeForbiddenValidationResponse(response);
+        request.resume();
+        return;
+      }
       options.onManualComplete();
       writeManualValidationCompleteResponse(response);
       request.resume();
@@ -1639,6 +1662,11 @@ async function startDevServerProxy(options: {
           allow: "POST",
         });
         response.end(JSON.stringify({ ok: false, error: "Method not allowed." }));
+        request.resume();
+        return;
+      }
+      if (!hasValidValidationToken(request, validationToken)) {
+        writeForbiddenValidationResponse(response);
         request.resume();
         return;
       }

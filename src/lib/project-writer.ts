@@ -12,6 +12,13 @@ export async function ensureEmptyOutputDirectory(outputDirectory: string, force 
     if (entries.length > 0 && !force) {
       throw new Error(`${outputDirectory} is not empty. Use --force to overwrite.`);
     }
+    if (entries.length > 0 && force) {
+      await Promise.all(
+        entries.map(async (entry) => {
+          await fs.rm(path.join(outputDirectory, entry), { recursive: true, force: true });
+        }),
+      );
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!message.includes("ENOENT")) {

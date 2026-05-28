@@ -10,7 +10,7 @@ import {
   ParsedSection,
 } from "./types.js";
 
-const URL_PATTERN = /https?:\/\/[^\s<>)\]"']+/gi;
+const URL_PATTERN = /https?:\/\/(?:\[[^\]\s]+\]|[^\s<>)\]"']+)(?:[^\s<>)\]"']*)?/gi;
 const IMAGE_RESOURCE_EXTENSIONS = new Set([
   ".apng",
   ".avif",
@@ -270,6 +270,9 @@ function buildScreenBasedFlows(screens: AppScreen[]): string[] {
 }
 
 function cleanReferenceUrl(url: string): string {
+  if (/^https?:\/\/\[[^\]\s]+\]/i.test(url)) {
+    return url.replace(/[.,;:!?，。；：！？）)]+$/u, "");
+  }
   return url.replace(/[.,;:!?，。；：！？）\])]+$/u, "");
 }
 
@@ -469,6 +472,7 @@ export function normalizeSpec(
       : buildCrudScreens(entities);
 
   const inferredFlows = parsed.flows.length === 0 ? buildScreenBasedFlows(screens) : [];
+  const fallbackFlowTarget = entities[0]?.pluralName.toLowerCase() ?? "core workspace";
   const flows =
     parsed.flows.length > 0
       ? parsed.flows
@@ -476,8 +480,8 @@ export function normalizeSpec(
         ? inferredFlows
         : [
             "User signs in with email and password.",
-            `User reviews the dashboard and navigates to ${entities[0]!.pluralName.toLowerCase()}.`,
-            `User creates, edits, and deletes ${entities[0]!.pluralName.toLowerCase()}.`,
+            `User reviews the dashboard and navigates to ${fallbackFlowTarget}.`,
+            `User creates, edits, and deletes ${fallbackFlowTarget}.`,
           ];
   if (parsed.flows.length === 0 && inferredFlows.length === 0 && entities.length > 0) {
     defaultsApplied.push("No user flows were listed, so a default sign-in and CRUD flow was generated.");

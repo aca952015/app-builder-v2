@@ -316,8 +316,12 @@ const PI_AGENT_WRITE_TODOS_TOOL_NAME = "write_todos";
 const PI_AGENT_TASK_TOOL_NAME = "task";
 const PI_AGENT_DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 const PI_AGENT_SUBAGENT_TOOLS = ["read", "edit", "write", "grep", "find", "ls"] as const;
-const PI_TASK_MAX_PARALLEL_TASKS = 8;
-const PI_TASK_MAX_CONCURRENCY = 4;
+export const DEFAULT_GENERATE_SUBAGENT_PARALLELISM = 3;
+const GENERATION_SUBAGENT_ROLE_COUNT = 3;
+const MAX_GENERATE_SUBAGENT_PARALLELISM = 8;
+const GENERATE_SUBAGENT_PARALLELISM_ENV = "APP_BUILDER_GENERATE_SUBAGENT_PARALLELISM";
+const PI_TASK_MAX_PARALLEL_TASKS = DEFAULT_GENERATE_SUBAGENT_PARALLELISM * GENERATION_SUBAGENT_ROLE_COUNT;
+const PI_TASK_MAX_CONCURRENCY = PI_TASK_MAX_PARALLEL_TASKS;
 const PI_TASK_OUTPUT_MAX_LENGTH = 24_000;
 const WORKSPACE_TODO_RELATIVE_PATH = workspaceRelativePath(WORKSPACE_TODO_FILE_NAME);
 
@@ -607,7 +611,7 @@ export function buildPlanProjectPayload(
   runtime: TextGeneratorRuntime,
 ): Record<string, unknown> {
   return {
-    stage: "璁″垝闃舵",
+    stage: "计划阶段",
     appName: spec.appName,
     summary: spec.summary,
     roles: spec.roles,
@@ -656,7 +660,7 @@ export function buildPlanProjectPayload(
 
 export function buildPlanRepairPayload(runtime: TextGeneratorRuntime): Record<string, unknown> {
   return {
-    stage: "璁″垝淇闃舵",
+    stage: "计划修复阶段",
     template: {
       id: runtime.templateId,
       name: runtime.templateName,
@@ -715,6 +719,23 @@ export function resolveDeepagentsStreamModes(
   }
 
   return Array.from(new Set(modes));
+}
+
+export function resolveGenerateSubagentParallelism(
+  value: string | number | undefined = process.env[GENERATE_SUBAGENT_PARALLELISM_ENV],
+): number {
+  if (value === undefined || (typeof value === "string" && value.trim() === "")) {
+    return DEFAULT_GENERATE_SUBAGENT_PARALLELISM;
+  }
+
+  const parsed = typeof value === "number" ? value : Number(value.trim());
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_GENERATE_SUBAGENT_PARALLELISM) {
+    throw new Error(
+      `Invalid ${GENERATE_SUBAGENT_PARALLELISM_ENV} value: ${String(value)}. Expected an integer from 1 to ${MAX_GENERATE_SUBAGENT_PARALLELISM}.`,
+    );
+  }
+
+  return parsed;
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -950,8 +971,23 @@ function resolveRuntimeStatusAttempt(
     : undefined;
 }
 
-function resolveRuntimeSubagentCount(phase: RuntimeStatusPhase): number | undefined {
+function resolveRuntimeGenerateSubagentParallelism(
+  runtime?: Partial<Pick<TextGeneratorRuntime, "generateSubagentParallelism">>,
+): number {
+  return runtime?.generateSubagentParallelism !== undefined
+    ? resolveGenerateSubagentParallelism(runtime.generateSubagentParallelism)
+    : DEFAULT_GENERATE_SUBAGENT_PARALLELISM;
+}
+
+function resolveRuntimeSubagentCount(
+  runtime: Partial<Pick<TextGeneratorRuntime, "generateSubagentParallelism">>,
+  phase: RuntimeStatusPhase,
+): number | undefined {
   const count = buildGenerationSubagents(phase, false).length;
+  if (phase === "generate" && count > 0) {
+    return count * resolveRuntimeGenerateSubagentParallelism(runtime);
+  }
+
   return count > 0 ? count : undefined;
 }
 
@@ -991,7 +1027,7 @@ export function resolveRuntimeStatusEffort(
 
 export function buildRuntimeStatus(options: {
   runtime: Pick<TextGeneratorRuntime, "sessionId" | "templatePhases"> &
-    Partial<Pick<TextGeneratorRuntime, "modelRoles" | "planAttempt" | "generateAttempt">>;
+    Partial<Pick<TextGeneratorRuntime, "modelRoles" | "planAttempt" | "generateAttempt" | "generateSubagentParallelism">>;
   phase: RuntimeStatusPhase;
   modelName?: string | undefined;
   usage?: RuntimeUsageSummary | undefined;
@@ -1002,7 +1038,7 @@ export function buildRuntimeStatus(options: {
   const roleModelName = modelRole ? options.runtime.modelRoles?.[modelRole]?.modelName : undefined;
   const contextWindowTokens = modelRole ? options.runtime.modelRoles?.[modelRole]?.maxInputTokens : undefined;
   const attempt = resolveRuntimeStatusAttempt(options.runtime, options.phase);
-  const subagentCount = resolveRuntimeSubagentCount(options.phase);
+  const subagentCount = resolveRuntimeSubagentCount(options.runtime, options.phase);
 
   return {
     modelName: options.modelName ?? roleModelName ?? resolveRuntimeModelFallback(options.fallbackModelName),
@@ -2956,6 +2992,9 @@ type PiTaskMode = "single" | "parallel" | "chain";
 type PiTaskItem = {
   agent: string;
   task: string;
+  instanceIndex?: number | undefined;
+  instanceCount?: number | undefined;
+  shardLabel?: string | undefined;
 };
 
 type PiTaskNormalizedParams =
@@ -3144,6 +3183,37 @@ function isWorkspaceEscapeCandidate(filePath: string): boolean {
   return filePath === ".." || filePath.startsWith("../") || path.isAbsolute(filePath);
 }
 
+function toPiWorkspaceCandidate(rawPath: string, outputDirectory: string): string {
+  if (path.isAbsolute(rawPath)) {
+    const relativeToOutput = path.relative(outputDirectory, rawPath);
+    if (!isWorkspaceEscapeCandidate(relativeToOutput)) {
+      return relativeToOutput || ".";
+    }
+  }
+
+  return rawPath.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+
+function resolvePiToolWorkspacePath(rawPath: string, outputDirectory: string): {
+  workspacePath?: string;
+  blockedReason?: string;
+} {
+  const trimmed = rawPath.trim();
+  if (!trimmed) {
+    return { workspacePath: rawPath };
+  }
+
+  const candidate = normalizeTodoPathAlias(toPiWorkspaceCandidate(trimmed, outputDirectory));
+  const resolvedPath = path.resolve(outputDirectory, candidate);
+  const relativeToOutput = path.relative(outputDirectory, resolvedPath).split(path.sep).join("/");
+
+  if (isWorkspaceEscapeCandidate(relativeToOutput)) {
+    return { blockedReason: `Path "${rawPath}" escapes the generated app workspace.` };
+  }
+
+  return { workspacePath: normalizeTodoPathAlias(relativeToOutput || ".") };
+}
+
 function normalizeTodoPathAlias(filePath: string): string {
   const normalized = normalizeWorkspaceRelativePath(filePath);
   const lower = normalized.toLowerCase();
@@ -3155,20 +3225,8 @@ function normalizeTodoPathAlias(filePath: string): string {
 }
 
 export function mapPiToolPathToWorkspaceRelative(rawPath: string, outputDirectory: string): string {
-  const trimmed = rawPath.trim();
-  if (!trimmed) {
-    return rawPath;
-  }
-
-  if (path.isAbsolute(trimmed)) {
-    const relativeToOutput = path.relative(outputDirectory, trimmed);
-    if (!isWorkspaceEscapeCandidate(relativeToOutput)) {
-      return normalizeTodoPathAlias(relativeToOutput || ".");
-    }
-  }
-
-  const slashPath = trimmed.replace(/\\/g, "/");
-  return normalizeTodoPathAlias(slashPath.replace(/^\/+/, ""));
+  const resolved = resolvePiToolWorkspacePath(rawPath, outputDirectory);
+  return resolved.workspacePath ?? rawPath;
 }
 
 export function rewritePiToolPathInput(
@@ -3180,12 +3238,12 @@ export function rewritePiToolPathInput(
     return {};
   }
 
-  const workspacePath = mapPiToolPathToWorkspaceRelative(rawPath, outputDirectory);
-  if (isWorkspaceEscapeCandidate(workspacePath)) {
-    return { blockedReason: `Path "${rawPath}" escapes the generated app workspace.` };
+  const resolved = resolvePiToolWorkspacePath(rawPath, outputDirectory);
+  if (resolved.blockedReason) {
+    return { blockedReason: resolved.blockedReason };
   }
 
-  input.path = workspacePath;
+  input.path = resolved.workspacePath ?? rawPath;
   return {};
 }
 
@@ -3195,7 +3253,12 @@ function createPiRuntimeGuardExtension(runtime: TextGeneratorRuntime): (pi: Exte
       const input = event.input as Record<string, unknown>;
       const rawPath = typeof input.path === "string" ? input.path : undefined;
       if (rawPath) {
-        const virtualPath = normalizePiVirtualPath(mapPiToolPathToWorkspaceRelative(rawPath, runtime.outputDirectory));
+        const rewritten = rewritePiToolPathInput(input, runtime.outputDirectory);
+        if (rewritten.blockedReason) {
+          return { block: true, reason: rewritten.blockedReason };
+        }
+
+        const virtualPath = normalizePiVirtualPath(String(input.path));
         if (
           (event.toolName === "write" || event.toolName === "edit") &&
           isHostManagedWriteProtectedArtifactPath(virtualPath)
@@ -3209,9 +3272,7 @@ function createPiRuntimeGuardExtension(runtime: TextGeneratorRuntime): (pi: Exte
           };
         }
       }
-
-      const rewritten = rewritePiToolPathInput(input, runtime.outputDirectory);
-      return rewritten.blockedReason ? { block: true, reason: rewritten.blockedReason } : undefined;
+      return undefined;
     });
   };
 }
@@ -3437,6 +3498,57 @@ function normalizeApiFilePath(apiPath: string): string {
   return apiPath.replace(/^\/+/, "");
 }
 
+function formatPageTaskItem(page: PlanSpec["pages"][number]): string {
+  return [
+    page.route,
+    `kind=${page.kind}`,
+    ...(page.resourceName ? [`resource=${page.resourceName}`] : []),
+  ].join(" ");
+}
+
+function formatApiTaskItem(api: PlanSpec["apis"][number]): string {
+  return [
+    normalizeApiFilePath(api.path),
+    `resource=${api.resourceName}`,
+    `methods=${api.methods.join(",")}`,
+  ].join(" ");
+}
+
+function formatResourceTaskItem(resource: PlanSpec["resources"][number]): string {
+  return [
+    resource.name,
+    `route=${resource.routeSegment}`,
+    `usage=${resource.usage ?? "direct"}`,
+  ].join(" ");
+}
+
+function formatFlowTaskItem(flow: PlanSpec["flows"][number]): string {
+  return `${flow.name} (${flow.steps.length} steps)`;
+}
+
+function formatAcceptanceTaskItem(check: PlanSpec["acceptanceChecks"][number]): string {
+  return `${check.id}: ${check.type} ${check.target}`;
+}
+
+function shardValues<T>(values: readonly T[], shardIndex: number, shardCount: number): T[] {
+  return values.filter((_, index) => index % shardCount === shardIndex);
+}
+
+function createGenerationTaskItem(
+  agent: string,
+  instanceIndex: number,
+  instanceCount: number,
+  task: string,
+): PiTaskItem {
+  return {
+    agent,
+    task,
+    instanceIndex,
+    instanceCount,
+    shardLabel: `${agent}#${instanceIndex}`,
+  };
+}
+
 function buildPlanSpecSourceOfTruthInstructions(runtime: TextGeneratorRuntime): string {
   return [
     "Source of truth and boundaries:",
@@ -3452,61 +3564,168 @@ function buildPlanSpecSourceOfTruthInstructions(runtime: TextGeneratorRuntime): 
 export function buildPiParallelGenerationTaskItems(
   planSpec: PlanSpec,
   runtime: TextGeneratorRuntime,
+  options: { parallelism?: number } = {},
 ): PiTaskItem[] {
-  const apiPaths = Array.from(new Set(planSpec.apis.map((api) => normalizeApiFilePath(api.path))));
-  const pageRoutes = Array.from(new Set(planSpec.pages.map((page) => page.route)));
-  const resourceNames = Array.from(new Set(planSpec.resources.map((resource) => resource.name)));
+  const parallelism = options.parallelism !== undefined
+    ? resolveGenerateSubagentParallelism(options.parallelism)
+    : resolveRuntimeGenerateSubagentParallelism(runtime);
+  const apiItems = Array.from(new Set(planSpec.apis.map(formatApiTaskItem)));
+  const pageItems = Array.from(new Set(planSpec.pages.map(formatPageTaskItem)));
+  const resourceItems = Array.from(new Set(planSpec.resources.map(formatResourceTaskItem)));
+  const flowItems = Array.from(new Set(planSpec.flows.map(formatFlowTaskItem)));
+  const acceptanceItems = Array.from(new Set(planSpec.acceptanceChecks.map(formatAcceptanceTaskItem)));
   const sourceInstructions = buildPlanSpecSourceOfTruthInstructions(runtime);
+  const tasks: PiTaskItem[] = [];
 
-  return [
-    {
-      agent: "backend-implementer",
-      task: [
+  for (let shardIndex = 0; shardIndex < parallelism; shardIndex += 1) {
+    const instanceIndex = shardIndex + 1;
+    const assignedApis = shardValues(apiItems, shardIndex, parallelism);
+    const assignedResources = shardValues(resourceItems, shardIndex, parallelism);
+    tasks.push(createGenerationTaskItem(
+      "backend-implementer",
+      instanceIndex,
+      parallelism,
+      [
         "Implement the backend/data slice for the validated planSpec.",
         sourceInstructions,
         "",
+        "Parallel shard:",
+        `- You are backend-implementer instance ${instanceIndex}/${parallelism}.`,
+        "- Stay inside this shard's assigned API/resource ownership unless a tiny compatibility edit is unavoidable.",
+        instanceIndex === 1
+          ? "- Own shared backend foundation files when needed: prisma/schema.prisma, prisma/seed.ts, lib/prisma.ts, and server-only data helpers."
+          : "- Do not edit shared Prisma/schema/seed/config files unless your assigned API cannot compile without a tiny compatibility edit; otherwise report the needed shared change.",
+        "",
         "Owned scope:",
         "- Prisma schema, seed data, server-side helpers, and API route handlers needed by the planned app.",
-        "- API route files:",
-        formatTaskList(apiPaths, "- No dedicated API route files were planned; inspect planSpec before deciding whether backend work is needed."),
-        "- Resources:",
-        formatTaskList(resourceNames, "- No resources were planned."),
+        "- Assigned API route files:",
+        formatTaskList(assignedApis, "- No API route files are assigned to this backend shard; inspect planSpec for small backend gaps and otherwise return a no-op report."),
+        "- Assigned resources:",
+        formatTaskList(assignedResources, "- No resources are assigned to this backend shard."),
         "",
         "Do not edit page/component/style files except for tiny server-contract compatibility notes if unavoidable. Return files touched, work completed, blockers, and validation gaps.",
       ].join("\n"),
-    },
-    {
-      agent: "frontend-implementer",
-      task: [
+    ));
+  }
+
+  for (let shardIndex = 0; shardIndex < parallelism; shardIndex += 1) {
+    const instanceIndex = shardIndex + 1;
+    const assignedPages = shardValues(pageItems, shardIndex, parallelism);
+    tasks.push(createGenerationTaskItem(
+      "frontend-implementer",
+      instanceIndex,
+      parallelism,
+      [
         "Implement the frontend/page slice for the validated planSpec.",
         sourceInstructions,
         "",
+        "Parallel shard:",
+        `- You are frontend-implementer instance ${instanceIndex}/${parallelism}.`,
+        "- Stay inside this shard's assigned page/component ownership unless a tiny compatibility edit is unavoidable.",
+        instanceIndex === 1
+          ? "- Own shared UI shell/style/navigation foundation files when needed: app/layout.tsx, app/globals.css, and shared app/components/*."
+          : "- Do not edit shared shell/style/navigation files unless your assigned page cannot render without a tiny compatibility edit; otherwise report the needed shared change.",
+        "",
         "Owned scope:",
         "- App Router page routes, client interactions, navigation, layout components, and UI styles needed by the planned app.",
-        "- Page routes:",
-        formatTaskList(pageRoutes, "- No dedicated page routes were planned; inspect planSpec before deciding whether frontend work is needed."),
+        "- Assigned page routes:",
+        formatTaskList(assignedPages, "- No page routes are assigned to this frontend shard; inspect planSpec for small frontend gaps and otherwise return a no-op report."),
         "",
         "Use the planned API route contracts for business data. Do not edit Prisma schema, seed data, or API route handlers. Return files touched, work completed, blockers, and validation gaps.",
       ].join("\n"),
-    },
-    {
-      agent: "integration-verifier",
-      task: [
+    ));
+  }
+
+  for (let shardIndex = 0; shardIndex < parallelism; shardIndex += 1) {
+    const instanceIndex = shardIndex + 1;
+    const assignedPages = shardValues(pageItems, shardIndex, parallelism);
+    const assignedApis = shardValues(apiItems, shardIndex, parallelism);
+    const assignedFlows = shardValues(flowItems, shardIndex, parallelism);
+    const assignedAcceptanceChecks = shardValues(acceptanceItems, shardIndex, parallelism);
+    tasks.push(createGenerationTaskItem(
+      "integration-verifier",
+      instanceIndex,
+      parallelism,
+      [
         "Inspect integration coverage while backend and frontend slices run.",
         sourceInstructions,
+        "",
+        "Parallel shard:",
+        `- You are integration-verifier instance ${instanceIndex}/${parallelism}.`,
+        "- Prefer read-only inspection for this shard. Report gaps for the finalizer to merge.",
+        "- Do not edit app-builder-report.md or shared artifacts during the parallel pass unless the assigned fix is narrow and unambiguous.",
         "",
         "Owned scope:",
         "- Prefer read-only inspection of planSpec coverage, API/page mapping, report requirements, and obvious file gaps.",
         "- Only make narrow edits to app-builder-report.md or small wiring fixes when the ownership is unambiguous.",
-        "- Planned page routes:",
-        formatTaskList(pageRoutes, "- No dedicated page routes were planned."),
-        "- Planned API route files:",
-        formatTaskList(apiPaths, "- No dedicated API route files were planned."),
+        "- Assigned page routes to audit:",
+        formatTaskList(assignedPages, "- No page routes are assigned to this verifier shard."),
+        "- Assigned API route files to audit:",
+        formatTaskList(assignedApis, "- No API route files are assigned to this verifier shard."),
+        "- Assigned flows to audit:",
+        formatTaskList(assignedFlows, "- No flows are assigned to this verifier shard."),
+        "- Assigned acceptance checks to audit:",
+        formatTaskList(assignedAcceptanceChecks, "- No acceptance checks are assigned to this verifier shard."),
         "",
         "Return missing coverage, likely merge conflicts, files touched, and validation gaps. Do not run shell validation commands.",
       ].join("\n"),
+    ));
+  }
+
+  return tasks;
+}
+
+export function buildPiHostParallelGenerationBoardState(options: {
+  runtime: TextGeneratorRuntime;
+  modelConfig: ModelRoleConfig;
+  tasks: readonly { agent: string }[];
+}): TodoBoardState {
+  const agentCounts = new Map<string, number>();
+  for (const task of options.tasks) {
+    const name = task.agent.trim();
+    if (!name) {
+      continue;
+    }
+    agentCounts.set(name, (agentCounts.get(name) ?? 0) + 1);
+  }
+  const agentNames = Array.from(agentCounts.keys());
+  const parallelismText = agentNames.length > 0 && options.tasks.length % agentNames.length === 0
+    ? `每类 ${options.tasks.length / agentNames.length} 个实例`
+    : `${options.tasks.length} 个实例`;
+
+  return {
+    stage: "生成阶段",
+    todos: [
+      { content: "读取已验证的 planSpec 与 starter", status: "completed" },
+      { content: `宿主并行生成 backend/frontend/integration 切片（${parallelismText}）`, status: "in_progress" },
+      { content: "合并子 agent 结果并补齐交付文件", status: "pending" },
+      { content: "等待宿主校验生成阶段产物", status: "pending" },
+    ],
+    artifacts: createArtifactItemsForStage("生成阶段", "generating"),
+    narrative: `计划阶段已通过门禁，正在生成阶段启动宿主并行 subagent（${parallelismText}）。`,
+    sessionId: options.runtime.sessionId,
+    outputDirectory: options.runtime.outputDirectory,
+    runtimeStatus: {
+      ...buildRuntimeStatus({
+        runtime: options.runtime,
+        phase: "generate",
+        fallbackModelName: options.modelConfig.modelName,
+      }),
+      subagentCount: options.tasks.length,
     },
-  ];
+    agentStatuses: [
+      {
+        name: "leader",
+        status: "working",
+        ...(options.modelConfig.userAgent ? { userAgent: options.modelConfig.userAgent } : {}),
+      },
+      ...agentNames.map((name): AgentWorkStatus => ({
+        name,
+        status: "working",
+        activeInstanceCount: agentCounts.get(name) ?? 1,
+      })),
+    ],
+  };
 }
 
 function buildParallelGenerationFinalizerSystemPrompt(baseSystemPrompt: string): string {
@@ -3515,7 +3734,7 @@ function buildParallelGenerationFinalizerSystemPrompt(baseSystemPrompt: string):
     "",
     "## Host-Run Parallel Subagents",
     "",
-    "The host has already launched backend, frontend, and integration subagents before this final merge pass.",
+    "The host has already launched multiple backend, frontend, and integration subagent instances before this final merge pass.",
     "First inspect their reported results in the payload. Then merge, resolve conflicts, fill any remaining gaps, update app-builder-report.md, and return the structured generation response.",
     "Do not restart from the original PRD. Do not discard completed child-agent work. Only call additional task subagents if a new, clearly independent gap remains after reviewing the host-run results.",
   ].join("\n");
@@ -4274,6 +4493,9 @@ async function appendPiHostParallelTaskMetric(
         metadata: {
           agent: input.result.agent,
           requestedAgent: input.result.requestedAgent ?? input.task.agent,
+          instanceIndex: input.task.instanceIndex,
+          instanceCount: input.task.instanceCount,
+          shardLabel: input.task.shardLabel,
           task: input.task.task,
           status: input.result.status,
           outputPreview: truncatePiTaskOutput(input.result.output, 1_000),
@@ -4318,7 +4540,14 @@ async function runPiHostParallelGenerationSubagents(options: {
   );
   const tasks = buildPiParallelGenerationTaskItems(options.planSpec, options.runtime);
 
-  await appendWorkflowLog(`[host] 启动宿主并行生成 subagent：${tasks.map((task) => task.agent).join(", ")}。`);
+  await updateWorkflowBoard(
+    buildPiHostParallelGenerationBoardState({
+      runtime: options.runtime,
+      modelConfig: options.modelConfig,
+      tasks,
+    }),
+  );
+  await appendWorkflowLog(`[host] 启动宿主并行生成 subagent：${tasks.map((task) => task.shardLabel ?? task.agent).join(", ")}。`);
 
   return await Promise.all(tasks.map(async (task) => {
     const startedAt = new Date();
@@ -4363,7 +4592,7 @@ async function runPiHostParallelGenerationSubagents(options: {
     });
 
     await appendWorkflowLog(
-      `[host] subagent ${task.agent} ${result.status === "completed" ? "完成" : "失败"}：${truncatePiTaskOutput(result.output, 500)}`,
+      `[host] subagent ${task.shardLabel ?? task.agent} ${result.status === "completed" ? "完成" : "失败"}：${truncatePiTaskOutput(result.output, 500)}`,
     );
 
     return { task, result };
@@ -4795,9 +5024,14 @@ export class PiTextGenerator implements TextGenerator {
           parallelGeneration: {
             mode: "host_parallel_subagents",
             requiredBeforeFinalizer: true,
+            subagentParallelism: resolveRuntimeGenerateSubagentParallelism(runtime),
+            totalSubagentTasks: parallelResults.length,
             results: parallelResults.map(({ task, result }) => ({
               requestedAgent: task.agent,
               agent: result.agent,
+              instanceIndex: task.instanceIndex,
+              instanceCount: task.instanceCount,
+              shardLabel: task.shardLabel,
               status: result.status,
               task: task.task,
               output: result.output,

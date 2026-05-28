@@ -153,6 +153,7 @@ Environment:
   APP_BUILDER_PLAN_MAX_INPUT_TOKENS / APP_BUILDER_GENERATE_MAX_INPUT_TOKENS / APP_BUILDER_REPAIR_MAX_INPUT_TOKENS Optional role input/context window token budgets
   APP_BUILDER_PLAN_MAX_TOKENS / APP_BUILDER_GENERATE_MAX_TOKENS / APP_BUILDER_REPAIR_MAX_TOKENS Optional role output token caps
   APP_BUILDER_PLAN_API_KEY / APP_BUILDER_GENERATE_API_KEY / APP_BUILDER_REPAIR_API_KEY Optional role API keys
+  APP_BUILDER_GENERATE_SUBAGENT_PARALLELISM Optional host-run generation subagent instances per role, default 3
   APP_BUILDER_STDOUT  Optional TTY stdout renderer override: dashboard or log
 `;
 }

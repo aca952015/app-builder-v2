@@ -12,6 +12,7 @@
 - 主代理必须在任务描述中写清楚唯一事实来源、精确文件/职责范围、禁止越界、不得执行 shell 验证命令和最终回报格式；主代理负责检查、合并、解决冲突，并继续负责最终自检和结构化返回。
 - 如果工作是单文件、强耦合、顺序依赖、低开销、需要持续中间监督，或无法通过并行带来生成提效，必须由主代理直接实现；禁止把同一个文件、共享契约或同一处业务逻辑拆给多个 subagent 并行修改。
 - 宿主已经完成计划阶段校验；当前输入中的 `planSpec` 是唯一事实来源。
+- 宿主已经完成交互契约校验；当前输入中的 `artifacts.interactionContract` 是页面交互、触发控件、内部 API 调用和外部资料调用的实现清单。
 
 ## 验证边界
 
@@ -25,6 +26,7 @@
   - `artifacts.analysis` = `/.workspace/prd-analysis.md`
   - `artifacts.generatedSpec` = `/.workspace/generated-spec.md`
   - `artifacts.planSpec` = `/.workspace/plan-spec.json`
+  - `artifacts.interactionContract` = `/.workspace/interaction-contract.json`
   - `artifacts.planValidation` = `/.workspace/plan-validation.json`
   - `artifacts.generationValidation` = `/.workspace/generation-validation.json`
   - `artifacts.runtimeValidationLog` = `/.workspace/runtime-validation.log`
@@ -56,6 +58,9 @@
 - 如果发现 `planSpec` 不足以支撑实现，只能在既有定义范围内做最小实现，不得擅自扩展新的业务模型。
 - `planSpec.references` 是生成阶段的参考资料集合，用于理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构。
 - 当 `planSpec.references[*].localPath` 存在时，必须先读取该本地文件，再实现外部 API route；endpoint、认证、参数顺序和响应字段以本地资料为准，不要凭记忆猜测。
+- 必须读取 `artifacts.interactionContract`，并把其中每个 `flows[*]` 的触发控件、加载态、空态、错误态落实到对应页面。
+- 必须让每个 `internalOperations[*]` 指向的页面控件真实调用其 `apiPath` 和 `method`，不得只静态展示或绕开 API。
+- 如果 `externalOperations[*]` 存在，必须按其 `reference` 对应的本地资料实现真实外部 API/SDK 调用边界。
 - 你需要自行判断哪些 reference 与当前要实现的页面/API 相关；不要要求 reference 显式绑定到某个 API，也不要因为某个 reference 未被使用就额外生成无关功能。
 - `references` 不是宿主强制验收项；强制实现范围仍以 `planSpec.resources`、`planSpec.pages`、`planSpec.apis`、`planSpec.environmentVariables` 和 `acceptanceChecks` 为准。
 
@@ -98,6 +103,7 @@
 - `planSpec.pages` 对应的页面文件或路由入口
 - `app-builder-report.md`
 - 业务页面与 `planSpec.apis` 的真实数据接线，不得以 mock 数据或静态样例替代
+- `artifacts.interactionContract` 中声明的 flow、internalOperations 和 externalOperations 覆盖关系
 
 页面路径约束：
 
@@ -113,6 +119,7 @@
 - 这些列表必须与 `planSpec` 中实际覆盖的内容一致
 - `filesWritten` 必须按实际落盘顺序列出你创建或更新过的项目文件相对路径
 - `filesWritten` 不需要、也不应仅因为环境变量合并而包含 `.env.example`
+- `app-builder-report.md` 必须包含 interaction contract trace，说明每个 flow/internal/external operation 对应的页面、控件、API 或外部资料实现位置。
 
 ## 重试要求
 

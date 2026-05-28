@@ -2442,7 +2442,7 @@ test("buildRuntimeStatus maps effort and attempt to the active phase", () => {
   assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).attempt, 2);
   assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).effort, "medium");
   assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).attempt, 3);
-  assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).subagentCount, 3);
+  assert.equal(buildRuntimeStatus({ runtime, phase: "generate" }).subagentCount, 9);
   assert.equal(buildRuntimeStatus({ runtime, phase: "planRepair" }).subagentCount, undefined);
   assert.equal(buildRuntimeStatus({ runtime, phase: "complete" }).effort, undefined);
   assert.equal(buildRuntimeStatus({ runtime, phase: "complete" }).attempt, undefined);

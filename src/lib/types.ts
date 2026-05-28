@@ -377,6 +377,7 @@ export type TextGeneratorRuntime = {
   maxPlanRetries?: number;
   generateAttempt?: number;
   maxGenerateRetries?: number;
+  generateSubagentParallelism?: number;
   retryReasons?: string[];
   templatePhases: TemplatePhaseMap;
   templateRuntimeValidation: TemplateRuntimeValidation;

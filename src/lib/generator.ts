@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { request } from "node:http";
-import { createServer } from "node:net";
+import { createServer, isIP } from "node:net";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -13,7 +14,7 @@ import {
   type ManagedDevServerProcess,
 } from "./dev-server-process.js";
 import { validatePlanSpec, type PlanSpec } from "./plan-spec.js";
-import { validateInteractionContract } from "./interaction-contract.js";
+import { validateInteractionContract, validateInteractionContractForPlanSpec } from "./interaction-contract.js";
 import { collectPageRoutePatterns, normalizeRoutePattern } from "./app-router.js";
 import { parseDotEnv } from "./env.js";
 import {
@@ -31,6 +32,7 @@ import {
   PiTextGenerator,
   materializeGenerationPromptSnapshot,
   materializeSessionPromptSnapshots,
+  resolveGenerateSubagentParallelism,
 } from "./text-generator.js";
 import {
   closeRuntimeInteractionValidationSession,
@@ -95,6 +97,9 @@ import {
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 const DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY = 8;
+const EXTERNAL_REFERENCE_FETCH_TIMEOUT_MS = 15_000;
+const EXTERNAL_REFERENCE_MAX_BYTES = 2_000_000;
+const EXTERNAL_REFERENCE_ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const DESIGN_ARTIFACT_RELATIVE_PATH = "DESIGN.md";
 const STARTER_ENV_EXAMPLE_SNAPSHOT_FILE = "starter.env.example";
 const STARTER_PROJECT_CONFIG_SNAPSHOT_FILE = "starter.project-config.json";
@@ -265,6 +270,104 @@ async function convertReferenceToMarkdown(
   return fallbackReferenceMarkdown(input);
 }
 
+function isBlockedReferenceHostname(hostname: string): boolean {
+  let normalized = hostname.trim().toLowerCase().replace(/\.$/, "");
+  if (normalized.startsWith("[") && normalized.endsWith("]")) {
+    normalized = normalized.slice(1, -1);
+  }
+  if (
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized === "metadata.google.internal"
+  ) {
+    return true;
+  }
+
+  const ipVersion = isIP(normalized);
+  if (ipVersion === 4) {
+    const [first = 0, second = 0] = normalized.split(".").map((part) => Number.parseInt(part, 10));
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168)
+    );
+  }
+
+  if (ipVersion === 6) {
+    return normalized === "::1" ||
+      normalized === "::" ||
+      normalized.startsWith("::ffff:") ||
+      normalized.startsWith("fc") ||
+      normalized.startsWith("fd") ||
+      normalized.startsWith("fe80:");
+  }
+
+  return false;
+}
+
+function validateExternalReferenceUrl(rawUrl: string): URL {
+  const parsed = new URL(rawUrl);
+  if (!EXTERNAL_REFERENCE_ALLOWED_PROTOCOLS.has(parsed.protocol)) {
+    throw new Error(`Unsupported reference URL protocol: ${parsed.protocol}`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("Reference URL must not include credentials.");
+  }
+  if (isBlockedReferenceHostname(parsed.hostname)) {
+    throw new Error(`Reference URL host is not allowed: ${parsed.hostname}`);
+  }
+  return parsed;
+}
+
+async function readReferenceResponseText(response: Response): Promise<string> {
+  const body = response.body;
+  if (!body) {
+    return "";
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (!value) {
+      continue;
+    }
+
+    totalBytes += value.byteLength;
+    if (totalBytes > EXTERNAL_REFERENCE_MAX_BYTES) {
+      await reader.cancel();
+      throw new Error(`Reference response exceeded ${EXTERNAL_REFERENCE_MAX_BYTES} bytes.`);
+    }
+    chunks.push(value);
+  }
+
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+}
+
+async function fetchExternalReference(url: string): Promise<Response> {
+  const parsed = validateExternalReferenceUrl(url);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EXTERNAL_REFERENCE_FETCH_TIMEOUT_MS);
+
+  try {
+    return await fetch(parsed.href, {
+      headers: { "user-agent": "app-builder-v2-reference-resolver/1.0" },
+      redirect: "error",
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function writeReferenceManifest(runtime: TextGeneratorRuntime, entries: LocalReference[]): Promise<void> {
   const manifest: ReferenceManifest = {
     version: 1,
@@ -303,15 +406,13 @@ async function resolveExternalReferences(
 
       const retrievedAt = new Date().toISOString();
       try {
-        const response = await fetch(candidate.url, {
-          headers: { "user-agent": "app-builder-v2-reference-resolver/1.0" },
-        });
+        const response = await fetchExternalReference(candidate.url);
         if (!response.ok) {
           throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
         }
 
         const contentType = response.headers.get("content-type") ?? "text/plain";
-        const body = await response.text();
+        const body = await readReferenceResponseText(response);
         const rawExtension = extensionForContentType(contentType);
         const rawPath = rawExtension === "html" ? reservation.rawHtmlPath : reservation.markdownPath;
         await fs.writeFile(rawPath, body, "utf8");
@@ -623,6 +724,17 @@ async function runCommandStep(options: {
   };
 }
 
+function generateSessionSecret(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+export function materializeRuntimeEnv(envExampleContents: string): string {
+  return envExampleContents.replace(
+    /^SESSION_SECRET=(["']?)replace-this-with-a-long-random-string\1$/m,
+    `SESSION_SECRET="${generateSessionSecret()}"`,
+  );
+}
+
 async function ensureEnvFile(outputDirectory: string, logPath: string): Promise<GenerationValidationStep> {
   const envExamplePath = path.join(outputDirectory, ".env.example");
   const envPath = path.join(outputDirectory, ".env");
@@ -642,7 +754,7 @@ async function ensureEnvFile(outputDirectory: string, logPath: string): Promise<
   }
 
   const hadExistingEnv = await readIfExists(envPath) !== null;
-  await fs.copyFile(envExamplePath, envPath);
+  await fs.writeFile(envPath, materializeRuntimeEnv(envExampleContents), "utf8");
   await appendRuntimeValidationLog(logPath, [
     "=== mv .env.example .env ===",
     hadExistingEnv
@@ -2528,6 +2640,10 @@ async function collectPersistedPlanValidation(runtime: TextGeneratorRuntime): Pr
       const validation = validateInteractionContract(parsed);
       if (!validation.success) {
         reasons.push(...validation.issues.map((issue) => `计划阶段未完成：artifacts.interactionContract 校验失败：${issue}`));
+      } else if (planSpec) {
+        reasons.push(...validateInteractionContractForPlanSpec(validation.data, planSpec).map(
+          (issue) => `计划阶段未完成：artifacts.interactionContract 一致性校验失败：${issue}`,
+        ));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2904,7 +3020,23 @@ async function collectGeneratedFiles(outputDirectory: string): Promise<string[]>
   return files.sort();
 }
 
+const SESSION_ID_LOOKUP_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+
+function assertValidSessionLookupId(sessionId: string): void {
+  const trimmed = sessionId.trim();
+  if (
+    trimmed !== sessionId ||
+    !SESSION_ID_LOOKUP_PATTERN.test(trimmed) ||
+    trimmed.includes("..") ||
+    trimmed.includes("/") ||
+    trimmed.includes("\\")
+  ) {
+    throw new Error(`Session id "${sessionId}" is invalid. Use a generated session id or unambiguous prefix.`);
+  }
+}
+
 async function resolveSessionIdForLookup(sessionId: string, cwd = process.cwd()): Promise<string> {
+  assertValidSessionLookupId(sessionId);
   const sessionsRoot = path.resolve(cwd, ".out");
   const exactOutputDirectory = path.join(sessionsRoot, sessionId);
 
@@ -3226,6 +3358,7 @@ async function createRuntimeForSession(sessionId: string, cwd = process.cwd()): 
     ...(designArtifactRelativePath ? { designPath: path.join(outputDirectory, designArtifactRelativePath) } : {}),
     maxPlanRetries: templateRepairRetries.plan,
     maxGenerateRetries: templateRepairRetries.generate,
+    generateSubagentParallelism: resolveGenerateSubagentParallelism(),
     templatePhases,
     templateRuntimeValidation,
     templateInteractiveRuntimeValidation,
@@ -4461,6 +4594,7 @@ export async function generateApplication(options: GenerateAppOptions): Promise<
         : {}),
       maxPlanRetries: template.repairRetries.plan,
       maxGenerateRetries: template.repairRetries.generate,
+      generateSubagentParallelism: resolveGenerateSubagentParallelism(),
       templatePhases: template.phases,
       templateRuntimeValidation: template.runtimeValidation,
       templateInteractiveRuntimeValidation: template.interactiveRuntimeValidation,

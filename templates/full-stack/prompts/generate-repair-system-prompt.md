@@ -22,6 +22,7 @@
 
 - 虚拟工作区根目录固定是 `/`。生成修复阶段关键路径固定如下：
   - `artifacts.planSpec` = `/.workspace/plan-spec.json`
+  - `artifacts.interactionContract` = `/.workspace/interaction-contract.json`
   - `artifacts.planValidation` = `/.workspace/plan-validation.json`
   - `artifacts.generationValidation` = `/.workspace/generation-validation.json`
   - `artifacts.runtimeValidationLog` = `/.workspace/runtime-validation.log`
@@ -47,6 +48,7 @@
 
 - `generationRepairPolicy.validationFailures`
 - `artifacts.planSpec`
+- `artifacts.interactionContract`
 - `artifacts.generationValidation`
 - `artifacts.runtimeValidationLog`
 - 已存在的相关源码文件
@@ -56,6 +58,7 @@
 ## 修补规则
 
 - 以 `validationFailures` 和 `artifacts.generationValidation` 中的失败项为唯一修补目标。
+- 如果失败项涉及页面 flow、按钮/表单触发、API 接线、外部资料调用或 interaction contract trace，必须先读取 `artifacts.interactionContract`，再按其中的 flows/internalOperations/externalOperations 做局部修复。
 - 如果失败项来自宿主运行验证，你必须结合 `artifacts.runtimeValidationLog` 中的真实命令输出修复问题，目标是让宿主重新执行输入里的 `template.runtimeValidation` 步骤时可以通过；若 `copyEnvExample` 未禁用，也要兼容宿主先准备 `.env`。
 - 如果失败项来自非交互式、交互式或 smoke 运行验证，你必须读取 `artifacts.runtimeInteractionValidation` 和 `artifacts.runtimeValidationLog`，按其中记录的 HTTP 请求/响应、真实浏览器渲染结果、5xx 响应体摘要、failureChain、dev server stdout/stderr、错误摘要和最近输出修复真实页面/API 接线；目标是让对应页面与 API 被宿主再次访问或渲染时不再产生编译、运行时、代理、鉴权或空白页错误。
 - 如果 `validationFailures` 包含“用户在运行验证页提交实现要求”，必须把该要求视为本轮修复目标：在不改写 `planSpec` 的前提下，按现有页面、资源和 API 边界做最小可行实现，并同步更新 `app-builder-report.md`。
@@ -73,6 +76,7 @@
 - 优先局部修复缺失的资源、页面、API、报告文件或接线路径。
 - `planSpec.references` 是修复时理解外部 API、第三方服务、SDK、协议、认证方式、参数和响应结构的参考资料；你需要自行判断哪些 reference 与当前失败项相关。
 - 当 `planSpec.references[*].localPath` 存在时，必须先读取该本地文件，再修复外部 API route；endpoint、认证、参数顺序和响应字段以本地资料为准，不要凭记忆猜测。
+- 对 `internalOperations[*]` 的修复必须保持页面控件、`apiPath` 和 `method` 一致；对 `externalOperations[*]` 的修复必须保持 `reference` 指向的资料来源一致。
 - `references` 不是宿主强制验收项，不要因为某个 reference 未被使用就额外生成无关功能。
 - 页面修复必须严格以 `planSpec.pages[*].route` 为准；禁止把缺失页面修成其他近似路径、别名路径或 starter 默认路径来蒙混通过。
 - 如果输入的 `artifacts.design` 存在，涉及页面、组件、样式或交互修复时，必须先读取该路径（通常为 `/DESIGN.md`），并保持实现符合其中的 design system 约束。
@@ -86,6 +90,7 @@
 - 已针对所有失败项完成修补
 - 所有修补都已实际落盘
 - 若修补触及 starter 基础契约，其依赖链上的 schema、seed、脚本、认证/会话和默认入口数据必须保持同步一致
+- 若修补触及页面/API/外部资料接线，`app-builder-report.md` 中的 interaction contract trace 已同步更新
 - 最终只返回结构化响应
 
 ## 最终响应
