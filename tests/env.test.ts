@@ -37,6 +37,7 @@ import {
 import {
   closeWorkflowBoard,
   createTodoBoardRenderer,
+  mergeWorkflowAgentStatuses,
   mergeWorkflowRuntimeStatus,
   parseTodoMarkdown,
   releaseWorkflowInputStream,
@@ -567,7 +568,7 @@ test("buildGenerationSubagents exposes subagents only for generation phases", ()
   const generateSubagents = buildGenerationSubagents("generate", true);
   assert.deepEqual(
     generateSubagents.map((subagent) => subagent.name),
-    ["frontend-implementer", "backend-implementer", "integration-verifier"],
+    ["fe-dev", "be-dev", "qa-dev"],
   );
   assert.deepEqual(generateSubagents[0]?.skills, ["/.workspace/skills"]);
   assert.match(String(generateSubagents[0]?.description), /parallel/);
@@ -1970,9 +1971,9 @@ test("renderTodoBoardToString renders agent statuses below runtime status bar", 
     },
     agentStatuses: [
       { name: "leader", status: "working", userAgent: "app-builder-test/1.0" },
-      { name: "frontend-implementer", status: "working", activeInstanceCount: 2 },
-      { name: "backend-implementer", status: "done" },
-      { name: "qa-implementer", status: "working" },
+      { name: "fe-dev", status: "working", activeInstanceCount: 2 },
+      { name: "be-dev", status: "done" },
+      { name: "qa-dev", status: "working" },
     ],
   }, 140));
 
@@ -1980,11 +1981,81 @@ test("renderTodoBoardToString renders agent statuses below runtime status bar", 
   assert.match(output, /subagents: 3/);
   assert.match(
     output,
-    /leader\(app-builder-test\/1\.0\): working \| frontend-implementer: 2 instances working \| backend-implementer: worked 1 time \|[\s\S]*qa-implementer: 1 instance working/,
+    /leader\(app-builder-test\/1\.0\): working \| fe-dev: 2 instances working \| be-dev: worked 1 time \|[\s\S]*qa-dev: 1 instance working/,
   );
   assert.ok(
     output.indexOf("leader(app-builder-test/1.0): working") > output.indexOf("phase: generate"),
     "agent status row should render below the runtime status bar",
+  );
+});
+
+test("renderTodoBoardToString keeps worked agents from reverting to idle", () => {
+  const output = stripAnsi(renderTodoBoardToString({
+    stage: "生成阶段",
+    todos: [],
+    artifacts: createArtifactItemsForStage("生成阶段", "generating"),
+    narrative: "模型正在工作中",
+    runtimeStatus: {
+      modelName: "gpt-5.4",
+      phase: "generate",
+    },
+    agentStatuses: [
+      { name: "fe-dev", status: "idle", workCount: 3 },
+      { name: "be-dev", status: "idle" },
+      { name: "qa-dev", status: "idle", activeInstanceCount: 2 },
+    ],
+  }, 140));
+
+  assert.match(output, /fe-dev: worked 3 times/);
+  assert.match(output, /be-dev: idle/);
+  assert.match(output, /qa-dev: 2 instances working/);
+  assert.doesNotMatch(output, /fe-dev: idle/);
+});
+
+test("mergeWorkflowAgentStatuses preserves worked counts across phase resets", () => {
+  assert.deepEqual(
+    mergeWorkflowAgentStatuses(
+      [
+        { name: "leader", status: "done", workCount: 1 },
+        { name: "fe-dev", status: "done", workCount: 3 },
+        { name: "be-dev", status: "idle" },
+        { name: "qa-dev", status: "working", activeInstanceCount: 2 },
+      ],
+      [
+        { name: "leader", status: "working" },
+        { name: "fe-dev", status: "idle" },
+        { name: "be-dev", status: "idle" },
+      ],
+    ),
+    [
+      { name: "leader", status: "working", workCount: 1 },
+      { name: "fe-dev", status: "done", workCount: 3, activeInstanceCount: undefined },
+      { name: "be-dev", status: "idle" },
+      { name: "qa-dev", status: "done", workCount: 1, activeInstanceCount: undefined },
+    ],
+  );
+
+  assert.deepEqual(
+    mergeWorkflowAgentStatuses(
+      [{ name: "fe-dev", status: "working", workCount: 3, activeInstanceCount: 1 }],
+      [{ name: "fe-dev", status: "done", workCount: 1 }],
+    ),
+    [{ name: "fe-dev", status: "done", workCount: 4, activeInstanceCount: undefined }],
+  );
+
+  assert.deepEqual(
+    mergeWorkflowAgentStatuses(
+      [
+        { name: "fe-dev", status: "done", workCount: 2 },
+        { name: "be-dev", status: "working", activeInstanceCount: 1 },
+        { name: "qa-dev", status: "idle" },
+      ],
+      [],
+    ),
+    [
+      { name: "fe-dev", status: "done", workCount: 2, activeInstanceCount: undefined },
+      { name: "be-dev", status: "done", workCount: 1, activeInstanceCount: undefined },
+    ],
   );
 });
 
@@ -2110,11 +2181,58 @@ test("summarizeDeepAgentsAction describes task events when useful and suppresses
       event: "on_tool_start",
       name: "task",
       input: JSON.stringify({
-        subagent_type: "frontend-implementer",
+        subagent_type: "fe-dev",
         description: "实现订单列表页面并接入筛选交互",
       }),
     }),
-    "启动子任务：frontend-implementer：实现订单列表页面并接入筛选交互",
+    "fe-dev：实现订单列表页面并接入筛选交互",
+  );
+
+  assert.equal(
+    summarizeDeepAgentsAction("tools", {
+      event: "on_tool_start",
+      name: "task",
+      input: JSON.stringify({
+        subagent_type: "frontend-fixer",
+        description: "修复订单页面渲染",
+      }),
+    }),
+    "fe-dev：修复订单页面渲染",
+  );
+
+  const runningSummary = summarizeDeepAgentsAction("tools", {
+    event: "on_tool_update",
+    name: "task",
+    input: JSON.stringify({
+      subagent_type: "fe-dev",
+      description: "实现订单列表页面并接入筛选交互",
+    }),
+    output: "child progress",
+  });
+
+  assert.equal(runningSummary, "fe-dev运行中：实现订单列表页面并接入筛选交互");
+  assert.equal(shouldAppendDeepAgentsWorkflowLog("tools", runningSummary), false);
+
+  assert.equal(
+    summarizeDeepAgentsAction("tools", {
+      event: "on_tool_start",
+      name: "task",
+      input: JSON.stringify({
+        subagent_type: "be-dev",
+        description: [
+          "Implement the backend/API slice for the validated planSpec.",
+          "",
+          "Owned scope:",
+          "- Assigned API route files:",
+          "- app/api/orders/route.ts resource=Order methods=GET,POST",
+          "- app/api/invoices/route.ts resource=Invoice methods=GET",
+          "- app/api/customers/route.ts resource=Customer methods=GET",
+          "- Assigned resources:",
+          "- Order route=orders usage=direct",
+        ].join("\n"),
+      }),
+    }),
+    "be-dev：实现 API app/api/orders/route.ts、app/api/invoices/route.ts 等 3 项",
   );
 
   const lowInformationSummary = summarizeDeepAgentsAction("tools", {
@@ -2170,6 +2288,22 @@ test("summarizeDeepAgentsAction exposes message tool-call intent", () => {
   assert.equal(readIntent, "准备读取文件：app/page.tsx（1-120行）");
   assert.equal(shouldAppendDeepAgentsWorkflowLog("messages", writeIntent), true);
   assert.equal(shouldAppendDeepAgentsWorkflowLog("messages", readIntent), true);
+
+  const taskIntent = summarizeDeepAgentsAction("messages", [
+    {
+      tool_calls: [
+        {
+          name: "task",
+          args: {
+            subagent_type: "fe-dev",
+            description: "实现订单页面",
+          },
+        },
+      ],
+    },
+  ]);
+  assert.equal(taskIntent, "模型正在工作中");
+  assert.equal(shouldAppendDeepAgentsWorkflowLog("messages", taskIntent), false);
 });
 
 test("shouldAppendDeepAgentsWorkflowLog suppresses message text deltas", () => {

@@ -1419,12 +1419,12 @@ test("runPiAgentWithLogs fails closed when Pi does not return schema-valid struc
 test("normalizePiTaskToolCallArgs accepts DeepAgents and official subagent forms", () => {
   assert.deepEqual(
     normalizePiTaskToolCallArgs({
-      subagent_type: "frontend-implementer",
+      subagent_type: "fe-dev",
       description: "实现订单列表页面",
     }),
     {
       mode: "single",
-      agent: "frontend-implementer",
+      agent: "fe-dev",
       task: "实现订单列表页面",
     },
   );
@@ -1432,24 +1432,24 @@ test("normalizePiTaskToolCallArgs accepts DeepAgents and official subagent forms
   assert.deepEqual(
     normalizePiTaskToolCallArgs({
       tasks: [
-        { agent: "backend-implementer", task: "实现订单 API" },
-        { subagentType: "integration-verifier", description: "检查文件覆盖" },
+        { agent: "be-dev", task: "实现订单 API" },
+        { subagentType: "qa-dev", description: "检查文件覆盖" },
       ],
     }),
     {
       mode: "parallel",
       tasks: [
-        { agent: "backend-implementer", task: "实现订单 API" },
-        { agent: "integration-verifier", task: "检查文件覆盖" },
+        { agent: "be-dev", task: "实现订单 API" },
+        { agent: "qa-dev", task: "检查文件覆盖" },
       ],
     },
   );
 
   assert.equal(
     normalizePiTaskToolCallArgs({
-      subagent_type: "frontend-implementer",
+      subagent_type: "fe-dev",
       description: "单任务",
-      tasks: [{ agent: "backend-implementer", task: "并行任务" }],
+      tasks: [{ agent: "be-dev", task: "并行任务" }],
     }),
     null,
   );
@@ -1476,15 +1476,15 @@ test("buildPiParallelGenerationTaskItems creates default backend frontend and ve
       return counts;
     }, {}),
     {
-      "backend-implementer": 3,
-      "frontend-implementer": 3,
-      "integration-verifier": 3,
+      "be-dev": 3,
+      "fe-dev": 3,
+      "qa-dev": 3,
     },
   );
   assert.deepEqual(tasks.map((task) => task.instanceIndex), [1, 2, 3, 1, 2, 3, 1, 2, 3]);
   assert.ok(tasks.every((task) => task.instanceCount === 3));
   assert.match(tasks[0]?.task ?? "", /app\/api\/work-orders\/route\.ts/);
-  assert.match(tasks[1]?.task ?? "", /backend-implementer instance 2\/3/);
+  assert.match(tasks[1]?.task ?? "", /be-dev instance 2\/3/);
   assert.match(tasks[3]?.task ?? "", /\/work-orders/);
   assert.match(tasks[4]?.task ?? "", /Do not edit shared shell\/style\/navigation files/);
   assert.match(tasks[6]?.task ?? "", /Inspect integration coverage/);
@@ -1497,12 +1497,12 @@ test("buildPiParallelGenerationTaskItems allows explicit per-role parallelism", 
 
   assert.equal(tasks.length, 6);
   assert.deepEqual(tasks.map((task) => task.shardLabel), [
-    "backend-implementer#1",
-    "backend-implementer#2",
-    "frontend-implementer#1",
-    "frontend-implementer#2",
-    "integration-verifier#1",
-    "integration-verifier#2",
+    "be-dev#1",
+    "be-dev#2",
+    "fe-dev#1",
+    "fe-dev#2",
+    "qa-dev#1",
+    "qa-dev#2",
   ]);
   assert.equal(resolveGenerateSubagentParallelism(""), 3);
   assert.equal(resolveGenerateSubagentParallelism("2"), 2);
@@ -1536,9 +1536,9 @@ test("buildPiHostParallelGenerationBoardState switches visible phase before suba
     })),
     [
       { name: "leader", status: "working", activeInstanceCount: undefined, userAgent: "test-agent" },
-      { name: "backend-implementer", status: "working", activeInstanceCount: 3, userAgent: undefined },
-      { name: "frontend-implementer", status: "working", activeInstanceCount: 3, userAgent: undefined },
-      { name: "integration-verifier", status: "working", activeInstanceCount: 3, userAgent: undefined },
+      { name: "be-dev", status: "working", activeInstanceCount: 3, userAgent: undefined },
+      { name: "fe-dev", status: "working", activeInstanceCount: 3, userAgent: undefined },
+      { name: "qa-dev", status: "working", activeInstanceCount: 3, userAgent: undefined },
     ],
   );
 });
@@ -1594,7 +1594,7 @@ test("Pi task compatibility tool delegates DeepAgents-style task calls and block
     assert.deepEqual(calls, [
       {
         requestedAgent: "frontend-fixer",
-        subagent: "frontend-implementer",
+        subagent: "fe-dev",
         task: "修复订单页面渲染",
         phase: "generateRepair",
       },
@@ -1620,7 +1620,7 @@ test("Pi task compatibility tool delegates DeepAgents-style task calls and block
     });
     const blocked = await planTool.execute(
       "task-2",
-      { subagent_type: "frontend-implementer", description: "不应在计划阶段执行" } as never,
+      { subagent_type: "fe-dev", description: "不应在计划阶段执行" } as never,
       undefined,
       undefined,
       {} as never,
@@ -5531,9 +5531,9 @@ test("generateApplication stages starter scaffold and split-phase artifacts", as
     assert.match(sessionAgents, /# Host Session Policy/);
     assert.match(sessionAgents, /acceptanceChecks\.target/);
     assert.doesNotMatch(sessionAgents, /Do not delegate to child agents or task-style fanout tools/);
-    assert.match(sessionAgents, /host may launch default backend, frontend, and integration subagents/);
+    assert.match(sessionAgents, /host may launch default be-dev, fe-dev, and qa-dev subagents/);
     assert.match(sessionAgents, /prefer using `task` to launch additional bounded child agents/);
-    assert.match(sessionAgents, /frontend, backend, and verification slices/);
+    assert.match(sessionAgents, /fe-dev, be-dev, and qa-dev slices/);
     assert.match(sessionAgents, /main agent remains responsible for merging/);
     assert.match(planPromptSnapshot, /artifacts\.planSpec/);
     assert.match(planPromptSnapshot, /# Host Session Policy/);
@@ -7457,9 +7457,9 @@ test("template generation prompts encourage bounded parallel subagents", async (
       assert.match(prompt, /鼓励.*subagent|鼓励.*子代理/);
       assert.match(prompt, /`task`/);
       assert.match(prompt, /启动.*subagent|启动子代理/);
-      assert.match(prompt, /frontend-|frontend/);
-      assert.match(prompt, /backend-|backend/);
-      assert.match(prompt, /integration-verifier/);
+      assert.match(prompt, /fe-dev/);
+      assert.match(prompt, /be-dev/);
+      assert.match(prompt, /qa-dev/);
       assert.match(prompt, /不重叠的文件路径或职责边界/);
       assert.match(prompt, /不得.*shell 验证命令/);
     }
@@ -8388,13 +8388,13 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.match(generatePromptSource, /自行判断哪些 reference 与当前要实现的页面\/API 相关/);
   assert.match(generatePromptSource, /`references` 不是宿主强制验收项/);
   assert.doesNotMatch(generatePromptSource, /当前禁止执行：调用任何子代理/);
-  assert.match(generatePromptSource, /宿主会优先启动 backend、frontend、integration 三类默认 subagent/);
+  assert.match(generatePromptSource, /宿主会优先启动 `be-dev`、`fe-dev`、`qa-dev` 三类默认 subagent/);
   assert.match(generatePromptSource, /parallelGeneration\.results/);
   assert.match(generatePromptSource, /鼓励在有明确并行价值时调用 `task` 工具启动子代理/);
   assert.match(generatePromptSource, /通过 `task` 同时启动多个 subagent/);
-  assert.match(generatePromptSource, /frontend-implementer/);
-  assert.match(generatePromptSource, /backend-implementer/);
-  assert.match(generatePromptSource, /integration-verifier/);
+  assert.match(generatePromptSource, /fe-dev/);
+  assert.match(generatePromptSource, /be-dev/);
+  assert.match(generatePromptSource, /qa-dev/);
   assert.match(generatePromptSource, /至少两个实现或验证切片可以真正并行推进/);
   assert.match(generatePromptSource, /无法通过并行带来生成提效，必须由主代理直接实现/);
   assert.match(generatePromptSource, /implementedPages/);
@@ -8430,9 +8430,9 @@ test("split prompts enforce plan-spec gating and plan-spec-only generation", asy
   assert.doesNotMatch(generateRepairPromptSource, /当前禁止执行：调用任何子代理/);
   assert.match(generateRepairPromptSource, /鼓励在多个失败项或修补切片彼此独立时调用 `task` 工具启动子代理/);
   assert.match(generateRepairPromptSource, /通过 `task` 同时启动多个 subagent/);
-  assert.match(generateRepairPromptSource, /frontend-fixer/);
-  assert.match(generateRepairPromptSource, /backend-fixer/);
-  assert.match(generateRepairPromptSource, /integration-verifier/);
+  assert.match(generateRepairPromptSource, /fe-dev/);
+  assert.match(generateRepairPromptSource, /be-dev/);
+  assert.match(generateRepairPromptSource, /qa-dev/);
   assert.match(generateRepairPromptSource, /修补切片可以真正并行推进/);
   assert.match(generateRepairPromptSource, /并行不会缩短总修复时间，必须由主代理直接修补/);
   assert.match(generateRepairPromptSource, /只补齐缺失实现或错误接线/);

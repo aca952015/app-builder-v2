@@ -681,20 +681,137 @@ function normalizeAgentStatuses(agentStatuses?: AgentWorkStatus[]): AgentWorkSta
       continue;
     }
     seen.add(name);
+    const workCount = isFiniteNumber(agent.workCount) && agent.workCount > 0
+      ? Math.round(agent.workCount)
+      : undefined;
+    const activeInstanceCount = isFiniteNumber(agent.activeInstanceCount) && agent.activeInstanceCount > 0
+      ? Math.round(agent.activeInstanceCount)
+      : undefined;
+    const status = activeInstanceCount !== undefined || agent.status === "working"
+      ? "working"
+      : agent.status === "done" || workCount !== undefined
+        ? "done"
+        : "idle";
     normalized.push({
       name,
-      status: agent.status === "working" || agent.status === "done" ? agent.status : "idle",
+      status,
       ...(agent.userAgent?.trim() ? { userAgent: agent.userAgent.trim() } : {}),
-      ...(isFiniteNumber(agent.workCount) && agent.workCount > 0
-        ? { workCount: Math.round(agent.workCount) }
-        : {}),
-      ...(isFiniteNumber(agent.activeInstanceCount) && agent.activeInstanceCount > 0
-        ? { activeInstanceCount: Math.round(agent.activeInstanceCount) }
-        : {}),
+      ...(workCount !== undefined ? { workCount } : {}),
+      ...(activeInstanceCount !== undefined ? { activeInstanceCount } : {}),
     });
   }
 
   return normalized;
+}
+
+function getAgentWorkCount(agent?: AgentWorkStatus): number | undefined {
+  return isFiniteNumber(agent?.workCount) && agent.workCount > 0
+    ? Math.round(agent.workCount)
+    : undefined;
+}
+
+function maxDefined(...values: Array<number | undefined>): number | undefined {
+  const finiteValues = values.filter((value): value is number => isFiniteNumber(value));
+  return finiteValues.length > 0 ? Math.max(...finiteValues) : undefined;
+}
+
+function mergeWorkflowAgentStatus(previous: AgentWorkStatus | undefined, incoming: AgentWorkStatus): AgentWorkStatus {
+  if (!previous) {
+    return incoming;
+  }
+
+  const previousWorkCount = getAgentWorkCount(previous);
+  const incomingWorkCount = getAgentWorkCount(incoming);
+
+  if (incoming.status === "working") {
+    return {
+      ...incoming,
+      ...(maxDefined(previousWorkCount, incomingWorkCount) !== undefined
+        ? { workCount: maxDefined(previousWorkCount, incomingWorkCount) }
+        : {}),
+    };
+  }
+
+  if (incoming.status === "done") {
+    const completedCount = previous.status === "working"
+      ? maxDefined((previousWorkCount ?? 0) + 1, incomingWorkCount)
+      : maxDefined(previousWorkCount, incomingWorkCount, 1);
+    return {
+      ...incoming,
+      status: "done",
+      workCount: completedCount,
+      activeInstanceCount: undefined,
+    };
+  }
+
+  if (previous.status === "working") {
+    return {
+      ...incoming,
+      status: "done",
+      workCount: (previousWorkCount ?? 0) + 1,
+      activeInstanceCount: undefined,
+    };
+  }
+
+  if (previous.status === "done" || previousWorkCount !== undefined) {
+    return {
+      ...incoming,
+      status: "done",
+      workCount: maxDefined(previousWorkCount, 1),
+      activeInstanceCount: undefined,
+    };
+  }
+
+  return incoming;
+}
+
+function finalizeMissingWorkedAgent(agent: AgentWorkStatus): AgentWorkStatus | null {
+  const workCount = getAgentWorkCount(agent);
+  if (agent.status === "working") {
+    return {
+      ...agent,
+      status: "done",
+      workCount: (workCount ?? 0) + 1,
+      activeInstanceCount: undefined,
+    };
+  }
+  if (agent.status === "done" || workCount !== undefined) {
+    return {
+      ...agent,
+      status: "done",
+      workCount: maxDefined(workCount, 1),
+      activeInstanceCount: undefined,
+    };
+  }
+  return null;
+}
+
+export function mergeWorkflowAgentStatuses(
+  previous?: AgentWorkStatus[],
+  incoming?: AgentWorkStatus[],
+): AgentWorkStatus[] | undefined {
+  if (!incoming) {
+    return previous;
+  }
+
+  const normalizedPrevious = normalizeAgentStatuses(previous);
+  const normalizedIncoming = normalizeAgentStatuses(incoming);
+  const previousByName = new Map(normalizedPrevious.map((agent) => [agent.name, agent]));
+  const merged = normalizedIncoming.map((agent) => mergeWorkflowAgentStatus(previousByName.get(agent.name), agent));
+  const seenNames = new Set(merged.map((agent) => agent.name));
+
+  for (const previousAgent of normalizedPrevious) {
+    if (seenNames.has(previousAgent.name)) {
+      continue;
+    }
+
+    const finalized = finalizeMissingWorkedAgent(previousAgent);
+    if (finalized) {
+      merged.push(finalized);
+    }
+  }
+
+  return merged.length > 0 ? merged : [];
 }
 
 function formatAgentStatusValue(agent: AgentWorkStatus): string {
@@ -1874,7 +1991,10 @@ export async function updateWorkflowBoard(state: TodoBoardState): Promise<void> 
           ...state.runtimeInteraction,
         }
       : activeWorkflowState?.runtimeInteraction,
-    agentStatuses: state.agentStatuses ?? activeWorkflowState?.agentStatuses,
+    agentStatuses: mergeWorkflowAgentStatuses(
+      activeWorkflowState?.agentStatuses,
+      state.agentStatuses ?? (runtimePhaseChanged ? [] : undefined),
+    ),
   };
   activeWorkflowState = nextWorkflowState;
   activeWorkflowLogs = trimWorkflowLogs(nextWorkflowState.logs ?? []);

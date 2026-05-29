@@ -1831,9 +1831,206 @@ function compactToolDetail(value: string, maxLength = 96): string {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
 }
 
+function normalizeDashboardTaskListItem(value: string): string | null {
+  const normalized = value.replace(/^-\s*/, "").replace(/\s+/g, " ").trim();
+  if (!normalized || /^No\b/i.test(normalized) || /^\.\.\.and\b/i.test(normalized)) {
+    return null;
+  }
+
+  const firstSegment = normalized.split(/\s+(?:kind|resource|methods|route|usage)=/)[0]?.trim() ?? normalized;
+  return firstSegment ? compactToolDetail(firstSegment, 64) : null;
+}
+
+function extractAssignedTaskListItems(task: string, headings: readonly RegExp[]): string[] {
+  const items: string[] = [];
+  let collecting = false;
+
+  for (const line of task.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const headingMatch = trimmed.match(/^-\s+(.+):$/);
+    if (headingMatch) {
+      const heading = headingMatch[1] ?? "";
+      collecting = headings.some((pattern) => pattern.test(heading));
+      continue;
+    }
+
+    if (!collecting) {
+      continue;
+    }
+
+    if (!trimmed || !trimmed.startsWith("- ")) {
+      collecting = false;
+      continue;
+    }
+
+    const item = normalizeDashboardTaskListItem(trimmed);
+    if (item) {
+      items.push(item);
+    }
+  }
+
+  return Array.from(new Set(items));
+}
+
+function formatDashboardTargetList(action: string, targets: readonly string[], maxTargets = 2): string | null {
+  const visibleTargets = Array.from(new Set(targets.map((target) => target.trim()).filter(Boolean)));
+  if (visibleTargets.length === 0) {
+    return null;
+  }
+
+  const visible = visibleTargets.slice(0, maxTargets).join("、");
+  return visibleTargets.length > maxTargets
+    ? `${action} ${visible} 等 ${visibleTargets.length} 项`
+    : `${action} ${visible}`;
+}
+
+function isBackendSubagentName(agentName: string): boolean {
+  return agentName === "be-dev" || agentName.includes("backend") || agentName.startsWith("be-");
+}
+
+function isFrontendSubagentName(agentName: string): boolean {
+  return agentName === "fe-dev" || agentName.includes("frontend") || agentName.startsWith("fe-");
+}
+
+function isQaSubagentName(agentName: string): boolean {
+  return agentName === "qa-dev" ||
+    agentName.includes("integration") ||
+    agentName.includes("verifier") ||
+    agentName.startsWith("qa-");
+}
+
+function normalizePiTaskDashboardAgentName(agentName?: string | null): string | null {
+  const trimmed = agentName?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const normalized = trimmed.toLowerCase();
+  if (isFrontendSubagentName(normalized)) {
+    return "fe-dev";
+  }
+  if (isBackendSubagentName(normalized)) {
+    return "be-dev";
+  }
+  if (isQaSubagentName(normalized)) {
+    return "qa-dev";
+  }
+
+  return trimmed;
+}
+
+function summarizePiTaskDescriptionForDashboard(task: string, agentName?: string | null): string {
+  const normalizedAgentName = agentName?.toLowerCase() ?? "";
+  const apiTargets = extractAssignedTaskListItems(task, [
+    /^Assigned API route files\b/i,
+    /^Assigned API route files to audit\b/i,
+  ]);
+  const pageTargets = extractAssignedTaskListItems(task, [
+    /^Assigned page routes\b/i,
+    /^Assigned page routes to audit\b/i,
+  ]);
+  const flowTargets = extractAssignedTaskListItems(task, [/^Assigned flows to audit\b/i]);
+  const acceptanceTargets = extractAssignedTaskListItems(task, [/^Assigned acceptance checks to audit\b/i]);
+
+  if (isBackendSubagentName(normalizedAgentName)) {
+    return formatDashboardTargetList("实现 API", apiTargets) ?? compactToolDetail(task, 72);
+  }
+
+  if (isFrontendSubagentName(normalizedAgentName)) {
+    return formatDashboardTargetList("实现页面", pageTargets) ?? compactToolDetail(task, 72);
+  }
+
+  if (isQaSubagentName(normalizedAgentName)) {
+    return formatDashboardTargetList("检查覆盖", [...pageTargets, ...apiTargets, ...flowTargets, ...acceptanceTargets]) ??
+      "检查集成覆盖";
+  }
+
+  return formatDashboardTargetList("实现 API", apiTargets) ??
+    formatDashboardTargetList("实现页面", pageTargets) ??
+    compactToolDetail(task, 72);
+}
+
+function formatPiTaskDashboardItem(input: Record<string, unknown> | null): string | null {
+  if (!input) {
+    return null;
+  }
+
+  const subagentName = readStringField(input, ["subagent_type", "subagentType", "agent", "agentName"]);
+  const displayName = normalizePiTaskDashboardAgentName(subagentName);
+  const taskSummary = readStringField(input, ["description", "task", "name", "title", "summary"]);
+  if (taskSummary) {
+    const summary = summarizePiTaskDescriptionForDashboard(taskSummary, displayName);
+    return displayName ? `${displayName}：${summary}` : summary;
+  }
+
+  return displayName;
+}
+
+function collectPiTaskDashboardItems(input: Record<string, unknown> | null): {
+  mode: "single" | "parallel" | "chain";
+  items: string[];
+} | null {
+  if (!input) {
+    return null;
+  }
+
+  const parallelItems = Array.isArray(input.tasks)
+    ? input.tasks
+        .map((item) => formatPiTaskDashboardItem(parseToolInput(item)))
+        .filter((item): item is string => Boolean(item))
+    : [];
+  if (parallelItems.length > 0) {
+    return { mode: "parallel", items: parallelItems };
+  }
+
+  const chainItems = Array.isArray(input.chain)
+    ? input.chain
+        .map((item) => formatPiTaskDashboardItem(parseToolInput(item)))
+        .filter((item): item is string => Boolean(item))
+    : [];
+  if (chainItems.length > 0) {
+    return { mode: "chain", items: chainItems };
+  }
+
+  const single = formatPiTaskDashboardItem(input);
+  return single ? { mode: "single", items: [single] } : null;
+}
+
+function describePiTaskDashboardTarget(input: Record<string, unknown> | null): string | null {
+  const taskItems = collectPiTaskDashboardItems(input);
+  if (!taskItems || taskItems.items.length === 0) {
+    return null;
+  }
+
+  if (taskItems.items.length === 1) {
+    return taskItems.items[0] ?? null;
+  }
+
+  const visibleItems = taskItems.items.slice(0, 2).join("；");
+  const hiddenSuffix = taskItems.items.length > 2 ? ` 等 ${taskItems.items.length} 个` : "";
+  return `${taskItems.mode === "chain" ? "串行" : "并行"} ${taskItems.items.length} 个：${visibleItems}${hiddenSuffix}`;
+}
+
+function formatPiTaskDashboardStatus(target: string | null, status: "运行中" | "完成" | "失败"): string | null {
+  if (!target) {
+    return null;
+  }
+
+  const match = target.match(/^([^：]+)：(.+)$/);
+  if (!match) {
+    return `${target}${status}`;
+  }
+
+  return `${match[1]}${status}：${match[2]}`;
+}
+
 function describeToolTargetFromInput(toolName: string, input: Record<string, unknown> | null): string | null {
   if (toolName === PI_AGENT_WRITE_TODOS_TOOL_NAME) {
     return null;
+  }
+
+  if (toolName === "task") {
+    return describePiTaskDashboardTarget(input);
   }
 
   const target =
@@ -1844,18 +2041,6 @@ function describeToolTargetFromInput(toolName: string, input: Record<string, unk
 
   if (typeof target === "string" && target.trim()) {
     return target.trim();
-  }
-
-  if (toolName === "task") {
-    const subagentName = readStringField(input, ["subagent_type", "subagentType", "agent", "agentName"]);
-    const taskSummary = readStringField(input, ["description", "task", "name", "title", "summary"]);
-    if (subagentName && taskSummary) {
-      return `${subagentName}：${compactToolDetail(taskSummary)}`;
-    }
-    if (taskSummary) {
-      return compactToolDetail(taskSummary);
-    }
-    return subagentName ?? null;
   }
 
   const searchableSummary = readStringField(input, ["query", "pattern", "url"]);
@@ -1886,7 +2071,7 @@ function humanizeToolName(toolName: string): string {
     case PI_AGENT_WRITE_TODOS_TOOL_NAME:
       return "更新 todo";
     case "task":
-      return "启动子任务";
+      return "subagent";
     case "list_dir":
       return "列出目录";
     case "glob_search":
@@ -1913,6 +2098,18 @@ function summarizeToolEvent(payload: unknown): string | null {
     return summarizeWriteTodosEvent(record, event);
   }
 
+  if (toolName === "task") {
+    const target = describeToolTarget(toolName, payload);
+    const failed = record.status === "error" || record.status === "failed";
+    if (event === "on_tool_update") {
+      return formatPiTaskDashboardStatus(target, "运行中") ?? "subagent运行中。";
+    }
+    if (event === "on_tool_end") {
+      return formatPiTaskDashboardStatus(target, failed ? "失败" : "完成");
+    }
+    return target;
+  }
+
   const parsedInput = parseToolInput(record.input);
   const target = describeToolTarget(toolName, payload);
   const location = describeToolLocation(toolName, parsedInput);
@@ -1937,6 +2134,10 @@ function summarizeMessageToolCall(payload: unknown): string | null {
   const toolCalls = extractToolCalls(payload);
   const first = toolCalls.find((toolCall) => typeof toolCall.name === "string");
   if (!first?.name) {
+    return null;
+  }
+
+  if (first.name === "task") {
     return null;
   }
 
@@ -1982,6 +2183,10 @@ function incrementAgentWorkCount(agent: AgentWorkStatus): number {
   return currentCount + 1;
 }
 
+function hasAgentWorked(agent: AgentWorkStatus): boolean {
+  return isFiniteNumber(agent.workCount) && agent.workCount > 0;
+}
+
 function markAgentWorking(
   agentStatuses: AgentWorkStatus[],
   activeInstanceCounts: Map<string, number>,
@@ -1996,7 +2201,9 @@ function markAgentWorking(
         ? "working"
         : completedWork
           ? "done"
-          : agent.status,
+          : hasAgentWorked(agent)
+            ? "done"
+            : agent.status,
       activeInstanceCount: isActive ? Math.round(activeInstanceCount) : undefined,
       ...(completedWork ? { workCount: incrementAgentWorkCount(agent) } : {}),
     };
@@ -2008,7 +2215,7 @@ function markActiveAgentsDone(agentStatuses: AgentWorkStatus[]): AgentWorkStatus
     const completedWork = agent.status === "working";
     return {
       ...agent,
-      status: completedWork ? "done" : agent.status,
+      status: completedWork || hasAgentWorked(agent) ? "done" : agent.status,
       activeInstanceCount: undefined,
       ...(completedWork ? { workCount: incrementAgentWorkCount(agent) } : {}),
     };
@@ -2179,6 +2386,10 @@ export function shouldAppendDeepAgentsWorkflowLog(mode: string, summary: string)
   }
 
   if (/^模型正在思考（已接收.* tokens）。$/.test(summary)) {
+    return false;
+  }
+
+  if (/^(?:subagent|[^：\s]+)运行中[：。]/.test(summary)) {
     return false;
   }
 
@@ -3582,7 +3793,7 @@ export function buildPiParallelGenerationTaskItems(
     const assignedApis = shardValues(apiItems, shardIndex, parallelism);
     const assignedResources = shardValues(resourceItems, shardIndex, parallelism);
     tasks.push(createGenerationTaskItem(
-      "backend-implementer",
+      "be-dev",
       instanceIndex,
       parallelism,
       [
@@ -3590,7 +3801,7 @@ export function buildPiParallelGenerationTaskItems(
         sourceInstructions,
         "",
         "Parallel shard:",
-        `- You are backend-implementer instance ${instanceIndex}/${parallelism}.`,
+        `- You are be-dev instance ${instanceIndex}/${parallelism}.`,
         "- Stay inside this shard's assigned API/resource ownership unless a tiny compatibility edit is unavoidable.",
         instanceIndex === 1
           ? "- Own shared backend foundation files when needed: prisma/schema.prisma, prisma/seed.ts, lib/prisma.ts, and server-only data helpers."
@@ -3612,7 +3823,7 @@ export function buildPiParallelGenerationTaskItems(
     const instanceIndex = shardIndex + 1;
     const assignedPages = shardValues(pageItems, shardIndex, parallelism);
     tasks.push(createGenerationTaskItem(
-      "frontend-implementer",
+      "fe-dev",
       instanceIndex,
       parallelism,
       [
@@ -3620,7 +3831,7 @@ export function buildPiParallelGenerationTaskItems(
         sourceInstructions,
         "",
         "Parallel shard:",
-        `- You are frontend-implementer instance ${instanceIndex}/${parallelism}.`,
+        `- You are fe-dev instance ${instanceIndex}/${parallelism}.`,
         "- Stay inside this shard's assigned page/component ownership unless a tiny compatibility edit is unavoidable.",
         instanceIndex === 1
           ? "- Own shared UI shell/style/navigation foundation files when needed: app/layout.tsx, app/globals.css, and shared app/components/*."
@@ -3643,7 +3854,7 @@ export function buildPiParallelGenerationTaskItems(
     const assignedFlows = shardValues(flowItems, shardIndex, parallelism);
     const assignedAcceptanceChecks = shardValues(acceptanceItems, shardIndex, parallelism);
     tasks.push(createGenerationTaskItem(
-      "integration-verifier",
+      "qa-dev",
       instanceIndex,
       parallelism,
       [
@@ -3651,7 +3862,7 @@ export function buildPiParallelGenerationTaskItems(
         sourceInstructions,
         "",
         "Parallel shard:",
-        `- You are integration-verifier instance ${instanceIndex}/${parallelism}.`,
+        `- You are qa-dev instance ${instanceIndex}/${parallelism}.`,
         "- Prefer read-only inspection for this shard. Report gaps for the finalizer to merge.",
         "- Do not edit app-builder-report.md or shared artifacts during the parallel pass unless the assigned fix is narrow and unambiguous.",
         "",
@@ -3697,7 +3908,7 @@ export function buildPiHostParallelGenerationBoardState(options: {
     stage: "生成阶段",
     todos: [
       { content: "读取已验证的 planSpec 与 starter", status: "completed" },
-      { content: `宿主并行生成 backend/frontend/integration 切片（${parallelismText}）`, status: "in_progress" },
+      { content: `宿主并行生成 be-dev/fe-dev/qa-dev 切片（${parallelismText}）`, status: "in_progress" },
       { content: "合并子 agent 结果并补齐交付文件", status: "pending" },
       { content: "等待宿主校验生成阶段产物", status: "pending" },
     ],
@@ -3734,7 +3945,7 @@ function buildParallelGenerationFinalizerSystemPrompt(baseSystemPrompt: string):
     "",
     "## Host-Run Parallel Subagents",
     "",
-    "The host has already launched multiple backend, frontend, and integration subagent instances before this final merge pass.",
+    "The host has already launched multiple be-dev, fe-dev, and qa-dev subagent instances before this final merge pass.",
     "First inspect their reported results in the payload. Then merge, resolve conflicts, fill any remaining gaps, update app-builder-report.md, and return the structured generation response.",
     "Do not restart from the original PRD. Do not discard completed child-agent work. Only call additional task subagents if a new, clearly independent gap remains after reviewing the host-run results.",
   ].join("\n");
@@ -3775,10 +3986,20 @@ function buildPiTaskAgentAliases(subagents: readonly PiTaskSubagentSpec[]): Map<
     }
   };
 
-  maybeAddAlias("frontend-fixer", "frontend-implementer");
-  maybeAddAlias("backend-fixer", "backend-implementer");
-  maybeAddAlias("verifier", "integration-verifier");
-  maybeAddAlias("integration-fixer", "integration-verifier");
+  maybeAddAlias("frontend", "fe-dev");
+  maybeAddAlias("frontend-implementer", "fe-dev");
+  maybeAddAlias("frontend-fixer", "fe-dev");
+  maybeAddAlias("fe-fix", "fe-dev");
+  maybeAddAlias("backend", "be-dev");
+  maybeAddAlias("backend-implementer", "be-dev");
+  maybeAddAlias("backend-fixer", "be-dev");
+  maybeAddAlias("be-fix", "be-dev");
+  maybeAddAlias("integration", "qa-dev");
+  maybeAddAlias("integration-verifier", "qa-dev");
+  maybeAddAlias("integration-fixer", "qa-dev");
+  maybeAddAlias("qa", "qa-dev");
+  maybeAddAlias("qa-fix", "qa-dev");
+  maybeAddAlias("verifier", "qa-dev");
 
   return aliases;
 }
@@ -4510,6 +4731,10 @@ async function appendPiHostParallelTaskMetric(
   );
 }
 
+function formatPiHostParallelTaskDashboardLabel(task: PiTaskItem): string {
+  return `${task.agent}：${summarizePiTaskDescriptionForDashboard(task.task, task.agent)}`;
+}
+
 async function runPiHostParallelGenerationSubagents(options: {
   planSpec: PlanSpec;
   runtime: TextGeneratorRuntime;
@@ -4547,7 +4772,8 @@ async function runPiHostParallelGenerationSubagents(options: {
       tasks,
     }),
   );
-  await appendWorkflowLog(`[host] 启动宿主并行生成 subagent：${tasks.map((task) => task.shardLabel ?? task.agent).join(", ")}。`);
+  const agentNames = Array.from(new Set(tasks.map((task) => task.agent))).join("、");
+  await appendWorkflowLog(`[host] 启动宿主并行生成 subagent：${tasks.length} 个任务（${agentNames}）。`);
 
   return await Promise.all(tasks.map(async (task) => {
     const startedAt = new Date();
@@ -4591,8 +4817,12 @@ async function runPiHostParallelGenerationSubagents(options: {
       startedHr,
     });
 
+    const statusLabel = result.status === "completed" ? "完成" : "失败";
+    const failureDetail = result.status === "completed"
+      ? ""
+      : `（${truncatePiTaskOutput(result.error ?? result.output, 120)}）`;
     await appendWorkflowLog(
-      `[host] subagent ${task.shardLabel ?? task.agent} ${result.status === "completed" ? "完成" : "失败"}：${truncatePiTaskOutput(result.output, 500)}`,
+      `[host] subagent${statusLabel}：${formatPiHostParallelTaskDashboardLabel(task)}${failureDetail}`,
     );
 
     return { task, result };
@@ -4693,17 +4923,17 @@ export function buildGenerationSubagents(
 
   return [
     withMiddleware(withSkills({
-      name: "frontend-implementer",
+      name: "fe-dev",
       description: "Implements independently owned pages, components, styles, and client interactions when that work can run in parallel with other generation slices.",
       systemPrompt: `${basePrompt}\nFrontend scope: implement only assigned page/component/client-interaction files and preserve existing routing, shell, sidebar, and data-fetching contracts.`,
     })),
     withMiddleware(withSkills({
-      name: "backend-implementer",
+      name: "be-dev",
       description: "Implements independently owned API routes, server logic, Prisma/data wiring, and persistence changes when that work can run in parallel with other generation slices.",
       systemPrompt: `${basePrompt}\nBackend scope: implement only assigned API/server/data files. Do not split ownership of shared schema or configuration files with another agent.`,
     })),
     withMiddleware(withSkills({
-      name: "integration-verifier",
+      name: "qa-dev",
       description: "Checks independently verifiable integration coverage and reports gaps while other implementation slices run in parallel.",
       systemPrompt: `${basePrompt}\nVerification scope: prefer read-only inspection. Only make narrow fixes when explicitly assigned; otherwise report missing pages, APIs, data wiring, or report coverage gaps.`,
     })),

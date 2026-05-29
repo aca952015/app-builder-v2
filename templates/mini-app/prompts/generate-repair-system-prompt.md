@@ -9,7 +9,7 @@
 
 ## 并行 subagent 策略
 
-- 鼓励在多个失败项彼此独立、可以并行修补时使用 `task` 工具启动 subagent，例如：`frontend-fixer` 负责页面/交互问题，`backend-fixer` 负责 API/数据接线问题，`integration-verifier` 负责文件级覆盖、自检和报告一致性。
+- 鼓励在多个失败项彼此独立、可以并行修补时使用 `task` 工具启动 subagent，例如：`fe-dev` 负责页面/交互问题，`be-dev` 负责 API/数据接线问题，`qa-dev` 负责文件级覆盖、自检和报告一致性。
 - 使用 `task` 启动 subagent 时必须按 `validationFailures` 分配清晰且不重叠的文件路径或职责边界；主代理负责合并结果、复查所有失败项、更新报告，并最终返回结构化响应。
 - 不要把同一个文件、共享契约或同一处根因交给多个 subagent 并行修改；强耦合、小范围或需要顺序诊断的修复由主代理直接完成。
 - subagent 也必须遵守验证边界：只能做文件级自检，不得生成、建议或执行 shell 验证命令。
