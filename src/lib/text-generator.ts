@@ -104,6 +104,8 @@ const referenceMarkdownConversionSchema = z.object({
   markdown: z.string().min(1),
   notes: z.array(z.string()).default([]),
 });
+const REFERENCE_MARKDOWN_TEXT_RECOVERY_NOTE =
+  "Recovered reference markdown from plain Pi assistant text because no structured tool response was returned.";
 
 export const HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS = [
   `/${workspaceRelativePath("AGENTS.md")}`,
@@ -2969,6 +2971,7 @@ export async function runPiAgentWithLogs<T>(options: {
   structuredResponse: PiStructuredResponseBox;
   prompt: string;
   responseSchema: z.ZodType<T>;
+  recoverStructuredResponse?: (messages: readonly unknown[]) => T | null | undefined;
   runtime: TextGeneratorRuntime;
   runtimePhase: RuntimeStatusPhase;
   timeoutLabel: string;
@@ -3040,10 +3043,11 @@ export async function runPiAgentWithLogs<T>(options: {
       throw eventError;
     }
 
-    const structured =
-      options.responseSchema.safeParse(options.structuredResponse.value).success
-        ? options.structuredResponse.value
-        : extractStructuredResponseFromPiText(finalMessages, options.responseSchema);
+    const directStructured = options.responseSchema.safeParse(options.structuredResponse.value);
+    const structured = directStructured.success
+      ? directStructured.data
+      : extractStructuredResponseFromPiText(finalMessages, options.responseSchema) ??
+        options.recoverStructuredResponse?.(finalMessages);
 
     if (structured === null || structured === undefined) {
       throw new Error(`${options.timeoutLabel} did not return a valid structured response.`);
@@ -4933,6 +4937,67 @@ export function extractStructuredResponseFromPiText<T>(messages: readonly unknow
   return validation.success ? validation.data : null;
 }
 
+function countMarkdownFenceLines(value: string): number {
+  return value.match(/(?:^|\r?\n)```/g)?.length ?? 0;
+}
+
+function stripBalancedWrappingMarkdownFence(value: string): string {
+  const trimmed = value.trim();
+  if (countMarkdownFenceLines(trimmed) % 2 === 1 && /(?:^|\r?\n)```[ \t]*$/.test(trimmed)) {
+    return trimmed.replace(/\r?\n```[ \t]*$/, "").trim();
+  }
+  return trimmed;
+}
+
+function extractPlainReferenceMarkdownText(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const explicitFence = /```(?:markdown|md)[ \t]*\r?\n/i.exec(trimmed);
+  if (explicitFence?.index !== undefined) {
+    return stripBalancedWrappingMarkdownFence(trimmed.slice(explicitFence.index + explicitFence[0].length));
+  }
+
+  const genericFence = /^```[ \t]*\r?\n/.exec(trimmed);
+  if (genericFence) {
+    return stripBalancedWrappingMarkdownFence(trimmed.slice(genericFence[0].length));
+  }
+
+  const headingMatch = /(?:^|\r?\n)(#{1,6}\s+\S[\s\S]*)/.exec(trimmed);
+  const candidate = (headingMatch?.[1] ?? trimmed).trim();
+  const looksLikeMarkdown = [
+    /(?:^|\r?\n)#{1,6}\s+\S/,
+    /(?:^|\r?\n)\s*[-*]\s+\S/,
+    /(?:^|\r?\n)\s*\|.+\|\s*(?:\r?\n|$)/,
+    /```[\s\S]*```/,
+    /\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/[^\s`]+/,
+  ].some((pattern) => pattern.test(candidate));
+
+  return looksLikeMarkdown ? candidate : null;
+}
+
+export function extractReferenceMarkdownConversionFromPiText(
+  messages: readonly unknown[],
+): ReferenceMarkdownConversionResult | null {
+  const structured = extractStructuredResponseFromPiText(messages, referenceMarkdownConversionSchema);
+  if (structured) {
+    return structured;
+  }
+
+  const markdown = extractPlainReferenceMarkdownText(extractPiAssistantText(messages));
+  if (!markdown) {
+    return null;
+  }
+
+  const recovered = referenceMarkdownConversionSchema.safeParse({
+    markdown,
+    notes: [REFERENCE_MARKDOWN_TEXT_RECOVERY_NOTE],
+  });
+  return recovered.success ? recovered.data : null;
+}
+
 export function buildGenerationSubagents(
   runtimePhase: RuntimeStatusPhase,
   includeTemplateSkills: boolean,
@@ -5093,6 +5158,7 @@ export class PiTextGenerator implements TextGenerator {
         structuredResponse,
         prompt: buildPiStructuredPrompt(payload, referenceMarkdownConversionSchema),
         responseSchema: referenceMarkdownConversionSchema,
+        recoverStructuredResponse: extractReferenceMarkdownConversionFromPiText,
         runtime,
         runtimePhase: "plan",
         timeoutLabel: "pi agent reference markdown conversion",
@@ -5104,6 +5170,9 @@ export class PiTextGenerator implements TextGenerator {
       const structured = extractStructuredResponse(result, referenceMarkdownConversionSchema);
       if (!structured) {
         throw new Error("pi agent reference markdown conversion did not return a valid structured response.");
+      }
+      if (structured.notes.includes(REFERENCE_MARKDOWN_TEXT_RECOVERY_NOTE)) {
+        await appendWorkflowLog(`[host] 参考资料 Markdown 转换未返回结构化响应，已从普通 Markdown 输出恢复：${input.url}`);
       }
       await appendWorkflowLog(`[host] 参考资料 Markdown 转换完成：${input.url}`);
       return structured;

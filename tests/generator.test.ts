@@ -59,6 +59,7 @@ import {
   buildPlanRepairPayload,
   createPiTaskCompatibilityTool,
   createHostManagedArtifactWriteGuardMiddleware,
+  extractReferenceMarkdownConversionFromPiText,
   extractStructuredResponseFromPiText,
   HOST_MANAGED_WRITE_PROTECTED_ARTIFACT_PATHS,
   isHostManagedWriteProtectedArtifactPath,
@@ -1410,6 +1411,86 @@ test("runPiAgentWithLogs fails closed when Pi does not return schema-valid struc
       }),
       /pi agent schema failure did not return a valid structured response/,
     );
+    assert.equal(unsubscribeCount(), 1);
+  } finally {
+    await closeWorkflowBoard();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("extractReferenceMarkdownConversionFromPiText recovers fenced Markdown text", () => {
+  const result = extractReferenceMarkdownConversionFromPiText([
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: [
+            "```markdown",
+            "# 逐小时天气预报",
+            "",
+            "## 请求路径",
+            "",
+            "```",
+            "GET /v7/weather/{hours}",
+            "```",
+            "",
+            "| 参数 | 说明 |",
+            "| --- | --- |",
+            "| location | LocationID 或经纬度 |",
+            "```",
+          ].join("\n"),
+        },
+      ],
+    },
+  ]);
+
+  assert.ok(result);
+  assert.equal(result.markdown.startsWith("# 逐小时天气预报"), true);
+  assert.match(result.markdown, /GET \/v7\/weather\/\{hours\}/);
+  assert.doesNotMatch(result.markdown, /^```markdown/);
+  assert.match(result.notes.join("\n"), /plain Pi assistant text/);
+});
+
+test("runPiAgentWithLogs can recover reference Markdown text before schema failure", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-pi-agent-reference-recovery-"));
+  const runtime = buildTestRuntimeForOutput(tempRoot);
+  const schema = z.object({
+    markdown: z.string().min(1),
+    notes: z.array(z.string()).default([]),
+  });
+  const { session, unsubscribeCount } = createFakePiSession([
+    {
+      type: "agent_end",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: "```markdown\n# Weather API\n\n- Endpoint: `GET /v7/weather/24h`\n```",
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+
+  try {
+    await mkdir(runtime.deepagentsDirectory, { recursive: true });
+    const result = await runPiAgentWithLogs({
+      session,
+      structuredResponse: {},
+      prompt: buildPiStructuredPrompt({ stage: "reference_markdown_conversion" }, schema),
+      responseSchema: schema,
+      recoverStructuredResponse: extractReferenceMarkdownConversionFromPiText,
+      runtime,
+      runtimePhase: "plan",
+      timeoutLabel: "pi agent reference markdown conversion",
+    }) as { structuredResponse?: { markdown?: string; notes?: string[] } };
+
+    assert.equal(result.structuredResponse?.markdown, "# Weather API\n\n- Endpoint: `GET /v7/weather/24h`");
+    assert.match(result.structuredResponse?.notes?.join("\n") ?? "", /plain Pi assistant text/);
     assert.equal(unsubscribeCount(), 1);
   } finally {
     await closeWorkflowBoard();
