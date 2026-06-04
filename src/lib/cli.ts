@@ -138,10 +138,10 @@ function helpText(): string {
   app-builder -v <session-id> [--phase <plan|generate|runtimeValidation|auto>] [--runtimeValidation] [--runtime-validation-mode <non-interactive|interactive|smoke>] [--stdout <log|dashboard>]
 
 Environment:
-  APP_BUILDER_API_KEY Required unless role-specific API keys or a custom generator are used
+  APP_BUILDER_API_KEY Required unless role-specific API keys, provider-native credentials, Pi subscription auth, or a custom generator are used
   APP_BUILDER_BASE_URL Optional API base URL fallback for all model roles
   APP_BUILDER_USER_AGENT Optional truthful User-Agent header fallback for all model roles
-  APP_BUILDER_PROTOCOL Optional model protocol fallback for all roles: openai-chat, openai-responses, anthropic, or google; openai is accepted as openai-responses
+  APP_BUILDER_PROTOCOL Optional model protocol fallback for all roles: openai-chat, openai-responses, openai-codex, anthropic, or google; openai is accepted as openai-responses
   APP_BUILDER_MAX_INPUT_TOKENS Optional input/context window token budget fallback for all model roles
   APP_BUILDER_MAX_TOKENS Optional output token cap fallback for all model roles
   APP_BUILDER_MODEL Optional model fallback for all roles

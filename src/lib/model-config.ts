@@ -26,7 +26,7 @@ export const MODEL_ROLES = ["plan", "generate", "repair"] as const;
 
 export type ModelRole = typeof MODEL_ROLES[number];
 
-export const MODEL_PROTOCOLS = ["openai-chat", "openai-responses", "anthropic", "google"] as const;
+export const MODEL_PROTOCOLS = ["openai-chat", "openai-responses", "openai-codex", "anthropic", "google"] as const;
 
 export type ModelProtocol = typeof MODEL_PROTOCOLS[number];
 
@@ -141,6 +141,10 @@ function readProviderApiKey(env: EnvSource, protocol: ModelProtocol): string | u
 }
 
 function hasProviderCredential(env: EnvSource, protocol: ModelProtocol): boolean {
+  if (protocol === "openai-codex") {
+    return true;
+  }
+
   if (protocol === "google") {
     return Boolean(
       readEnvValue(env, GOOGLE_API_KEY_ENV) ??
@@ -185,10 +189,11 @@ function buildModelRoleConfig(
     parseModelProtocol(globalProtocolValue, GLOBAL_PROTOCOL_ENV) ??
     persisted?.protocol ??
     "openai-responses";
-  const apiKey =
-    readEnvValue(env, roleApiKeyEnvName(role)) ??
-    readProviderApiKey(env, protocol) ??
-    readEnvValue(env, GLOBAL_API_KEY_ENV);
+  const apiKey = protocol === "openai-codex"
+    ? undefined
+    : readEnvValue(env, roleApiKeyEnvName(role)) ??
+      readProviderApiKey(env, protocol) ??
+      readEnvValue(env, GLOBAL_API_KEY_ENV);
   const usesProviderAuth = !apiKey && hasProviderCredential(env, protocol);
   const config: ModelRoleConfig = {
     role,

@@ -172,6 +172,35 @@ test("resolveModelRoleConfigs accepts explicit OpenAI chat and responses protoco
   assert.equal(configs.repair.protocol, "openai-responses");
 });
 
+test("resolveModelRoleConfigs accepts OpenAI Codex subscription auth without app-builder keys", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_PROTOCOL: "openai-codex",
+    APP_BUILDER_MODEL: "openai-codex:gpt-5.3-codex",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].protocol, "openai-codex");
+    assert.equal(configs[role].modelName, "openai-codex:gpt-5.3-codex");
+    assert.equal(configs[role].apiKey, undefined);
+    assert.equal(configs[role].usesProviderAuth, true);
+  }
+});
+
+test("resolveModelRoleConfigs ignores app-builder API keys for OpenAI Codex subscription auth", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_PROTOCOL: "openai-codex",
+    APP_BUILDER_GENERATE_API_KEY: "generate-key",
+    APP_BUILDER_MODEL: "openai-codex:gpt-5.3-codex",
+  });
+
+  for (const role of ["plan", "generate", "repair"] as const) {
+    assert.equal(configs[role].protocol, "openai-codex");
+    assert.equal(configs[role].apiKey, undefined);
+    assert.equal(configs[role].usesProviderAuth, true);
+  }
+});
+
 test("resolveModelRoleConfigs supports google protocol with GOOGLE_API_KEY precedence", () => {
   const configs = resolveModelRoleConfigs({
     GOOGLE_API_KEY: "google-key",
@@ -371,6 +400,89 @@ test("createPiModelRegistry auto-registers missing OpenAI chat protocol models",
   }
 });
 
+test("createPiModelRegistry uses Pi OpenAI Codex provider with file-backed subscription auth", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-pi-codex-auth-"));
+  const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
+  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+
+  await writeFile(
+    path.join(tempRoot, "auth.json"),
+    JSON.stringify({
+      "openai-codex": {
+        type: "oauth",
+        accessToken: "test-access-token",
+        refreshToken: "test-refresh-token",
+        expires: Date.now() + 60_000,
+      },
+    }),
+  );
+
+  try {
+    delete process.env[PI_MODELS_JSON_ENV];
+    process.env.PI_CODING_AGENT_DIR = tempRoot;
+
+    const { authStorage, modelRegistry } = createPiModelRegistry({
+      role: "generate",
+      protocol: "openai-codex",
+      modelName: "openai-codex:gpt-5.3-codex",
+    });
+    const model = modelRegistry.find("openai-codex", "gpt-5.3-codex");
+
+    assert.ok(model);
+    assert.equal(model.api, "openai-codex-responses");
+    assert.equal(model.provider, "openai-codex");
+    assert.equal(authStorage.has("openai-codex"), true);
+    assert.equal(modelRegistry.hasConfiguredAuth(model), true);
+  } finally {
+    if (previousModelsJsonPath === undefined) {
+      delete process.env[PI_MODELS_JSON_ENV];
+    } else {
+      process.env[PI_MODELS_JSON_ENV] = previousModelsJsonPath;
+    }
+    if (previousPiAgentDir === undefined) {
+      delete process.env.PI_CODING_AGENT_DIR;
+    } else {
+      process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("createPiModelRegistry ignores API keys for Pi OpenAI Codex subscription auth", async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), "app-builder-pi-codex-no-key-"));
+  const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
+  const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+
+  try {
+    delete process.env[PI_MODELS_JSON_ENV];
+    process.env.PI_CODING_AGENT_DIR = tempRoot;
+
+    const { authStorage, modelRegistry } = createPiModelRegistry({
+      role: "generate",
+      protocol: "openai-codex",
+      modelName: "openai-codex:gpt-5.3-codex",
+      apiKey: "should-not-be-used",
+    });
+    const model = modelRegistry.find("openai-codex", "gpt-5.3-codex");
+
+    assert.ok(model);
+    assert.equal(authStorage.has("openai-codex"), false);
+    assert.equal(modelRegistry.hasConfiguredAuth(model), false);
+  } finally {
+    if (previousModelsJsonPath === undefined) {
+      delete process.env[PI_MODELS_JSON_ENV];
+    } else {
+      process.env[PI_MODELS_JSON_ENV] = previousModelsJsonPath;
+    }
+    if (previousPiAgentDir === undefined) {
+      delete process.env.PI_CODING_AGENT_DIR;
+    } else {
+      process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("createPiModelRegistry accepts gemini model prefix as a google alias for auto-registration", () => {
   const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
 
@@ -427,7 +539,7 @@ test("resolveModelRoleConfigs rejects invalid protocol values", () => {
         APP_BUILDER_API_KEY: "global-key",
         APP_BUILDER_PLAN_PROTOCOL: "claude",
       }),
-    /APP_BUILDER_PLAN_PROTOCOL must be one of: openai-chat, openai-responses, anthropic, google\. The aliases openai -> openai-responses and gemini -> google are also accepted\./,
+    /APP_BUILDER_PLAN_PROTOCOL must be one of: openai-chat, openai-responses, openai-codex, anthropic, google\. The aliases openai -> openai-responses and gemini -> google are also accepted\./,
   );
 });
 

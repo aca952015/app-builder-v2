@@ -20,10 +20,10 @@ node dist/src/index.js generate ./spec.md --generation-requirements "菜单需�
 Environment variables:
 
 - `.env`: loaded automatically from the project root when the CLI starts.
-- `APP_BUILDER_API_KEY`: required for the default generation path unless every model role has its own API key or provider-native credentials.
+- `APP_BUILDER_API_KEY`: required for the default generation path unless every model role has its own API key, provider-native credentials, or Pi subscription auth.
 - `APP_BUILDER_BASE_URL`: optional API base URL fallback for every model role. Useful for proxy or compatible endpoints.
 - `APP_BUILDER_USER_AGENT`: optional truthful `User-Agent` header fallback for every model role.
-- `APP_BUILDER_PROTOCOL`: optional model protocol fallback for every model role. Supported values are `openai-chat`, `openai-responses`, `anthropic`, and `google`; `openai` is accepted as an alias for `openai-responses`, and `gemini` is accepted as an alias for `google`. Defaults to `openai-responses`.
+- `APP_BUILDER_PROTOCOL`: optional model protocol fallback for every model role. Supported values are `openai-chat`, `openai-responses`, `openai-codex`, `anthropic`, and `google`; `openai` is accepted as an alias for `openai-responses`, and `gemini` is accepted as an alias for `google`. Defaults to `openai-responses`.
 - `APP_BUILDER_MODEL`: optional model fallback for every role. Defaults to `openai:gpt-4.1-mini`.
 - `APP_BUILDER_PI_MODELS_JSON`: optional path to a Pi `models.json` file for custom provider/model metadata. When omitted, app-builder automatically registers a missing current model ID from `APP_BUILDER_MODEL` using the selected protocol defaults.
 - `APP_BUILDER_PLAN_MODEL`, `APP_BUILDER_GENERATE_MODEL`, `APP_BUILDER_REPAIR_MODEL`: optional model overrides for the planning, generation, and repair roles.
@@ -69,6 +69,16 @@ GOOGLE_API_KEY=your-gateway-key
 ```
 
 If `APP_BUILDER_PI_MODELS_JSON` is not set and Pi does not know `gemini-3-flash-agent`, app-builder dynamically registers it under the `google` provider using the Google Generative AI protocol and your configured base URL/API key.
+
+OpenAI Codex subscription auth example:
+
+```bash
+APP_BUILDER_PROTOCOL=openai-codex
+APP_BUILDER_MODEL=openai-codex:gpt-5.3-codex
+# APP_BUILDER_API_KEY is not required for this protocol.
+```
+
+`openai-codex` uses Pi's subscription OAuth credentials instead of `APP_BUILDER_API_KEY`. Run Pi interactively and use `/login` to configure ChatGPT Plus/Pro Codex access before running app-builder. Pi stores that auth in `~/.pi/agent/auth.json`, or in `PI_CODING_AGENT_DIR/auth.json` when `PI_CODING_AGENT_DIR` is set.
 
 Set `APP_BUILDER_PI_MODELS_JSON=/absolute/path/to/pi-models.json` only when you need explicit model metadata. The file can extend the built-in `google` provider:
 

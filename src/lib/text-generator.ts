@@ -3149,6 +3149,10 @@ function isOpenAIProtocol(protocol: ModelProtocol): boolean {
   return protocol === "openai-chat" || protocol === "openai-responses";
 }
 
+function usesPiSubscriptionAuth(protocol: ModelProtocol): boolean {
+  return protocol === "openai-codex";
+}
+
 type PiTextGeneratorOptions =
   | string
   | ModelRoleConfigMap
@@ -3189,6 +3193,10 @@ function resolveConstructorModelRoles(options?: PiTextGeneratorOptions): ModelRo
 }
 
 function resolvePiProvider(config: ModelRoleConfig): string {
+  if (config.protocol === "openai-codex") {
+    return "openai-codex";
+  }
+
   if (isOpenAIProtocol(config.protocol)) {
     return "openai";
   }
@@ -3285,14 +3293,14 @@ type PiHostParallelGenerationResult = {
   result: PiTaskSingleResult;
 };
 
-const PI_PROVIDER_ENV_API_KEYS = {
+const PI_PROVIDER_ENV_API_KEYS: Partial<Record<ModelProtocol, string>> = {
   anthropic: "ANTHROPIC_API_KEY",
   google: "GOOGLE_API_KEY",
   "openai-chat": "OPENAI_API_KEY",
   "openai-responses": "OPENAI_API_KEY",
-} as const satisfies Record<ModelProtocol, string>;
+};
 
-const MODEL_NAME_PROVIDER_PREFIXES = new Set(["anthropic", "gemini", "google", "openai", "openai-chat", "openai-responses"]);
+const MODEL_NAME_PROVIDER_PREFIXES = new Set(["anthropic", "gemini", "google", "openai", "openai-chat", "openai-codex", "openai-responses"]);
 
 function acceptedModelNameProviderPrefixes(protocol: ModelProtocol): Set<string> {
   if (protocol === "google") {
@@ -3301,6 +3309,10 @@ function acceptedModelNameProviderPrefixes(protocol: ModelProtocol): Set<string>
 
   if (isOpenAIProtocol(protocol)) {
     return new Set(["openai", protocol]);
+  }
+
+  if (protocol === "openai-codex") {
+    return new Set(["openai-codex"]);
   }
 
   return new Set([protocol]);
@@ -3321,7 +3333,11 @@ function shouldAutoRegisterPiModel(config: ModelRoleConfig, modelName: string): 
     !modelNameHasConflictingProviderPrefix(modelName, config.protocol);
 }
 
-function resolvePiProviderApiKeyConfig(config: ModelRoleConfig): string {
+function resolvePiProviderApiKeyConfig(config: ModelRoleConfig): string | undefined {
+  if (usesPiSubscriptionAuth(config.protocol)) {
+    return undefined;
+  }
+
   return config.apiKey ?? PI_PROVIDER_ENV_API_KEYS[config.protocol];
 }
 
@@ -3335,6 +3351,10 @@ function resolvePiProviderApiConfig(
 
   if (config.protocol === "openai-responses") {
     return "openai-responses";
+  }
+
+  if (config.protocol === "openai-codex") {
+    return "openai-codex-responses";
   }
 
   return providerDefault?.api;
@@ -3367,6 +3387,10 @@ function autoRegisterMissingPiModel(options: {
   modelName: string;
   provider: string;
 }): void {
+  if (usesPiSubscriptionAuth(options.config.protocol)) {
+    return;
+  }
+
   if (options.modelRegistry.find(options.provider, options.modelName)) {
     return;
   }
@@ -3385,10 +3409,14 @@ function autoRegisterMissingPiModel(options: {
 
   const providerConfig: PiProviderConfigInput = {
     baseUrl,
-    apiKey: resolvePiProviderApiKeyConfig(options.config),
     api,
     models: [createDynamicPiModelConfig(options.config, options.modelName, providerDefault)],
   };
+  const apiKey = resolvePiProviderApiKeyConfig(options.config);
+
+  if (apiKey) {
+    providerConfig.apiKey = apiKey;
+  }
 
   if (options.config.userAgent) {
     providerConfig.headers = { "User-Agent": options.config.userAgent };
@@ -4585,27 +4613,28 @@ function createPiResourceLoader(options: {
 }
 
 export function createPiModelRegistry(config: ModelRoleConfig): { authStorage: AuthStorage; modelRegistry: ModelRegistry } {
-  const authStorage = AuthStorage.inMemory();
+  const authStorage = usesPiSubscriptionAuth(config.protocol) ? AuthStorage.create() : AuthStorage.inMemory();
   const modelsJsonPath = resolvePiModelsJsonPath();
   const modelRegistry = modelsJsonPath ? ModelRegistry.create(authStorage, modelsJsonPath) : ModelRegistry.inMemory(authStorage);
   const loadError = modelRegistry.getError();
   const provider = resolvePiProvider(config);
+  const apiKey = usesPiSubscriptionAuth(config.protocol) ? undefined : config.apiKey;
 
   if (loadError) {
     throw new Error(`Failed to load ${PI_MODELS_JSON_ENV} from ${modelsJsonPath}: ${loadError}`);
   }
 
-  if (config.apiKey) {
-    authStorage.setRuntimeApiKey(provider, config.apiKey);
+  if (apiKey) {
+    authStorage.setRuntimeApiKey(provider, apiKey);
   }
 
-  if (config.baseURL || config.userAgent || config.apiKey) {
+  if (config.baseURL || config.userAgent || apiKey) {
     const providerPatch: Parameters<ModelRegistry["registerProvider"]>[1] = {};
     if (config.baseURL) {
       providerPatch.baseUrl = config.baseURL;
     }
-    if (config.apiKey) {
-      providerPatch.apiKey = config.apiKey;
+    if (apiKey) {
+      providerPatch.apiKey = apiKey;
     }
     if (config.userAgent) {
       providerPatch.headers = { "User-Agent": config.userAgent };
@@ -4623,6 +4652,22 @@ export function createPiModelRegistry(config: ModelRoleConfig): { authStorage: A
   }
 
   return { authStorage, modelRegistry };
+}
+
+function assertPiModelAuthConfigured(
+  config: ModelRoleConfig,
+  modelRegistry: ModelRegistry,
+  model: PiResolvedModel,
+): void {
+  if (!usesPiSubscriptionAuth(config.protocol) || modelRegistry.hasConfiguredAuth(model)) {
+    return;
+  }
+
+  throw new Error(
+    `Pi Agent provider auth not found for ${model.provider}:${model.id}. ` +
+      "APP_BUILDER_PROTOCOL=openai-codex uses Pi subscription auth, not APP_BUILDER_API_KEY. " +
+      "Run Pi interactively and use /login to configure ChatGPT Plus/Pro (Codex), then retry.",
+  );
 }
 
 async function createPiSessionForPhase<T>(options: {
@@ -4656,6 +4701,7 @@ async function createPiSessionForPhase<T>(options: {
       `Pi Agent model not found for ${provider}:${modelName}. Set APP_BUILDER_MODEL/APP_BUILDER_PROTOCOL to a Pi-supported model.`,
     );
   }
+  assertPiModelAuthConfigured(options.modelConfig, modelRegistry, model);
 
   const resourceLoader = createPiResourceLoader({
     runtime: options.runtime,
@@ -4798,6 +4844,7 @@ async function runPiHostParallelGenerationSubagents(options: {
       `Pi Agent model not found for ${provider}:${modelName}. Set APP_BUILDER_MODEL/APP_BUILDER_PROTOCOL to a Pi-supported model.`,
     );
   }
+  assertPiModelAuthConfigured(options.modelConfig, modelRegistry, model);
 
   const subagents = toPiTaskSubagentSpecs(
     buildGenerationSubagents(
