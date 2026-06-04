@@ -97,6 +97,7 @@ import {
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_DEV_SERVER_READY_TIMEOUT_MS = 90_000;
 const DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY = 8;
+const EXTERNAL_REFERENCE_CONCURRENCY_ENV = "APP_BUILDER_EXTERNAL_REFERENCE_CONCURRENCY";
 const EXTERNAL_REFERENCE_FETCH_TIMEOUT_MS = 15_000;
 const EXTERNAL_REFERENCE_MAX_BYTES = 2_000_000;
 const EXTERNAL_REFERENCE_ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
@@ -107,6 +108,21 @@ const MINI_APP_NAVIGATION_CONTEXT_PATTERN =
   /<nav\b|role\s*=\s*["']navigation["']|menu|sidebar|navigation|breadcrumb|tablist|tabs|导航|菜单/i;
 const JSX_ANCHOR_TAG_PATTERN = /<a\b/i;
 type RetryStage = "计划阶段" | "计划修复阶段" | "生成阶段" | "生成修复阶段" | "运行验证修复阶段";
+
+export function resolveExternalReferenceConcurrency(
+  value: string | number | undefined = process.env[EXTERNAL_REFERENCE_CONCURRENCY_ENV],
+): number {
+  if (value === undefined || (typeof value === "string" && value.trim() === "")) {
+    return DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY;
+  }
+
+  const parsed = typeof value === "number" ? value : Number(value.trim());
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`Invalid ${EXTERNAL_REFERENCE_CONCURRENCY_ENV} value: ${String(value)}. Expected a positive integer.`);
+  }
+
+  return parsed;
+}
 
 function defaultTemplateRuntimeValidation(): TemplateRuntimeValidation {
   return {
@@ -397,7 +413,7 @@ async function resolveExternalReferences(
 
   const entries = await mapWithConcurrency(
     candidates,
-    DEFAULT_EXTERNAL_REFERENCE_CONCURRENCY,
+    resolveExternalReferenceConcurrency(),
     async (candidate, index): Promise<LocalReference> => {
       const reservation = reservations[index];
       if (!reservation) {

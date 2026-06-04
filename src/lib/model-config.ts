@@ -26,11 +26,12 @@ export const MODEL_ROLES = ["plan", "generate", "repair"] as const;
 
 export type ModelRole = typeof MODEL_ROLES[number];
 
-export const MODEL_PROTOCOLS = ["openai", "anthropic", "google"] as const;
+export const MODEL_PROTOCOLS = ["openai-chat", "openai-responses", "anthropic", "google"] as const;
 
 export type ModelProtocol = typeof MODEL_PROTOCOLS[number];
 
 const MODEL_PROTOCOL_ALIASES = {
+  openai: "openai-responses",
   gemini: "google",
 } as const satisfies Record<string, ModelProtocol>;
 
@@ -73,15 +74,17 @@ function parseModelProtocol(value: string | undefined, source: string): ModelPro
     return undefined;
   }
 
-  if (value === "openai" || value === "anthropic" || value === "google") {
-    return value;
+  if ((MODEL_PROTOCOLS as readonly string[]).includes(value)) {
+    return value as ModelProtocol;
   }
 
   if (value in MODEL_PROTOCOL_ALIASES) {
     return MODEL_PROTOCOL_ALIASES[value as keyof typeof MODEL_PROTOCOL_ALIASES];
   }
 
-  throw new Error(`${source} must be one of: ${MODEL_PROTOCOLS.join(", ")}. The alias gemini is also accepted for google.`);
+  throw new Error(
+    `${source} must be one of: ${MODEL_PROTOCOLS.join(", ")}. The aliases openai -> openai-responses and gemini -> google are also accepted.`,
+  );
 }
 
 function parseMaxTokens(value: string | undefined, source: string): number | undefined {
@@ -181,7 +184,7 @@ function buildModelRoleConfig(
     parseModelProtocol(roleProtocolValue, roleProtocolEnvName(role)) ??
     parseModelProtocol(globalProtocolValue, GLOBAL_PROTOCOL_ENV) ??
     persisted?.protocol ??
-    "openai";
+    "openai-responses";
   const apiKey =
     readEnvValue(env, roleApiKeyEnvName(role)) ??
     readProviderApiKey(env, protocol) ??
@@ -338,7 +341,7 @@ export function parseSanitizedModelRoleConfigs(value: unknown): Partial<Sanitize
     const sanitized: SanitizedModelRoleConfig = {
       role,
       modelName,
-      protocol: protocol ?? "openai",
+      protocol: protocol ?? "openai-responses",
     };
     if (baseURL) {
       sanitized.baseURL = baseURL;

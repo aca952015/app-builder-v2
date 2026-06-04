@@ -1102,6 +1102,7 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     "APP_BUILDER_PLAN_MAX_TOKENS",
     "APP_BUILDER_GENERATE_MAX_TOKENS",
     "APP_BUILDER_REPAIR_MAX_TOKENS",
+    "APP_BUILDER_EXTERNAL_REFERENCE_CONCURRENCY",
   ] as const;
   const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
 
@@ -1157,7 +1158,7 @@ test("runCli validate reconstructs persisted role model metadata for resume", as
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.modelName, "openai:generate-resume-model");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.modelName, "openai:repair-resume-model");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.protocol, "anthropic");
-    assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.protocol, "openai");
+    assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.protocol, "openai-responses");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.repair.protocol, "anthropic");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.plan.baseURL, "https://plan-resume.example/v1");
     assert.equal(repairingGenerator.repairRuntime?.modelRoles.generate.baseURL, "https://generate-resume.example/v1");

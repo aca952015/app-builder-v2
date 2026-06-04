@@ -23,7 +23,7 @@ Environment variables:
 - `APP_BUILDER_API_KEY`: required for the default generation path unless every model role has its own API key or provider-native credentials.
 - `APP_BUILDER_BASE_URL`: optional API base URL fallback for every model role. Useful for proxy or compatible endpoints.
 - `APP_BUILDER_USER_AGENT`: optional truthful `User-Agent` header fallback for every model role.
-- `APP_BUILDER_PROTOCOL`: optional model protocol fallback for every model role. Supported values are `openai`, `anthropic`, and `google`; `gemini` is accepted as an alias for `google`. Defaults to `openai`.
+- `APP_BUILDER_PROTOCOL`: optional model protocol fallback for every model role. Supported values are `openai-chat`, `openai-responses`, `anthropic`, and `google`; `openai` is accepted as an alias for `openai-responses`, and `gemini` is accepted as an alias for `google`. Defaults to `openai-responses`.
 - `APP_BUILDER_MODEL`: optional model fallback for every role. Defaults to `openai:gpt-4.1-mini`.
 - `APP_BUILDER_PI_MODELS_JSON`: optional path to a Pi `models.json` file for custom provider/model metadata. When omitted, app-builder automatically registers a missing current model ID from `APP_BUILDER_MODEL` using the selected protocol defaults.
 - `APP_BUILDER_PLAN_MODEL`, `APP_BUILDER_GENERATE_MODEL`, `APP_BUILDER_REPAIR_MODEL`: optional model overrides for the planning, generation, and repair roles.
@@ -31,6 +31,7 @@ Environment variables:
 - `APP_BUILDER_PLAN_USER_AGENT`, `APP_BUILDER_GENERATE_USER_AGENT`, `APP_BUILDER_REPAIR_USER_AGENT`: optional role-specific truthful `User-Agent` header overrides.
 - `APP_BUILDER_PLAN_PROTOCOL`, `APP_BUILDER_GENERATE_PROTOCOL`, `APP_BUILDER_REPAIR_PROTOCOL`: optional role-specific protocol overrides.
 - `APP_BUILDER_PLAN_API_KEY`, `APP_BUILDER_GENERATE_API_KEY`, `APP_BUILDER_REPAIR_API_KEY`: optional role-specific API keys. The repair role is used for both plan repair and generation repair.
+- `APP_BUILDER_EXTERNAL_REFERENCE_CONCURRENCY`: optional external reference download/Markdown conversion concurrency. Defaults to `8`.
 - `APP_BUILDER_STDOUT`: optional TTY stdout renderer override. Use `dashboard` for the interactive dashboard or `log` for line-by-line log output.
 
 Example `.env`:

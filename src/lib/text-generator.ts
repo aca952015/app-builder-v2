@@ -3132,10 +3132,17 @@ function normalizeProtocolModelName(modelName: string, protocol: ModelProtocol):
   if (modelName.startsWith(prefix)) {
     return modelName.slice(prefix.length);
   }
+  if (isOpenAIProtocol(protocol) && modelName.startsWith("openai:")) {
+    return modelName.slice("openai:".length);
+  }
   if (protocol === "google" && modelName.startsWith("gemini:")) {
     return modelName.slice("gemini:".length);
   }
   return modelName;
+}
+
+function isOpenAIProtocol(protocol: ModelProtocol): boolean {
+  return protocol === "openai-chat" || protocol === "openai-responses";
 }
 
 type PiTextGeneratorOptions =
@@ -3178,6 +3185,10 @@ function resolveConstructorModelRoles(options?: PiTextGeneratorOptions): ModelRo
 }
 
 function resolvePiProvider(config: ModelRoleConfig): string {
+  if (isOpenAIProtocol(config.protocol)) {
+    return "openai";
+  }
+
   return config.protocol;
 }
 
@@ -3273,10 +3284,23 @@ type PiHostParallelGenerationResult = {
 const PI_PROVIDER_ENV_API_KEYS = {
   anthropic: "ANTHROPIC_API_KEY",
   google: "GOOGLE_API_KEY",
-  openai: "OPENAI_API_KEY",
+  "openai-chat": "OPENAI_API_KEY",
+  "openai-responses": "OPENAI_API_KEY",
 } as const satisfies Record<ModelProtocol, string>;
 
-const MODEL_NAME_PROVIDER_PREFIXES = new Set(["anthropic", "gemini", "google", "openai"]);
+const MODEL_NAME_PROVIDER_PREFIXES = new Set(["anthropic", "gemini", "google", "openai", "openai-chat", "openai-responses"]);
+
+function acceptedModelNameProviderPrefixes(protocol: ModelProtocol): Set<string> {
+  if (protocol === "google") {
+    return new Set(["google", "gemini"]);
+  }
+
+  if (isOpenAIProtocol(protocol)) {
+    return new Set(["openai", protocol]);
+  }
+
+  return new Set([protocol]);
+}
 
 function modelNameHasConflictingProviderPrefix(modelName: string, protocol: ModelProtocol): boolean {
   const [prefix, ...rest] = modelName.split(":");
@@ -3284,7 +3308,7 @@ function modelNameHasConflictingProviderPrefix(modelName: string, protocol: Mode
     return false;
   }
 
-  const acceptedPrefixes = protocol === "google" ? new Set(["google", "gemini"]) : new Set([protocol]);
+  const acceptedPrefixes = acceptedModelNameProviderPrefixes(protocol);
   return MODEL_NAME_PROVIDER_PREFIXES.has(prefix) && !acceptedPrefixes.has(prefix);
 }
 
@@ -3295,6 +3319,21 @@ function shouldAutoRegisterPiModel(config: ModelRoleConfig, modelName: string): 
 
 function resolvePiProviderApiKeyConfig(config: ModelRoleConfig): string {
   return config.apiKey ?? PI_PROVIDER_ENV_API_KEYS[config.protocol];
+}
+
+function resolvePiProviderApiConfig(
+  config: ModelRoleConfig,
+  providerDefault: ReturnType<ModelRegistry["getAll"]>[number] | undefined,
+): string | undefined {
+  if (config.protocol === "openai-chat") {
+    return "openai-completions";
+  }
+
+  if (config.protocol === "openai-responses") {
+    return "openai-responses";
+  }
+
+  return providerDefault?.api;
 }
 
 function createDynamicPiModelConfig(
@@ -3334,7 +3373,7 @@ function autoRegisterMissingPiModel(options: {
 
   const providerDefault = options.modelRegistry.getAll().find((candidate) => candidate.provider === options.provider);
   const baseUrl = options.config.baseURL ?? providerDefault?.baseUrl;
-  const api = providerDefault?.api;
+  const api = resolvePiProviderApiConfig(options.config, providerDefault);
 
   if (!baseUrl || !api) {
     return;

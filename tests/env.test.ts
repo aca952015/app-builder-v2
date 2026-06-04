@@ -126,7 +126,7 @@ test("resolveModelRoleConfigs falls back to global model, base URL, and API key"
 
   for (const role of ["plan", "generate", "repair"] as const) {
     assert.equal(configs[role].modelName, "openai:gpt-5.4-mini");
-    assert.equal(configs[role].protocol, "openai");
+    assert.equal(configs[role].protocol, "openai-responses");
     assert.equal(configs[role].baseURL, "https://proxy.example/v1");
     assert.equal(configs[role].userAgent, undefined);
     assert.equal(configs[role].maxInputTokens, undefined);
@@ -156,8 +156,20 @@ test("resolveModelRoleConfigs applies role-specific protocol overrides with glob
   });
 
   assert.equal(configs.plan.protocol, "anthropic");
-  assert.equal(configs.generate.protocol, "openai");
+  assert.equal(configs.generate.protocol, "openai-responses");
   assert.equal(configs.repair.protocol, "anthropic");
+});
+
+test("resolveModelRoleConfigs accepts explicit OpenAI chat and responses protocols", () => {
+  const configs = resolveModelRoleConfigs({
+    APP_BUILDER_API_KEY: "global-key",
+    APP_BUILDER_PROTOCOL: "openai-responses",
+    APP_BUILDER_GENERATE_PROTOCOL: "openai-chat",
+  });
+
+  assert.equal(configs.plan.protocol, "openai-responses");
+  assert.equal(configs.generate.protocol, "openai-chat");
+  assert.equal(configs.repair.protocol, "openai-responses");
 });
 
 test("resolveModelRoleConfigs supports google protocol with GOOGLE_API_KEY precedence", () => {
@@ -305,7 +317,7 @@ test("createPiModelRegistry auto-registers missing OpenAI protocol models", () =
 
     const { modelRegistry } = createPiModelRegistry({
       role: "generate",
-      protocol: "openai",
+      protocol: "openai-responses",
       modelName: "openai:gateway-coder",
       baseURL: "https://proxy.example/v1",
       apiKey: "openai-proxy-key",
@@ -316,6 +328,37 @@ test("createPiModelRegistry auto-registers missing OpenAI protocol models", () =
 
     assert.ok(model);
     assert.equal(model.api, "openai-responses");
+    assert.equal(model.baseUrl, "https://proxy.example/v1");
+    assert.equal(model.contextWindow, 262144);
+    assert.equal(model.maxTokens, 32768);
+  } finally {
+    if (previousModelsJsonPath === undefined) {
+      delete process.env[PI_MODELS_JSON_ENV];
+    } else {
+      process.env[PI_MODELS_JSON_ENV] = previousModelsJsonPath;
+    }
+  }
+});
+
+test("createPiModelRegistry auto-registers missing OpenAI chat protocol models", () => {
+  const previousModelsJsonPath = process.env[PI_MODELS_JSON_ENV];
+
+  try {
+    delete process.env[PI_MODELS_JSON_ENV];
+
+    const { modelRegistry } = createPiModelRegistry({
+      role: "generate",
+      protocol: "openai-chat",
+      modelName: "openai:gateway-chat-coder",
+      baseURL: "https://proxy.example/v1",
+      apiKey: "openai-proxy-key",
+      maxInputTokens: 262144,
+      maxTokens: 32768,
+    });
+    const model = modelRegistry.find("openai", "gateway-chat-coder");
+
+    assert.ok(model);
+    assert.equal(model.api, "openai-completions");
     assert.equal(model.baseUrl, "https://proxy.example/v1");
     assert.equal(model.contextWindow, 262144);
     assert.equal(model.maxTokens, 32768);
@@ -384,7 +427,7 @@ test("resolveModelRoleConfigs rejects invalid protocol values", () => {
         APP_BUILDER_API_KEY: "global-key",
         APP_BUILDER_PLAN_PROTOCOL: "claude",
       }),
-    /APP_BUILDER_PLAN_PROTOCOL must be one of: openai, anthropic, google/,
+    /APP_BUILDER_PLAN_PROTOCOL must be one of: openai-chat, openai-responses, anthropic, google\. The aliases openai -> openai-responses and gemini -> google are also accepted\./,
   );
 });
 
@@ -512,13 +555,13 @@ test("resolveModelRoleConfigs defaults model names when only a global key is pre
   });
 
   assert.equal(configs.plan.modelName, DEFAULT_MODEL_NAME);
-  assert.equal(configs.plan.protocol, "openai");
+  assert.equal(configs.plan.protocol, "openai-responses");
   assert.equal(configs.plan.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
   assert.equal(configs.generate.modelName, DEFAULT_MODEL_NAME);
-  assert.equal(configs.generate.protocol, "openai");
+  assert.equal(configs.generate.protocol, "openai-responses");
   assert.equal(configs.generate.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
   assert.equal(configs.repair.modelName, DEFAULT_MODEL_NAME);
-  assert.equal(configs.repair.protocol, "openai");
+  assert.equal(configs.repair.protocol, "openai-responses");
   assert.equal(configs.repair.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
 });
 
@@ -548,7 +591,7 @@ test("resolveModelRoleConfigs applies role-specific model, base URL, and API key
   assert.equal(configs.generate.modelName, "openai:generate-model");
   assert.equal(configs.repair.modelName, "openai:repair-model");
   assert.equal(configs.plan.protocol, "anthropic");
-  assert.equal(configs.generate.protocol, "openai");
+  assert.equal(configs.generate.protocol, "openai-responses");
   assert.equal(configs.repair.protocol, "anthropic");
   assert.equal(configs.plan.baseURL, "https://plan.example/v1");
   assert.equal(configs.generate.baseURL, "https://generate.example/v1");
@@ -671,7 +714,7 @@ test("resolveModelRoleConfigs can merge persisted model metadata with current se
         repair: {
           role: "repair",
           modelName: "openai:persisted-repair",
-          protocol: "openai",
+          protocol: "openai-responses",
         },
       },
     },
@@ -683,11 +726,11 @@ test("resolveModelRoleConfigs can merge persisted model metadata with current se
   assert.equal(configs.plan.maxInputTokens, 131072);
   assert.equal(configs.plan.maxTokens, 24576);
   assert.equal(configs.generate.modelName, "openai:legacy-model");
-  assert.equal(configs.generate.protocol, "openai");
+  assert.equal(configs.generate.protocol, "openai-responses");
   assert.equal(configs.generate.maxInputTokens, undefined);
   assert.equal(configs.generate.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
   assert.equal(configs.repair.modelName, "openai:persisted-repair");
-  assert.equal(configs.repair.protocol, "openai");
+  assert.equal(configs.repair.protocol, "openai-responses");
   assert.equal(configs.repair.maxTokens, DEFAULT_MODEL_MAX_TOKENS);
   assert.equal(configs.repair.apiKey, "runtime-key");
 });

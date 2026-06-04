@@ -42,6 +42,7 @@ import {
   filterRedundantValidationDetailLines,
   generateApplication,
   materializeRuntimeEnv,
+  resolveExternalReferenceConcurrency,
   resolveSpawnCommand,
   validateSessionPhase,
 } from "../src/lib/generator.js";
@@ -1507,6 +1508,16 @@ test("buildPiParallelGenerationTaskItems allows explicit per-role parallelism", 
   assert.equal(resolveGenerateSubagentParallelism(""), 3);
   assert.equal(resolveGenerateSubagentParallelism("2"), 2);
   assert.throws(() => resolveGenerateSubagentParallelism("0"), /APP_BUILDER_GENERATE_SUBAGENT_PARALLELISM/);
+});
+
+test("resolveExternalReferenceConcurrency defaults to 8 and accepts positive integer overrides", () => {
+  assert.equal(resolveExternalReferenceConcurrency(undefined), 8);
+  assert.equal(resolveExternalReferenceConcurrency(""), 8);
+  assert.equal(resolveExternalReferenceConcurrency(" 2 "), 2);
+  assert.equal(resolveExternalReferenceConcurrency(1), 1);
+  assert.throws(() => resolveExternalReferenceConcurrency("0"), /APP_BUILDER_EXTERNAL_REFERENCE_CONCURRENCY/);
+  assert.throws(() => resolveExternalReferenceConcurrency("1.5"), /APP_BUILDER_EXTERNAL_REFERENCE_CONCURRENCY/);
+  assert.throws(() => resolveExternalReferenceConcurrency("many"), /APP_BUILDER_EXTERNAL_REFERENCE_CONCURRENCY/);
 });
 
 test("buildPiHostParallelGenerationBoardState switches visible phase before subagents start", () => {
@@ -7822,6 +7833,7 @@ test("generateApplication persists sanitized role model metadata", async () => {
     "APP_BUILDER_PLAN_API_KEY",
     "APP_BUILDER_GENERATE_API_KEY",
     "APP_BUILDER_REPAIR_API_KEY",
+    "APP_BUILDER_EXTERNAL_REFERENCE_CONCURRENCY",
   ] as const;
   const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
 
@@ -7898,7 +7910,7 @@ test("generateApplication persists sanitized role model metadata", async () => {
     assert.equal(config.models?.generate?.modelName, "openai:generate-model");
     assert.equal(config.models?.repair?.modelName, "openai:repair-model");
     assert.equal(config.models?.plan?.protocol, "anthropic");
-    assert.equal(config.models?.generate?.protocol, "openai");
+    assert.equal(config.models?.generate?.protocol, "openai-responses");
     assert.equal(config.models?.repair?.protocol, "anthropic");
     assert.equal(config.models?.plan?.baseURL, "https://plan.example/v1");
     assert.equal(config.models?.generate?.baseURL, "https://generate.example/v1");

@@ -141,7 +141,7 @@ Environment:
   APP_BUILDER_API_KEY Required unless role-specific API keys or a custom generator are used
   APP_BUILDER_BASE_URL Optional API base URL fallback for all model roles
   APP_BUILDER_USER_AGENT Optional truthful User-Agent header fallback for all model roles
-  APP_BUILDER_PROTOCOL Optional model protocol fallback for all roles: openai, anthropic, or google
+  APP_BUILDER_PROTOCOL Optional model protocol fallback for all roles: openai-chat, openai-responses, anthropic, or google; openai is accepted as openai-responses
   APP_BUILDER_MAX_INPUT_TOKENS Optional input/context window token budget fallback for all model roles
   APP_BUILDER_MAX_TOKENS Optional output token cap fallback for all model roles
   APP_BUILDER_MODEL Optional model fallback for all roles
@@ -153,6 +153,7 @@ Environment:
   APP_BUILDER_PLAN_MAX_INPUT_TOKENS / APP_BUILDER_GENERATE_MAX_INPUT_TOKENS / APP_BUILDER_REPAIR_MAX_INPUT_TOKENS Optional role input/context window token budgets
   APP_BUILDER_PLAN_MAX_TOKENS / APP_BUILDER_GENERATE_MAX_TOKENS / APP_BUILDER_REPAIR_MAX_TOKENS Optional role output token caps
   APP_BUILDER_PLAN_API_KEY / APP_BUILDER_GENERATE_API_KEY / APP_BUILDER_REPAIR_API_KEY Optional role API keys
+  APP_BUILDER_EXTERNAL_REFERENCE_CONCURRENCY Optional external reference download/conversion concurrency, default 8
   APP_BUILDER_GENERATE_SUBAGENT_PARALLELISM Optional host-run generation subagent instances per role, default 3
   APP_BUILDER_STDOUT  Optional TTY stdout renderer override: dashboard or log
 `;
