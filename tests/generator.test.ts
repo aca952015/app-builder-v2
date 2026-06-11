@@ -7520,7 +7520,7 @@ test("AdminPanel design defines selected sidebar menu styling", async () => {
 });
 
 test("template prompts delegate shell validation to the host", async () => {
-  for (const templateId of ["mini-app", "full-stack"] as const) {
+  for (const templateId of ["mini-app", "full-stack", "data-dashboard"] as const) {
     const template = await loadTemplatePack(templateId);
     const promptPaths = [
       template.planPromptPath,
@@ -7540,7 +7540,7 @@ test("template prompts delegate shell validation to the host", async () => {
 });
 
 test("template generation prompts encourage bounded parallel subagents", async () => {
-  for (const templateId of ["mini-app", "full-stack"] as const) {
+  for (const templateId of ["mini-app", "full-stack", "data-dashboard"] as const) {
     const template = await loadTemplatePack(templateId);
     const promptPaths = [template.generatePromptPath, template.generateRepairPromptPath];
 
@@ -7559,7 +7559,7 @@ test("template generation prompts encourage bounded parallel subagents", async (
 });
 
 test("template prompts guard next.config.ts edits behind PRD-backed project config declarations", async () => {
-  for (const templateId of ["mini-app", "full-stack"] as const) {
+  for (const templateId of ["mini-app", "full-stack", "data-dashboard"] as const) {
     const template = await loadTemplatePack(templateId);
     const planPrompts = [template.planPromptPath, template.planRepairPromptPath];
     const generationPrompts = [template.generatePromptPath, template.generateRepairPromptPath];
@@ -7628,6 +7628,115 @@ test("mini-app template enables interactive runtime validation", async () => {
   assert.match(nextConfig, /allowedDevOrigins:\s*\["127\.0\.0\.1", "localhost"\]/);
   assert.match(nextConfig, /turbopack:\s*\{/);
   assert.match(nextConfig, /root:\s*path\.resolve\(process\.cwd\(\)\)/);
+});
+
+test("data-dashboard template loads frontend-only ECharts dashboard contract", async () => {
+  const template = await loadTemplatePack("data-dashboard");
+  const referencesDirectory = template.referencesDirectory ?? assert.fail("data-dashboard references directory missing");
+  const starterDirectory = template.starterDirectory ?? assert.fail("data-dashboard starter directory missing");
+  const planPrompt = await readFile(template.planPromptPath, "utf8");
+  const planRepairPrompt = await readFile(template.planRepairPromptPath, "utf8");
+  const generatePrompt = await readFile(template.generatePromptPath, "utf8");
+  const generateRepairPrompt = await readFile(template.generateRepairPromptPath, "utf8");
+  const architectureReference = await readFile(
+    path.join(referencesDirectory, "generated-app-architecture.md"),
+    "utf8",
+  );
+  const designReference = await readFile(
+    path.join(referencesDirectory, "dashboard-design-system.md"),
+    "utf8",
+  );
+  const packageJson = JSON.parse(
+    await readFile(path.join(starterDirectory, "package.json"), "utf8"),
+  ) as {
+    scripts: Record<string, string>;
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const chartPanelSource = await readFile(
+    path.join(starterDirectory, "components/dashboard/ChartPanel.tsx"),
+    "utf8",
+  );
+  const dashboardShellSource = await readFile(
+    path.join(starterDirectory, "components/dashboard/DashboardShell.tsx"),
+    "utf8",
+  );
+  const chartThemeSource = await readFile(path.join(starterDirectory, "lib/chart-theme.ts"), "utf8");
+
+  assert.equal(template.id, "data-dashboard");
+  assert.equal(template.name, "Data Dashboard");
+  assert.equal(template.version, "1.0.0");
+  assert.equal(template.projectRenderer, "data-dashboard");
+  assert.equal(template.phases.plan.effort, "max");
+  assert.equal(template.phases.planRepair.effort, "max");
+  assert.equal(template.phases.generate.effort, "max");
+  assert.equal(template.phases.generateRepair.effort, "max");
+  assert.equal(starterDirectory, path.join(process.cwd(), "templates/data-dashboard/starter"));
+  assert.equal(referencesDirectory, path.join(process.cwd(), "templates/data-dashboard/references"));
+  assert.equal(template.skillsDirectory, undefined);
+  assert.deepEqual(template.environmentPolicy.lockedKeys, ["NEXT_PUBLIC_APP_NAME"]);
+  assert.deepEqual(template.projectConfigPolicy.guardedFiles, ["next.config.ts"]);
+
+  assert.equal(template.runtimeValidation.copyEnvExample, true);
+  assert.deepEqual(
+    template.runtimeValidation.steps.map((step) => step.name),
+    ["pnpm install", "pnpm typecheck", "pnpm dev"],
+  );
+  assert.equal(template.runtimeValidation.steps.some((step) => step.args.includes("db:init")), false);
+  assert.equal(template.interactiveRuntimeValidation.enabled, true);
+  assert.equal(template.interactiveRuntimeValidation.coverageThreshold, 0.8);
+  assert.equal(template.interactiveRuntimeValidation.idleTimeoutMs, 10_000);
+  assert.equal(template.interactiveRuntimeValidation.readyTimeoutMs, 90_000);
+  assert.equal(template.interactiveRuntimeValidation.devServerStep?.name, "pnpm dev");
+
+  assert.match(packageJson.dependencies?.echarts ?? "", /^\^6\.1\.0$/);
+  assert.equal(packageJson.dependencies?.["@tailwindcss/postcss"], undefined);
+  assert.equal(packageJson.devDependencies?.["@tailwindcss/postcss"], "4.2.2");
+  assert.equal(packageJson.dependencies?.["@prisma/client"], undefined);
+  assert.equal(packageJson.devDependencies?.prisma, undefined);
+  assert.equal(Object.keys(packageJson.scripts).some((scriptName) => scriptName.startsWith("db:")), false);
+  assert.equal(packageJson.scripts.typecheck, "tsc --noEmit");
+  assert.doesNotMatch(chartThemeSource, /from\s+["']@\/data\/mock-dashboard["']/);
+  assert.match(chartThemeSource, /buildTrafficTrendOption\(trafficTrendData: TrafficTrendPoint\[\]\)/);
+  assert.match(dashboardShellSource, /buildTrafficTrendOption\(trafficTrend\)/);
+  assert.match(chartPanelSource, /export type ChartPanelStatus = "live" \| "loading" \| "empty" \| "error"/);
+  assert.match(chartPanelSource, /statusMessage\?: string/);
+  assert.match(chartPanelSource, /stateContent\?: ReactNode/);
+
+  await access(path.join(starterDirectory, "components/dashboard/EChartsPanel.tsx"));
+  await access(path.join(starterDirectory, "data/mock-dashboard.ts"));
+  await access(path.join(starterDirectory, "lib/chart-theme.ts"));
+  await assert.rejects(
+    () => access(path.join(starterDirectory, "prisma/schema.prisma")),
+    /ENOENT/,
+  );
+
+  assert.match(planPrompt, /KPI cards/);
+  assert.match(planPrompt, /chart panels/);
+  assert.match(planPrompt, /refresh cadence/);
+  assert.match(planPrompt, /mock vs external data source assumptions/);
+  assert.match(planPrompt, /responsive\/fullscreen constraints/);
+  assert.match(planPrompt, /empty\/loading\/error states/);
+  assert.match(planPrompt, /不默认引入数据库、Prisma、认证、后台 CRUD/);
+  assert.match(planRepairPrompt, /screen objective and audience/);
+  assert.match(planRepairPrompt, /mock\/config 数据/);
+  assert.match(generatePrompt, /EChartsPanel/);
+  assert.match(generatePrompt, /lib\/chart-theme\.ts/);
+  assert.match(generatePrompt, /deterministic mock\/config data/);
+  assert.match(generatePrompt, /Math\.random\(\)/);
+  assert.match(generatePrompt, /full-screen data dashboard UI first/);
+  assert.match(generatePrompt, /data-parameterized `lib\/chart-theme\.ts`/);
+  assert.match(generatePrompt, /ChartPanel.*status.*stateContent/s);
+  assert.match(generateRepairPrompt, /SSR\/client component failure/);
+  assert.match(generateRepairPrompt, /ECharts option type errors/);
+  assert.match(generateRepairPrompt, /window.*document|document.*DOM/s);
+  assert.match(generateRepairPrompt, /option builder 应接收数据参数/);
+  assert.match(architectureReference, /frontend-first/);
+  assert.match(architectureReference, /Data-parameterized ECharts option builders/);
+  assert.match(architectureReference, /Do not introduce a database layer, Prisma, authentication, or backend route handlers unless `planSpec` explicitly requires them/);
+  assert.match(architectureReference, /EChartsPanel\.tsx/);
+  assert.match(designReference, /Dark navy\/black background/);
+  assert.match(designReference, /ChartPanel` status props\/slots/);
 });
 
 test("loadTemplatePack parses enabled interactive runtime validation defaults", async () => {

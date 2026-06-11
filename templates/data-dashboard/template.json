@@ -1,0 +1,68 @@
+{
+  "id": "data-dashboard",
+  "name": "Data Dashboard",
+  "version": "1.0.0",
+  "description": "A frontend-first Next.js + ECharts template pack for generating full-screen data dashboards.",
+  "projectRenderer": "data-dashboard",
+  "repairRetries": {
+    "plan": 10,
+    "generate": 10
+  },
+  "environmentPolicy": {
+    "lockedKeys": [
+      "NEXT_PUBLIC_APP_NAME"
+    ]
+  },
+  "projectConfigPolicy": {
+    "guardedFiles": [
+      "next.config.ts"
+    ]
+  },
+  "phases": {
+    "plan": {
+      "prompt": "prompts/plan-system-prompt.md",
+      "effort": "max"
+    },
+    "planRepair": {
+      "prompt": "prompts/plan-repair-system-prompt.md",
+      "effort": "max"
+    },
+    "generate": {
+      "prompt": "prompts/generate-system-prompt.md",
+      "effort": "max"
+    },
+    "generateRepair": {
+      "prompt": "prompts/generate-repair-system-prompt.md",
+      "effort": "max"
+    }
+  },
+  "referencesDir": "references",
+  "starterDir": "starter",
+  "runtimeValidation": {
+    "copyEnvExample": true,
+    "steps": [
+      {
+        "name": "pnpm install",
+        "command": "pnpm",
+        "args": ["install"]
+      },
+      {
+        "name": "pnpm typecheck",
+        "command": "pnpm",
+        "args": ["typecheck"]
+      },
+      {
+        "name": "pnpm dev",
+        "command": "pnpm",
+        "args": ["dev"],
+        "kind": "dev-server"
+      }
+    ]
+  },
+  "interactiveRuntimeValidation": {
+    "enabled": true,
+    "coverageThreshold": 0.8,
+    "idleTimeoutMs": 10000,
+    "readyTimeoutMs": 90000
+  }
+}

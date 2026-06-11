@@ -11,6 +11,7 @@ pnpm install
 pnpm build
 node dist/src/index.js generate ./spec.md --template full-stack
 node dist/src/index.js generate ./spec.md --template mini-app --design ./designs/Spotify.md
+node dist/src/index.js generate ./spec.md --template data-dashboard
 node dist/src/index.js generate ./spec.md --generation-requirements "菜单需要固定侧边栏，内容区独立滚动。"
 ```
 
@@ -115,7 +116,8 @@ Each run creates a session directory under `.out/<sessionId>/`. Pi Agent writes 
 - Template-selected application scaffold
 - `Prisma` schema with email/password auth user model for the `full-stack` template
 - Dashboard, settings, login, and per-entity CRUD pages for the `full-stack` template
-- Seed data and `.env.example`
+- Frontend-only ECharts command-center dashboards for the `data-dashboard` template
+- Seed/demo data and `.env.example`
 - Generation report with defaults and warnings
 - A copied `.workspace/` template context plus `template-lock.json`
 - Visible generation artifacts such as `.workspace/source-prd.md`, `.workspace/prd-analysis.md`, `.workspace/generated-spec.md`, `.workspace/plan-spec.json`, `.workspace/plan-validation.json`, and `.workspace/error.log`
@@ -129,6 +131,12 @@ Template packs live under `templates/<templateId>/` and currently include:
 - `references/`: architecture and design references copied into the output workspace
 - `skills/`: optional template-scoped skills
 - `starter/`: optional template-scoped starter files
+
+Available built-in templates:
+
+- `full-stack`: Next.js + Prisma + SQLite full-stack application shell; this remains the default template.
+- `mini-app`: lightweight Next.js app shell with optional REST-style endpoints.
+- `data-dashboard`: frontend-first ECharts data dashboard for KPI walls, command centers, monitoring boards, and large-screen visualizations; external APIs or persistence are only introduced when the PRD explicitly requires them.
 
 ## Validation
 
